@@ -57,6 +57,9 @@ function buildCombinedEmailHTML(data, insights, now, fromDate) {
       '</td></tr>';
   }
 
+  // ── 오늘의 하이라이트 (전 영역 중요도 '상' 다이제스트) ──
+  h += buildHighlights(data, now);
+
   // ── 도메인 섹션 3개 ──
   DOMAINS.forEach(function(domain, idx) {
     h += buildDomainSection(domain, idx, data[domain.key], insights[domain.key], now);
@@ -71,6 +74,42 @@ function buildCombinedEmailHTML(data, insights, now, fromDate) {
 
   h += '</table></td></tr></table></body></html>';
   return h;
+}
+
+/**
+ * 오늘의 하이라이트: 전 영역 중요도 '상' 항목을 상단에 모아 한눈에.
+ * 스크롤 없이 핵심 파악 → 본문 길이 부담 완화.
+ */
+function buildHighlights(data, now) {
+  var highs = [];
+  DOMAINS.forEach(function(domain) {
+    domain.units.forEach(function(u) {
+      (data[domain.key][u.key] || []).forEach(function(it) {
+        if (it.importance === '상') highs.push({ domain: domain, unit: u, it: it });
+      });
+    });
+  });
+  if (highs.length === 0) return '';
+
+  var MAX = 6;
+  var rows = highs.slice(0, MAX).map(function(hl) {
+    var link = getItemLink(hl.it);
+    var title = (link && link.isOriginal)
+      ? '<a href="' + esc(link.url) + '" target="_blank" style="color:#15418c;text-decoration:underline;font-weight:bold;">' + esc(hl.it.title) + '</a><span style="font-size:11px;color:#8a98a8;">&nbsp;&#8599;</span>'
+      : '<b style="color:#1a2a4a;">' + esc(hl.it.title) + '</b>';
+    var tag = hl.it.gubun || hl.it.issuingCountry || hl.unit.label;
+    return '<div style="margin-top:7px;font-size:13px;line-height:1.6;">' +
+      '<span style="display:inline-block;padding:1px 7px;font-size:11px;font-weight:bold;color:#ffffff;' +
+      'background-color:' + hl.domain.palette.chip + ';border-radius:3px;white-space:nowrap;">' +
+      esc(hl.domain.label) + '</span>&nbsp; ' + title +
+      '<span style="font-size:11px;color:#9aa7b4;">&nbsp; · ' + esc(tag) +
+      (hl.it.announcedDate ? ' · ' + esc(hl.it.announcedDate) : '') + '</span></div>';
+  }).join('');
+
+  return '<tr><td style="padding:16px 28px 18px;background-color:#fff8f8;border-top:3px solid #c62828;border-bottom:1px solid #f0d8d8;">' +
+    '<div style="font-size:13px;font-weight:bold;color:#c62828;font-family:' + FONT_STACK + ';">오늘의 하이라이트 · 중요도 상 ' +
+    highs.length + '건' + (highs.length > MAX ? ' (상위 ' + MAX + '건 표시)' : '') + '</div>' +
+    rows + '</td></tr>';
 }
 
 /** 도메인 1개 섹션 (PART 대배너 + 총평 + 카테고리별). idx=0,1,2 */
@@ -106,9 +145,11 @@ function buildDomainSection(domain, idx, domainData, domainInsight, now) {
       '</td></tr>';
   }
 
-  // 카테고리(unit) 섹션 — 영역 색의 연한 톤 바 + 왼쪽 컬러 라인 (대배너에 종속된 느낌)
+  // 카테고리(unit) 섹션 — 항목 있는 것만 표시. 빈 카테고리는 하단 한 줄로 묶어 길이 절약.
+  var emptyUnits = [];
   domain.units.forEach(function(u) {
     var items = domainData[u.key] || [];
+    if (items.length === 0) { emptyUnits.push(u.label); return; }
     var hiCnt = items.filter(function(x) { return x.importance === '상'; }).length;
 
     h += '<tr><td style="padding:9px 28px 9px 24px;background-color:' + pal.catBg + ';border-left:4px solid ' + pal.catBorder + ';">' +
@@ -126,16 +167,19 @@ function buildDomainSection(domain, idx, domainData, domainInsight, now) {
         'font-size:12px;color:#4a5a6a;line-height:1.7;"><b style="color:' + pal.catText + ';">분석</b> &nbsp;' + esc(ci) + '</td></tr>';
     }
 
-    if (items.length === 0) {
-      h += '<tr><td style="padding:10px 28px 12px;font-size:12px;color:#9aa7b4;font-style:italic;' +
-        'border-bottom:1px solid #eef1f5;">해당 수집 기간 내 확인된 동향이 없습니다.</td></tr>';
-      return;
-    }
-
     h += '<tr><td style="padding:4px 20px 14px;">';
     sortByImportance(items).forEach(function(it) { h += buildItemCard(it, domain, u, now); });
     h += '</td></tr>';
   });
+
+  // 동향 없는 카테고리 묶음 (또는 영역 전체 무동향)
+  if (emptyUnits.length > 0) {
+    var msg = (dt === 0)
+      ? '해당 수집 기간 내 확인된 ' + esc(domain.label) + ' 동향이 없습니다.'
+      : '동향 없음 · ' + emptyUnits.map(esc).join(', ');
+    h += '<tr><td style="padding:9px 28px;font-size:11px;color:#9aa7b4;font-style:italic;' +
+      'border-bottom:1px solid #eef1f5;">' + msg + '</td></tr>';
+  }
 
   return h;
 }
