@@ -174,6 +174,13 @@ var DOMAIN_CUSTOMS = {
       '[모니터링 항목]\n' +
       '관세율 변경 / HS code 개정 / 통관절차 변경 / FTA 체결·발효·개정·협상 / ' +
       '관세 감면·유예제도 변경 / 수출입 허가·등록제 도입·변경 / 기술인증·검역 규정 강화\n\n' +
+      '[영역 경계 - 중복 금지: 아래는 별도 영역에서 다루므로 절대 포함하지 말 것]\n' +
+      '- 무역구제 조치(반덤핑 AD·세이프가드 SG·상계관세/보조금 CVD)의 조사 개시·예비/최종 판정·' +
+      '관세 부과·연례/일몰 재심 → 제외. (이로 인한 관세율 변동도 무역구제 영역 소관이므로 제외)\n' +
+      '- 수출통제·제재(전략물자·이중용도 수출통제, 경제제재 sanctions, Entity List/SDN, ' +
+      'EAR/ITAR, 수출 허가·캐치올, 무역안보) → 제외.\n' +
+      '- 본 영역은 "일반 관세율·품목분류(HS)·FTA/원산지·과세가격·통관절차" 및 ' +
+      '안보 목적이 아닌 일반 수입 인허가·기술인증·검역에 한정한다.\n\n' +
       '[정확성 규칙 - 최우선]\n' +
       '- 정부기관 공식 발표, 관보 게재, 공신력 있는 주요 언론 보도만 포함.\n' +
       '- 루머, 추측성 기사, 발효 전 단순 입법예고, SNS, 교차확인 불가 항목 금지.\n' +
@@ -270,6 +277,11 @@ var DOMAIN_EXPORT = {
     return 'You are an expert analyst of global export control regulations.\n' +
       'Current Korean time: ' + ctx.toStr + ' (KST).\n\n' +
       (EXPORT_ISSUER[unit.key] || '') + '\n\n' +
+      '## Scope boundary (avoid overlap with sibling briefs): Include ONLY security/strategic ' +
+      'export controls & sanctions (전략물자·이중용도 통제, 제재, Entity List/SDN, EAR/ITAR, ' +
+      '수출 허가·캐치올). EXCLUDE ordinary tariff-rate/HS/FTA/customs-valuation/clearance changes ' +
+      '(→ Customs brief) AND anti-dumping/safeguard/countervailing (CVD) trade-remedy actions ' +
+      '(→ Trade-Remedy brief).\n\n' +
       '## Recency (CRITICAL): TODAY is ' + ctx.toISO + ' (KST). Include ONLY items whose ORIGINAL ' +
       'publication date is ON OR AFTER ' + ctx.fromISO + ' (KST). published_date = ORIGINAL first ' +
       'publication date (NOT amendment effective date / re-publication / last-updated). ' +
@@ -339,7 +351,10 @@ var DOMAIN_TRADE = {
       '[과제] "' + unit.key + '(' + engCat + ')" 분야 신규 동향을 수집하여 JSON 배열로만 응답.\n\n' +
       '[PRIORITY] Initiation, Preliminary/Final Determination, Annual/Sunset Review, ' +
       'Tariff Rate Change, Extension/Termination, HS Code\n\n' +
-      '[EXCLUSIONS] 농수산물(HS 01–24), 축산·임산·수산물, 무역정책과 무관한 일반 뉴스, 발표일 식별 불가 항목.\n\n' +
+      '[EXCLUSIONS] 농수산물(HS 01–24), 축산·임산·수산물, 무역정책과 무관한 일반 뉴스, 발표일 식별 불가 항목.\n' +
+      '[영역 경계 - 중복 금지] 일반 관세율 개편·HS 개정·FTA/원산지·과세가격·통관(→ 관세 영역), ' +
+      '전략물자·경제제재·수출통제·Entity List(→ 수출통제 영역)는 제외. ' +
+      '오직 반덤핑(AD)·세이프가드(SG)·상계관세/보조금(CVD) 조사·판정·조치만 수집한다.\n\n' +
       '[중요도] 상: 관세율·HS 등 실제 관세율 변동 직접 영향 | 중: 비즈니스 영향 | 하: 참고 동향.\n\n' +
       '[발표일 정의 엄수] announcedDate = 사안이 세상에 "처음 나온 날"(최초 게시/공표). ' +
       '시행일·재게시·요약기사·후속 인용 기사 날짜 금지. 최초 발표가 컷오프 이전이면 제외. ' +

@@ -132,6 +132,44 @@ function dedupeDomain(domainData, historyTitles) {
   if (removed > 0) Logger.log('[중복] ' + removed + '건 제거');
 }
 
+/**
+ * 교차 영역 중복 제거 (안전망): 프롬프트 경계를 넘어 같은 사안이 두 영역에
+ * 동시에 잡히는 경우 대비. 수출통제·무역구제(전문 영역)에 잡힌 제목과 겹치는
+ * 항목을 관세(일반 버킷)에서 제거한다 → "관세는 다른 두 영역과 중첩 금지".
+ */
+function removeCrossDomainOverlap(data) {
+  var specialized = [];
+  ['export', 'trade'].forEach(function(dk) {
+    var domain = domainByKey(dk);
+    domain.units.forEach(function(u) {
+      (data[dk][u.key] || []).forEach(function(it) {
+        var n = normalizeTitle(it.title);
+        if (n) specialized.push(n);
+      });
+    });
+  });
+  if (specialized.length === 0) return;
+
+  var removed = 0;
+  var customs = domainByKey('customs');
+  customs.units.forEach(function(u) {
+    var kept = [];
+    (data.customs[u.key] || []).forEach(function(it) {
+      var n = normalizeTitle(it.title);
+      var dup = false;
+      if (n) {
+        for (var i = 0; i < specialized.length; i++) {
+          if (specialized[i] === n || diceSimilarity(specialized[i], n) >= DEDUPE_SIMILARITY) { dup = true; break; }
+        }
+      }
+      if (dup) { removed++; Logger.log('[교차중복] 관세에서 제거(수출통제/무역구제 우선): ' + it.title); }
+      else kept.push(it);
+    });
+    data.customs[u.key] = kept;
+  });
+  if (removed > 0) Logger.log('[교차중복] 관세 ' + removed + '건 제거');
+}
+
 /** 발송인 명단 → [{name,email}] (B열 이메일, E열 발송여부: 비었거나 Y면 발송) */
 function getRecipients() {
   var out = [];

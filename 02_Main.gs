@@ -79,6 +79,9 @@ function runMonitoringCore(opts) {
     dedupeDomain(data[domain.key], history);
   });
 
+  // 3-1. 교차 영역 중복 제거 (안전망): 관세 ∩ (수출통제·무역구제) → 관세에서 제거
+  removeCrossDomainOverlap(data);
+
   // 4. 원문 URL 확보 (grounding → 모델 URL 검증 → 뉴스 RSS → 검색 링크 폴백)
   findSourceUrls(data, startMs);
 
