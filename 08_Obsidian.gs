@@ -1,0 +1,114 @@
+// ============================================================
+//  옵시디안(Obsidian) 저장 — Google Drive 폴더에 통합 마크다운 1개
+//  저장 폴더 우선순위: 스크립트 속성 OBSIDIAN_FOLDER_ID > 폴더명 OBSIDIAN_FOLDER
+//  미설정 시에도 폴더명으로 검색/생성하여 저장 (저장 자체를 건너뛰지 않음)
+// ============================================================
+
+/** Drive 폴더 URL/ID 문자열 → 순수 폴더 ID. 식별 불가 시 빈 문자열. */
+function extractDriveFolderId(input) {
+  var s = (input || '').toString().trim();
+  if (!s) return '';
+  var m = s.match(/\/folders\/([a-zA-Z0-9_-]+)/) || s.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (m) return m[1];
+  if (/^[a-zA-Z0-9_-]{20,}$/.test(s)) return s;
+  return '';
+}
+
+/** 옵시디안 저장 폴더 반환 (ID 우선, 없으면 폴더명 검색/생성) */
+function getObsidianFolder() {
+  var id = '';
+  try { id = (PropertiesService.getScriptProperties().getProperty(OBSIDIAN_FOLDER_ID_PROP) || '').trim(); }
+  catch (e) { /* 폴더명 폴백 */ }
+  if (id) {
+    try { return DriveApp.getFolderById(id); }
+    catch (e) { Logger.log('[옵시디안] 폴더 ID 접근 실패 → 폴더명 폴백: ' + e.message); }
+  }
+  var folders = DriveApp.getFoldersByName(OBSIDIAN_FOLDER);
+  return folders.hasNext() ? folders.next() : DriveApp.createFolder(OBSIDIAN_FOLDER);
+}
+
+/** 옵시디안 폴더 ID 지정 (1회 실행). Drive 폴더 URL 도 허용. */
+function setObsidianFolderId(folderIdOrUrl) {
+  var folderId = extractDriveFolderId(folderIdOrUrl);
+  if (!folderId) throw new Error('유효한 폴더 ID 를 찾을 수 없습니다: ' + folderIdOrUrl);
+  var folder = DriveApp.getFolderById(folderId);
+  PropertiesService.getScriptProperties().setProperty(OBSIDIAN_FOLDER_ID_PROP, folderId);
+  Logger.log('옵시디안 폴더 설정: "' + folder.getName() + '" (' + folderId + ')');
+  return folderId;
+}
+
+function showObsidianFolderId() {
+  var id = PropertiesService.getScriptProperties().getProperty(OBSIDIAN_FOLDER_ID_PROP);
+  if (!id) { Logger.log('[옵시디안] OBSIDIAN_FOLDER_ID 미설정 (폴더명 "' + OBSIDIAN_FOLDER + '" 사용)'); return; }
+  try { Logger.log('[옵시디안] 현재 폴더: "' + DriveApp.getFolderById(id).getName() + '" (' + id + ')'); }
+  catch (e) { Logger.log('[옵시디안] ID ' + id + ' 접근 불가: ' + e.message); }
+}
+
+function clearObsidianFolderId() {
+  PropertiesService.getScriptProperties().deleteProperty(OBSIDIAN_FOLDER_ID_PROP);
+  Logger.log('[옵시디안] 폴더 ID 해제 → 폴더명("' + OBSIDIAN_FOLDER + '") 방식 전환');
+}
+
+function saveToObsidian(data, insights, now, fromDate) {
+  try {
+    var folder = getObsidianFolder();
+    var dateStr = Utilities.formatDate(now, 'Asia/Seoul', 'yyyy-MM-dd');
+    var timeStr = Utilities.formatDate(now, 'Asia/Seoul', 'HH:mm');
+    var fromStr = Utilities.formatDate(fromDate, 'Asia/Seoul', 'yyyy-MM-dd HH:mm');
+    var fileName = dateStr + ' 글로벌 통상 동향.md';
+    var stats = computeStats(data, now);
+
+    var md = '';
+    md += '---\n';
+    md += 'title: 글로벌 통상 동향 ' + dateStr + '\n';
+    md += 'date: ' + dateStr + '\n';
+    md += 'tags: [통상동향, 관세, 수출통제, 무역구제, 자동수집]\n';
+    md += '수집범위: ' + fromStr + ' ~ ' + dateStr + ' ' + timeStr + ' KST\n';
+    md += '총건수: ' + stats.total + '\n';
+    md += '---\n\n';
+    md += '# 글로벌 통상 일일 모니터링 (' + dateStr + ')\n\n';
+    md += '> 수집 범위: ' + fromStr + ' ~ ' + dateStr + ' ' + timeStr + ' KST · 총 ' + stats.total + '건 (상 ' + stats.high + ')\n\n';
+    md += '관세 ' + stats.byDomain.customs.total + '건 · 수출통제 ' + stats.byDomain.export.total +
+      '건 · 무역구제 ' + stats.byDomain.trade.total + '건\n\n';
+
+    DOMAINS.forEach(function(domain) {
+      var di = insights[domain.key] || {};
+      md += '\n# [' + domain.label + '] ' + domain.obsidianTitle + '\n\n';
+      if (di.overall) md += '## 총평\n\n' + di.overall + '\n\n';
+
+      domain.units.forEach(function(u) {
+        var items = data[domain.key][u.key] || [];
+        md += '## ' + u.label + ' (' + items.length + '건)\n\n';
+        if (di.byCategory && di.byCategory[u.key]) md += '> ' + di.byCategory[u.key] + '\n\n';
+        if (items.length === 0) { md += '_해당 수집 기간 내 동향 없음_\n\n'; return; }
+
+        sortByImportance(items).forEach(function(it) {
+          md += '### [' + (it.importance || '-') + '] ' + (it.title || '') + '\n\n';
+          if (it.gubun) md += '- **구분**: ' + it.gubun + '\n';
+          md += '- **발표일**: ' + (it.announcedDate || '-') + '\n';
+          if ((it.effectiveDate || '').trim()) md += '- **시행일**: ' + it.effectiveDate + '\n';
+          if ((it.hsCode || '').trim()) md += '- **HS코드**: ' + it.hsCode + '\n';
+          if ((it.issuingCountry || '').trim()) md += '- **발표국가**: ' + it.issuingCountry + '\n';
+          if ((it.targetCountries || '').trim()) md += '- **대상/영향국**: ' + it.targetCountries + '\n';
+          if ((it.agency || '').trim()) md += '- **관련기관**: ' + it.agency + '\n';
+          if ((it.sourceName || '').trim()) md += '- **출처**: ' + it.sourceName + '\n';
+          md += '\n' + (it.summary || '') + '\n\n';
+          if ((it.notes || '').trim()) md += '> 비고: ' + it.notes + '\n\n';
+          var link = getItemLink(it);
+          if (link) {
+            md += '[' + (link.isOriginal ? '원문: ' + link.label : 'Google 검색') + '](' + link.url + ')';
+            if (it.sourceUrl2) md += ' · [' + (it.sourceDomain2 || '관련 출처') + '](' + it.sourceUrl2 + ')';
+            md += '\n\n';
+          }
+          md += '---\n\n';
+        });
+      });
+    });
+
+    var existing = folder.getFilesByName(fileName);
+    if (existing.hasNext()) { existing.next().setContent(md); Logger.log('옵시디안 갱신: ' + fileName); }
+    else { folder.createFile(fileName, md, MimeType.PLAIN_TEXT); Logger.log('옵시디안 생성: ' + fileName); }
+  } catch (e) {
+    Logger.log('[saveToObsidian] ' + e.message);
+  }
+}
