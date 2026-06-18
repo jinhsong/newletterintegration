@@ -24,21 +24,23 @@ function buildCombinedEmailHTML(data, insights, now, fromDate) {
     'style="width:680px;max-width:680px;background-color:#ffffff;border:1px solid #dde1e7;font-family:' + FONT_STACK + ';">';
 
   // ── 헤더 ──
-  var domainCounts = DOMAINS.map(function(domain) {
+  // 영역별 색 칩(목차 겸 범례): "색 = 영역" 을 학습시켜 본문 경계를 인지하게 함
+  var circled = ['①', '②', '③', '④', '⑤'];
+  var domainChips = DOMAINS.map(function(domain, idx) {
     var dt = stats.byDomain[domain.key];
-    var lit = dt.total > 0;
-    return '<span style="white-space:nowrap;color:' + (lit ? '#ffffff' : '#7e95b8') + ';">' +
-      esc(domain.label) + ' <b>' + dt.total + '</b></span>';
-  }).join('<span style="color:#43608c;">&nbsp;&middot;&nbsp;</span>');
+    var band = domain.palette.band;
+    return '<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 11px;border-radius:14px;' +
+      'background-color:' + band + ';color:#ffffff;font-size:12px;white-space:nowrap;">' +
+      circled[idx] + ' ' + esc(domain.label) + ' <b>' + dt.total + '</b></span>';
+  }).join('');
 
-  h += '<tr><td bgcolor="#14294a" style="padding:26px 28px;background-color:#14294a;">' +
+  h += '<tr><td bgcolor="#0d1b30" style="padding:26px 28px;background-color:#0d1b30;">' +
     '<div style="font-size:21px;font-weight:bold;color:#ffffff;line-height:1.4;">글로벌 통상 일일 모니터링</div>' +
-    '<div style="font-size:12px;color:#a8c0dc;margin-top:5px;">관세 · 수출통제 · 무역구제 통합 브리핑</div>' +
-    '<div style="font-size:13px;color:#a8c0dc;margin-top:8px;">' + dateStr + ' &nbsp;|&nbsp; 발행 기준 ' + timeStr + ' KST</div>' +
-    '<div style="font-size:12px;color:#7e9fc4;margin-top:3px;">수집 범위: ' + fromStr + ' ~ ' + timeStr + ' KST</div>' +
-    '<div style="font-size:12px;color:#c8d8ec;margin-top:14px;line-height:2;">' + domainCounts +
-    '<span style="color:#43608c;">&nbsp;&middot;&nbsp;</span>' +
-    '<span style="white-space:nowrap;color:#ffd54f;">합계 <b>' + stats.total + '건</b> (상 ' + stats.high + ')</span></div>' +
+    '<div style="font-size:12px;color:#9fb4d0;margin-top:5px;">관세 · 수출통제 · 무역구제 통합 브리핑</div>' +
+    '<div style="font-size:13px;color:#9fb4d0;margin-top:8px;">' + dateStr + ' &nbsp;|&nbsp; 발행 기준 ' + timeStr + ' KST</div>' +
+    '<div style="font-size:12px;color:#7088a8;margin-top:3px;">수집 범위: ' + fromStr + ' ~ ' + timeStr + ' KST</div>' +
+    '<div style="margin-top:14px;">' + domainChips + '</div>' +
+    '<div style="font-size:12px;color:#ffd54f;margin-top:10px;">합계 <b>' + stats.total + '건</b> · 중요도 상 ' + stats.high + '건</div>' +
     '</td></tr>';
 
   // ── 수록 기준 안내 ──
@@ -56,8 +58,8 @@ function buildCombinedEmailHTML(data, insights, now, fromDate) {
   }
 
   // ── 도메인 섹션 3개 ──
-  DOMAINS.forEach(function(domain) {
-    h += buildDomainSection(domain, data[domain.key], insights[domain.key], now);
+  DOMAINS.forEach(function(domain, idx) {
+    h += buildDomainSection(domain, idx, data[domain.key], insights[domain.key], now);
   });
 
   // ── 푸터 ──
@@ -71,8 +73,10 @@ function buildCombinedEmailHTML(data, insights, now, fromDate) {
   return h;
 }
 
-/** 도메인 1개 섹션 (대배너 + 총평 + 카테고리별) */
-function buildDomainSection(domain, domainData, domainInsight, now) {
+/** 도메인 1개 섹션 (PART 대배너 + 총평 + 카테고리별). idx=0,1,2 */
+function buildDomainSection(domain, idx, domainData, domainInsight, now) {
+  var pal = domain.palette;
+  var circled = ['①', '②', '③', '④', '⑤'];
   var dt = 0, dhi = 0;
   domain.units.forEach(function(u) {
     var items = domainData[u.key] || [];
@@ -80,43 +84,46 @@ function buildDomainSection(domain, domainData, domainInsight, now) {
     dhi += items.filter(function(x) { return x.importance === '상'; }).length;
   });
 
-  // 도메인 대배너
-  var h = '<tr><td bgcolor="' + domain.accent + '" style="padding:15px 28px;background-color:' + domain.accent + ';' +
-    'border-top:4px solid #ffd54f;">' +
+  // 영역 사이 큰 여백(중성 배경) — 영역 경계를 시각적으로 끊어줌
+  var h = '<tr><td bgcolor="#eef1f5" style="background-color:#eef1f5;font-size:0;line-height:0;height:18px;">&nbsp;</td></tr>';
+
+  // 도메인 대배너 (PART N · 영역명) — 왼쪽 굵은 컬러 라인 + 큰 글씨 + 넉넉한 패딩
+  h += '<tr><td bgcolor="' + pal.band + '" style="padding:18px 28px;background-color:' + pal.band + ';border-left:8px solid #ffd54f;">' +
     '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>' +
-    '<td style="font-family:' + FONT_STACK + ';font-size:18px;font-weight:bold;color:#ffffff;white-space:nowrap;">' +
-    esc(domain.label) + ' 동향</td>' +
-    '<td align="right" style="font-family:' + FONT_STACK + ';font-size:12px;color:#d8e2ee;">' +
-    dt + '건' + (dhi > 0 ? ' · 상 ' + dhi : '') + '</td>' +
+    '<td style="font-family:' + FONT_STACK + ';">' +
+    '<div style="font-size:11px;font-weight:bold;color:#ffd54f;letter-spacing:1px;">PART ' + (idx + 1) + '</div>' +
+    '<div style="font-size:20px;font-weight:bold;color:#ffffff;line-height:1.3;margin-top:2px;">' +
+    circled[idx] + ' ' + esc(domain.label) + ' 동향</div></td>' +
+    '<td align="right" style="font-family:' + FONT_STACK + ';font-size:13px;color:#ffffff;white-space:nowrap;">' +
+    '<b style="font-size:18px;">' + dt + '</b>건' + (dhi > 0 ? '<br><span style="font-size:11px;color:#ffd9d9;">중요 상 ' + dhi + '건</span>' : '') + '</td>' +
     '</tr></table></td></tr>';
 
   // 도메인 총평
   if (domainInsight && domainInsight.overall) {
-    h += '<tr><td bgcolor="#f7f9fc" style="padding:16px 28px;background-color:#f7f9fc;border-bottom:2px solid #e4eaf2;">' +
-      '<div style="font-size:13px;font-weight:bold;color:#14294a;">총평</div>' +
-      '<div style="font-size:13px;color:#3a4a5a;line-height:1.8;margin-top:6px;">' + esc(domainInsight.overall) + '</div>' +
+    h += '<tr><td style="padding:14px 28px;background-color:' + pal.catBg + ';border-bottom:1px solid ' + pal.catBg + ';">' +
+      '<div style="font-size:12px;font-weight:bold;color:' + pal.catText + ';">총평</div>' +
+      '<div style="font-size:13px;color:#3a4a5a;line-height:1.8;margin-top:5px;">' + esc(domainInsight.overall) + '</div>' +
       '</td></tr>';
   }
 
-  // 카테고리(unit) 섹션
+  // 카테고리(unit) 섹션 — 영역 색의 연한 톤 바 + 왼쪽 컬러 라인 (대배너에 종속된 느낌)
   domain.units.forEach(function(u) {
     var items = domainData[u.key] || [];
-    var color = u.color || '#2c3e50';
     var hiCnt = items.filter(function(x) { return x.importance === '상'; }).length;
 
-    h += '<tr><td bgcolor="' + color + '" style="padding:10px 28px;background-color:' + color + ';">' +
+    h += '<tr><td style="padding:9px 28px 9px 24px;background-color:' + pal.catBg + ';border-left:4px solid ' + pal.catBorder + ';">' +
       '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>' +
-      '<td style="font-family:' + FONT_STACK + ';font-size:14px;font-weight:bold;color:#ffffff;white-space:nowrap;">' +
-      esc(u.label) + ' &nbsp;<span style="font-size:11px;font-weight:normal;color:#d8e2ee;">' +
+      '<td style="font-family:' + FONT_STACK + ';font-size:13px;font-weight:bold;color:' + pal.catText + ';white-space:nowrap;">' +
+      esc(u.label) + ' &nbsp;<span style="font-size:11px;font-weight:normal;color:#7c8b9a;">' +
       items.length + '건' + (hiCnt > 0 ? ' · 상 ' + hiCnt : '') + '</span></td>' +
-      (u.desc ? '<td align="right" style="font-family:' + FONT_STACK + ';font-size:10px;color:#c2cfde;line-height:1.5;padding-left:14px;">' +
+      (u.desc ? '<td align="right" style="font-family:' + FONT_STACK + ';font-size:10px;color:#9aa7b4;line-height:1.5;padding-left:14px;">' +
         esc(u.desc) + '</td>' : '') +
       '</tr></table></td></tr>';
 
     var ci = domainInsight && domainInsight.byCategory ? domainInsight.byCategory[u.key] : null;
     if (ci) {
-      h += '<tr><td bgcolor="#f4f7fb" style="padding:9px 28px;background-color:#f4f7fb;border-bottom:1px solid #e8ecf1;' +
-        'font-size:12px;color:#4a5a6a;line-height:1.7;"><b style="color:' + color + ';">분석</b> &nbsp;' + esc(ci) + '</td></tr>';
+      h += '<tr><td style="padding:9px 28px;background-color:#fbfcfe;border-bottom:1px solid #eef1f5;' +
+        'font-size:12px;color:#4a5a6a;line-height:1.7;"><b style="color:' + pal.catText + ';">분석</b> &nbsp;' + esc(ci) + '</td></tr>';
     }
 
     if (items.length === 0) {
@@ -125,16 +132,16 @@ function buildDomainSection(domain, domainData, domainInsight, now) {
       return;
     }
 
-    h += '<tr><td style="padding:4px 20px 16px;border-bottom:1px solid #eef1f5;">';
-    sortByImportance(items).forEach(function(it) { h += buildItemCard(it, u, now); });
+    h += '<tr><td style="padding:4px 20px 14px;">';
+    sortByImportance(items).forEach(function(it) { h += buildItemCard(it, domain, u, now); });
     h += '</td></tr>';
   });
 
   return h;
 }
 
-/** 항목 카드 (좌측 중요도 컬러 바) */
-function buildItemCard(it, unit, now) {
+/** 항목 카드 (좌측 중요도 컬러 바). domain=소속 영역(색 가족), unit=카테고리 */
+function buildItemCard(it, domain, unit, now) {
   var imp = it.importance || '-';
   var impColor = IMPORTANCE_COLORS[imp] || '#90a4ae';
   var impBg = IMPORTANCE_BG[imp] || '#eceff1';
@@ -145,9 +152,9 @@ function buildItemCard(it, unit, now) {
       esc(text) + '</span>';
   };
 
-  // 분류 배지: 관세 구분 > 발표국가 > 카테고리 라벨
+  // 분류 배지: 관세 구분 > 발표국가 > 카테고리 라벨. 색은 영역 색으로 통일.
   var catText = it.gubun || it.issuingCountry || unit.label;
-  var catColor = (it.gubun && GUBUN_COLORS[it.gubun]) ? GUBUN_COLORS[it.gubun] : (unit.color || '#2c3e50');
+  var catColor = domain.palette.chip;
 
   // 시행일 칩
   var effChip = '';

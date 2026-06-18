@@ -133,7 +133,9 @@ var GUBUN_COLORS = {
 var DOMAIN_CUSTOMS = {
   key: 'customs',
   label: '관세',
-  accent: '#14294a',
+  accent: '#13335f',          // 영역 대배너 색 (파랑 계열)
+  // 영역 색 가족: 모든 요소가 같은 hue 를 써서 "색 = 영역" 으로 인지
+  palette: { band: '#13335f', catBg: '#eaf1fa', catBorder: '#1a4d8f', catText: '#15406f', chip: '#1a4d8f' },
   dbSheet: '관세_동향DB',
   obsidianTitle: '글로벌 관세 동향',
   units: Object.keys(CUSTOMS_CATEGORIES).map(function(k) {
@@ -225,7 +227,8 @@ var EXPORT_ISSUER = {
 var DOMAIN_EXPORT = {
   key: 'export',
   label: '수출통제',
-  accent: '#5a1a1a',
+  accent: '#7a1f1f',          // 영역 대배너 색 (적갈 계열)
+  palette: { band: '#7a1f1f', catBg: '#fbeded', catBorder: '#9c2a2a', catText: '#8a2424', chip: '#9c2a2a' },
   dbSheet: '수출통제_동향DB',
   obsidianTitle: '글로벌 수출통제 동향',
   units: EXPORT_UNITS,
@@ -297,7 +300,8 @@ var TRADE_ENGCAT = {
 var DOMAIN_TRADE = {
   key: 'trade',
   label: '무역구제',
-  accent: '#1b4332',
+  accent: '#1b5e3b',          // 영역 대배너 색 (초록 계열)
+  palette: { band: '#1b5e3b', catBg: '#e9f4ee', catBorder: '#1e7045', catText: '#1a5e3a', chip: '#1e7045' },
   dbSheet: '무역구제_동향DB',
   obsidianTitle: '글로벌 무역구제 동향',
   units: TRADE_UNITS,
