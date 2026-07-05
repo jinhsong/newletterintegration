@@ -23,7 +23,8 @@
 //       ADMIN_EMAIL         (선택, 오류 알림 수신)
 //       OBSIDIAN_FOLDER_ID  (선택, 옵시디안 저장)
 //  2. initializeSheets()        실행 → 시트 생성
-//  3. 발송인 명단 시트에 수신자 입력 (A:이름 B:이메일 / E열 'Y' 발송여부)
+//  3. 발송인 명단 시트에 수신자 입력 (A:이름 B:이메일 / E열 발송여부:
+//     'N' 이면 제외, 비어있거나 그 외 값이면 발송 — 명시적으로 뺄 사람만 'N' 표시)
 //  4. setupTriggers()           실행 → 평일 09시 정기 + 5분 요청 폴링 등록
 //  5. runMonitoringNow()        실행 → 즉시 테스트 발송
 // ============================================================
@@ -68,28 +69,47 @@ var OBSIDIAN_FOLDER = '통상동향';   // 폴더 ID 미지정 시 사용할 폴
 
 // ── 이메일 요청 (온디맨드) ───────────────────────────────
 var REQUEST_KEYWORD = '통상 요청';            // 제목에 포함되면 처리
-var PROCESSED_LABEL = 'trade-monitor-done';   // 처리완료 라벨(영문 권장)
-var REQUEST_SEARCH_WINDOW_H = 25;             // 최근 N시간 메일만 감지
+var PROCESSED_LABEL = 'trade-monitor-done';   // 처리완료 라벨(영문 권장, 시각적 감사 용도 — 재요청 판별은 is:unread 사용)
+var REQUEST_SEARCH_WINDOW_H = 25;             // 이 시간(시간 단위)보다 오래된 요청은 처리하지 않고 재요청 안내
 var ONDEMAND_DAILY_LIMIT = 5;                 // 요청자 1인당 일일 한도
+var ONDEMAND_GLOBAL_DAILY_LIMIT = 30;         // 발신자 위조(From 스푸핑) 대비 전역 일일 온디맨드 실행 한도
 
 // ── 시트 이름 ────────────────────────────────────────────
 var SHEET_RECIPIENTS = '발송인 명단';
 var SHEET_LOG = '발송로그';
-var LOG_HEADERS = ['발송일시(KST)', '유형', '수신자수', '관세', '수출통제', '무역구제', '상건수', '비고'];
+// 로그 헤더는 DOMAINS 개수에 맞춰 동적으로 구성 (도메인 추가/변경 시 자동 반영)
+function logHeaders() {
+  return ['발송일시(KST)', '유형', '수신자수'].concat(DOMAINS.map(function(d) { return d.label; })).concat(['상건수', '비고']);
+}
 
 // ── 중요도 ───────────────────────────────────────────────
 var IMPORTANCE_ORDER = { '상': 0, '중': 1, '하': 2 };
 var IMPORTANCE_COLORS = { '상': '#c62828', '중': '#ef6c00', '하': '#2e7d32' };
 var IMPORTANCE_BG = { '상': '#fdecea', '중': '#fff3e0', '하': '#e8f5e9' };
 
+// ── 신선도(경과일) 경고 임계값 ────────────────────────────
+// 상단 배너와 개별 항목 배지가 같은 기준을 쓰도록 단일 상수로 관리
+var STALE_WARN_DAYS = 3;
+
+// ── 최신성 객관 검증 (RSS pubDate 기반) ──────────────────
+// 모델이 자기보고한 announcedDate 가 실제보다 최신으로 환각되는 경우를 방어.
+// RSS 매칭 단계에서 얻은 객관적 pubDate 가 있으면, 수집 기간 시작보다
+// 이 유예시간 이상 오래된 항목은 제거한다.
+var RECENCY_GRACE_HOURS = 24;
+
+// ── 도메인 번호 매김(이메일 PART 배너 등에서 공용) ────────
+var DOMAIN_CIRCLED = ['①', '②', '③', '④', '⑤'];
+
 var FONT_STACK = "'Malgun Gothic','맑은 고딕','Apple SD Gothic Neo',Arial,sans-serif";
 
 
 // ============================================================
 //  도메인 정의
-//  각 도메인 = { key, label, accent, dbSheet, obsidianTitle,
-//               units:[{key,label,desc,color}], buildPrompt, normalize,
+//  각 도메인 = { key, label, palette, generalBucket, dbSheet, obsidianTitle,
+//               units:[{key,label,desc}], buildPrompt, normalize,
 //               dbHeader, dbRow }
+//  - palette: 이메일 렌더링에 쓰는 영역 색 가족 { band, catBg, catBorder, catText, chip }
+//  - generalBucket: true 면 다른 도메인과 겹치는 항목을 이 도메인에서 양보(제거) — removeCrossDomainOverlap 참조
 //  - units 순서대로 이메일/시트에 렌더링
 //  - buildPrompt(unit, ctx): ctx={fromStr,toStr,fromISO,toISO,now,fromDate}
 //  - normalize(raw): 원시 JSON 객체 → 공통 항목 스키마
@@ -120,26 +140,16 @@ var CUSTOMS_CATEGORIES = {
   'CIS': ['러시아', '카자흐스탄', '우즈베키스탄'],
   '중국': ['중국']
 };
-var CUSTOMS_COLORS = {
-  '북미': '#1a3c5e', '중남미': '#1b5e3b', '인도': '#7b3000',
-  '유럽': '#003080', '중동': '#6d3b00', '동남아': '#00565a',
-  '아프리카': '#4a2800', 'CIS': '#3a1a5a', '중국': '#990000'
-};
-var GUBUN_COLORS = {
-  '관세율': '#1a3c5e', 'HS': '#1b5e3b', 'FTA/원산지': '#6d3b00',
-  '과세가격': '#4a2800', '수출입규제': '#7b3000', '통관 일반': '#003080'
-};
-
 var DOMAIN_CUSTOMS = {
   key: 'customs',
   label: '관세',
-  accent: '#13335f',          // 영역 대배너 색 (파랑 계열)
   // 영역 색 가족: 모든 요소가 같은 hue 를 써서 "색 = 영역" 으로 인지
   palette: { band: '#13335f', catBg: '#eaf1fa', catBorder: '#1a4d8f', catText: '#15406f', chip: '#1a4d8f' },
+  generalBucket: true, // true 인 도메인은 다른(전문) 도메인과 겹치는 항목을 자신 쪽에서 양보(제거)한다
   dbSheet: '관세_동향DB',
   obsidianTitle: '글로벌 관세 동향',
   units: Object.keys(CUSTOMS_CATEGORIES).map(function(k) {
-    return { key: k, label: k, desc: CUSTOMS_CATEGORIES[k].join(', '), color: CUSTOMS_COLORS[k] };
+    return { key: k, label: k, desc: CUSTOMS_CATEGORIES[k].join(', ') };
   }),
   dbHeader: ['수집일시', '카테고리', '구분', '제목', '주요내용', '발표일', '발표국가', '영향국가', '관련기관', '출처명', '중요도', '중요도근거', '출처URL', '시행일', 'HS코드'],
   dbRow: function(it, unitLabel, dateStr) {
@@ -217,11 +227,11 @@ var DOMAIN_CUSTOMS = {
 //  도메인 2: 수출통제
 // ────────────────────────────────────────────────────────
 var EXPORT_UNITS = [
-  { key: 'US', label: '미국', color: '#1a3c5e' },
-  { key: 'KR', label: '한국', color: '#1b5e3b' },
-  { key: 'EUJP', label: 'EU/일본', color: '#003080' },
-  { key: 'CNVN', label: '중국/베트남', color: '#990000' },
-  { key: 'UNETC', label: 'UN 및 기타', color: '#3a1a5a' }
+  { key: 'US', label: '미국' },
+  { key: 'KR', label: '한국' },
+  { key: 'EUJP', label: 'EU/일본' },
+  { key: 'CNVN', label: '중국/베트남' },
+  { key: 'UNETC', label: 'UN 및 기타' }
 ];
 var EXPORT_ISSUER = {
   US: '## ISSUING COUNTRY: United States\nONLY measures issued by US bodies: BIS (Entity List, EAR), OFAC (SDN, sectoral sanctions), DDTC (ITAR, USML), White House (EO), DOJ.\nPriority: any US action naming a KOREAN company; semiconductor/AI controls.\nEXCLUDE other countries\' reactions.',
@@ -234,7 +244,6 @@ var EXPORT_ISSUER = {
 var DOMAIN_EXPORT = {
   key: 'export',
   label: '수출통제',
-  accent: '#7a1f1f',          // 영역 대배너 색 (적갈 계열)
   palette: { band: '#7a1f1f', catBg: '#fbeded', catBorder: '#9c2a2a', catText: '#8a2424', chip: '#9c2a2a' },
   dbSheet: '수출통제_동향DB',
   obsidianTitle: '글로벌 수출통제 동향',
@@ -299,9 +308,9 @@ var DOMAIN_EXPORT = {
 //  도메인 3: 무역구제
 // ────────────────────────────────────────────────────────
 var TRADE_UNITS = [
-  { key: '반덤핑', label: '반덤핑', desc: 'Anti-Dumping (AD)', color: '#990000' },
-  { key: '세이프가드', label: '세이프가드', desc: 'Safeguard (SG)', color: '#6d3b00' },
-  { key: '보조금/상계관세', label: '보조금/상계관세', desc: 'Subsidies & CVD', color: '#1b5e3b' }
+  { key: '반덤핑', label: '반덤핑', desc: 'Anti-Dumping (AD)' },
+  { key: '세이프가드', label: '세이프가드', desc: 'Safeguard (SG)' },
+  { key: '보조금/상계관세', label: '보조금/상계관세', desc: 'Subsidies & CVD' }
 ];
 var TRADE_ENGCAT = {
   '반덤핑': 'Anti-Dumping (AD)',
@@ -312,7 +321,6 @@ var TRADE_ENGCAT = {
 var DOMAIN_TRADE = {
   key: 'trade',
   label: '무역구제',
-  accent: '#1b5e3b',          // 영역 대배너 색 (초록 계열)
   palette: { band: '#1b5e3b', catBg: '#e9f4ee', catBorder: '#1e7045', catText: '#1a5e3a', chip: '#1e7045' },
   dbSheet: '무역구제_동향DB',
   obsidianTitle: '글로벌 무역구제 동향',

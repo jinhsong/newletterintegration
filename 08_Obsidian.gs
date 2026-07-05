@@ -44,6 +44,20 @@ function showObsidianFolderId() {
   catch (e) { Logger.log('[옵시디안] ID ' + id + ' 접근 불가: ' + e.message); }
 }
 
+/** 마크다운 인라인 텍스트 이스케이프: 줄바꿈 제거, 헤딩/리스트를 깨는 선행 기호 무력화 */
+function mdInline(s) {
+  s = (s || '').toString().replace(/[\r\n]+/g, ' ').trim();
+  return s.replace(/^(#{1,6}\s|[-*+]\s|\d+\.\s)/, '\\$&');
+}
+
+/** 마크다운 링크 [label](url) 생성. label/url 에 링크 문법을 깨는 문자가 있으면 안전하게 이스케이프. */
+function mdLink(label, url) {
+  var safeLabel = mdInline(label).replace(/[\[\]]/g, '\\$&');
+  var safeUrl = (url || '').toString().replace(/[\r\n\s]+/g, '').replace(/\)/g, '%29');
+  if (!/^https?:\/\//i.test(safeUrl)) return mdInline(label); // http(s) 아니면 링크화하지 않음
+  return '[' + safeLabel + '](' + safeUrl + ')';
+}
+
 function clearObsidianFolderId() {
   PropertiesService.getScriptProperties().deleteProperty(OBSIDIAN_FOLDER_ID_PROP);
   Logger.log('[옵시디안] 폴더 ID 해제 → 폴더명("' + OBSIDIAN_FOLDER + '") 방식 전환');
@@ -68,8 +82,7 @@ function saveToObsidian(data, insights, now, fromDate) {
     md += '---\n\n';
     md += '# 글로벌 통상 일일 모니터링 (' + dateStr + ')\n\n';
     md += '> 수집 범위: ' + fromStr + ' ~ ' + dateStr + ' ' + timeStr + ' KST · 총 ' + stats.total + '건 (상 ' + stats.high + ')\n\n';
-    md += '관세 ' + stats.byDomain.customs.total + '건 · 수출통제 ' + stats.byDomain.export.total +
-      '건 · 무역구제 ' + stats.byDomain.trade.total + '건\n\n';
+    md += DOMAINS.map(function(d) { return d.label + ' ' + stats.byDomain[d.key].total + '건'; }).join(' · ') + '\n\n';
 
     DOMAINS.forEach(function(domain) {
       var di = insights[domain.key] || {};
@@ -83,21 +96,21 @@ function saveToObsidian(data, insights, now, fromDate) {
         if (items.length === 0) { md += '_해당 수집 기간 내 동향 없음_\n\n'; return; }
 
         sortByImportance(items).forEach(function(it) {
-          md += '### [' + (it.importance || '-') + '] ' + (it.title || '') + '\n\n';
-          if (it.gubun) md += '- **구분**: ' + it.gubun + '\n';
+          md += '### [' + (it.importance || '-') + '] ' + mdInline(it.title) + '\n\n';
+          if (it.gubun) md += '- **구분**: ' + mdInline(it.gubun) + '\n';
           md += '- **발표일**: ' + (it.announcedDate || '-') + '\n';
           if ((it.effectiveDate || '').trim()) md += '- **시행일**: ' + it.effectiveDate + '\n';
           if ((it.hsCode || '').trim()) md += '- **HS코드**: ' + it.hsCode + '\n';
-          if ((it.issuingCountry || '').trim()) md += '- **발표국가**: ' + it.issuingCountry + '\n';
-          if ((it.targetCountries || '').trim()) md += '- **대상/영향국**: ' + it.targetCountries + '\n';
-          if ((it.agency || '').trim()) md += '- **관련기관**: ' + it.agency + '\n';
-          if ((it.sourceName || '').trim()) md += '- **출처**: ' + it.sourceName + '\n';
-          md += '\n' + (it.summary || '') + '\n\n';
-          if ((it.notes || '').trim()) md += '> 비고: ' + it.notes + '\n\n';
+          if ((it.issuingCountry || '').trim()) md += '- **발표국가**: ' + mdInline(it.issuingCountry) + '\n';
+          if ((it.targetCountries || '').trim()) md += '- **대상/영향국**: ' + mdInline(it.targetCountries) + '\n';
+          if ((it.agency || '').trim()) md += '- **관련기관**: ' + mdInline(it.agency) + '\n';
+          if ((it.sourceName || '').trim()) md += '- **출처**: ' + mdInline(it.sourceName) + '\n';
+          md += '\n' + mdInline(it.summary) + '\n\n';
+          if ((it.notes || '').trim()) md += '> 비고: ' + mdInline(it.notes) + '\n\n';
           var link = getItemLink(it);
           if (link) {
-            md += '[' + (link.isOriginal ? '원문: ' + link.label : 'Google 검색') + '](' + link.url + ')';
-            if (it.sourceUrl2) md += ' · [' + (it.sourceDomain2 || '관련 출처') + '](' + it.sourceUrl2 + ')';
+            md += mdLink(link.isOriginal ? '원문: ' + link.label : 'Google 검색', link.url);
+            if (it.sourceUrl2) md += ' · ' + mdLink(it.sourceDomain2 || '관련 출처', it.sourceUrl2);
             md += '\n\n';
           }
           md += '---\n\n';

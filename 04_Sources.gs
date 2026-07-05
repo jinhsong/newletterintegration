@@ -6,7 +6,11 @@
 //  4) (렌더링 시) Google 검색 링크 — getItemLink
 // ============================================================
 function findSourceUrls(data, startMs) {
-  resolveGroundingUrls(data); // 1단계
+  // 1단계도 다른 단계와 동일하게 최소 예산을 요구한다 — 무조건 실행하면
+  // 수집 라운드가 이미 예산을 많이 소모한 날 그대로 발송을 지연시킬 수 있다.
+  if (budgetLeftMs(startMs) > FINISH_RESERVE_MS + SOURCE_STAGE_MIN_MS) {
+    resolveGroundingUrls(data, startMs); // 1단계
+  } else { Logger.log('[출처 1] 시간 예산 부족 → 생략 (검색 링크 폴백)'); }
 
   if (budgetLeftMs(startMs) > FINISH_RESERVE_MS + SOURCE_STAGE_MIN_MS) {
     validateModelUrls(data, startMs); // 2단계
@@ -21,8 +25,13 @@ function findSourceUrls(data, startMs) {
   Logger.log('[출처] 최종 원문 링크 ' + withUrl + '/' + total + '건 (나머지 검색 링크 폴백)');
 }
 
-/** fetchAll 일괄 실패 시 개별 fetch 폴백 (네트워크 예외 방어) */
-function safeFetchAll(requests) {
+/**
+ * fetchAll 일괄 실패 시 개별 fetch 폴백 (네트워크 예외 방어).
+ * startMs 를 넘기면, 순차 폴백 도중 시간 예산이 바닥나는 즉시 남은 요청은
+ * 시도하지 않고 null 로 채운다 — 그렇지 않으면 17건 그라운딩 호출 같은
+ * 무거운 요청이 순차 재시도로 전환될 때 6분 제한을 그대로 넘겨버린다.
+ */
+function safeFetchAll(requests, startMs) {
   var out = new Array(requests.length);
   try {
     var resps = UrlFetchApp.fetchAll(requests);
@@ -32,13 +41,17 @@ function safeFetchAll(requests) {
     Logger.log('[safeFetchAll] 일괄 실패 (' + e.message + ') → 개별 재시도');
   }
   for (var j = 0; j < requests.length; j++) {
+    if (startMs && budgetLeftMs(startMs) <= 0) {
+      Logger.log('[safeFetchAll] 시간 예산 소진 → 잔여 ' + (requests.length - j) + '건 순차 재시도 중단');
+      break; // 나머지는 out[j..] = undefined → 호출부에서 null 과 동일하게 처리됨
+    }
     try { out[j] = UrlFetchApp.fetch(requests[j].url, requests[j]); } catch (e2) { out[j] = null; }
   }
   return out;
 }
 
 /** [1단계] grounding 리다이렉트 URL → Location 헤더로 원문 URL 해소 */
-function resolveGroundingUrls(data) {
+function resolveGroundingUrls(data, startMs) {
   var uriSet = {};
   forEachItem(data, function(it) {
     (it.__sourceUris || []).slice(0, SOURCES_PER_ITEM).forEach(function(u) { uriSet[u] = true; });
@@ -49,10 +62,13 @@ function resolveGroundingUrls(data) {
   Logger.log('[출처 1] 리다이렉트 해소: ' + uris.length + '건');
   var resolved = {};
   for (var s = 0; s < uris.length; s += RESOLVE_BATCH_SIZE) {
+    if (s > 0 && budgetLeftMs(startMs) < FINISH_RESERVE_MS) {
+      Logger.log('[출처 1] 시간 예산 부족 → 잔여 ' + (uris.length - s) + '건 생략'); break;
+    }
     var batch = uris.slice(s, s + RESOLVE_BATCH_SIZE);
     var resps = safeFetchAll(batch.map(function(u) {
       return { url: u, method: 'get', followRedirects: false, muteHttpExceptions: true };
-    }));
+    }), startMs);
     for (var i = 0; i < resps.length; i++) {
       if (!resps[i]) continue;
       var code = resps[i].getResponseCode();
@@ -67,14 +83,22 @@ function resolveGroundingUrls(data) {
     var srcs = (it.__sourceUris || []).slice(0, SOURCES_PER_ITEM);
     if (srcs.length === 0) return;
     total++;
+    // 해소 실패 시 원본 grounding 리다이렉트 URI 를 그대로 쓰지 않는다 —
+    // 항상 https(vertexaisearch...) 형태이긴 하나, 이 값이 이메일 href 로
+    // 직행하므로 스킴을 다시 한번 명시적으로 검증해 불변식을 코드로 못박는다.
     var primary = resolved[srcs[0]] || srcs[0];
     if (resolved[srcs[0]]) ok++;
-    it.sourceUrl = primary;
-    it.sourceDomain = extractDomain(primary);
-    it.__urlSource = 'grounding';
+    if (/^https?:\/\//i.test(primary)) {
+      it.sourceUrl = primary;
+      it.sourceDomain = extractDomain(primary);
+      it.__urlSource = 'grounding';
+    }
     if (srcs.length > 1) {
-      it.sourceUrl2 = resolved[srcs[1]] || srcs[1];
-      it.sourceDomain2 = extractDomain(it.sourceUrl2);
+      var secondary = resolved[srcs[1]] || srcs[1];
+      if (/^https?:\/\//i.test(secondary)) {
+        it.sourceUrl2 = secondary;
+        it.sourceDomain2 = extractDomain(secondary);
+      }
     }
   });
   Logger.log('[출처 1] grounding 해소: ' + ok + '/' + total + '건');
@@ -100,7 +124,7 @@ function validateModelUrls(data, startMs) {
     var batch = targets.slice(s, s + SOURCE_BATCH_SIZE);
     var resps = safeFetchAll(batch.map(function(it) {
       return { url: it.__modelUrl, method: 'get', followRedirects: true, muteHttpExceptions: true };
-    }));
+    }), startMs);
     for (var i = 0; i < batch.length; i++) {
       done++;
       if (!resps[i]) continue;
@@ -136,23 +160,28 @@ function searchNewsRss(data, startMs) {
       var q = it.titleEn || it.title;
       return { url: 'https://www.bing.com/news/search?q=' + encodeURIComponent(q) + '&format=rss',
         method: 'get', muteHttpExceptions: true };
-    }));
+    }), startMs);
     for (var i = 0; i < batch.length; i++) {
       done++;
+      batch[i].__rssTried = true; // enforceRecency 가 중복으로 다시 RSS 조회하지 않도록 표시
       if (!resps[i] || resps[i].getResponseCode() !== 200) continue;
       var best = pickBestNewsMatch(batch[i], parseRssItems(resps[i].getContentText()));
       if (best) {
-        batch[i].sourceUrl = best;
-        batch[i].sourceDomain = extractDomain(best);
-        batch[i].__urlSource = 'news-rss';
-        ok++;
+        if (best.link) {
+          batch[i].sourceUrl = best.link;
+          batch[i].sourceDomain = extractDomain(best.link);
+          batch[i].__urlSource = 'news-rss';
+          ok++;
+        }
+        // 링크는 채택하지 못했어도(bing/msn 등) 객관적 발행일은 최신성 검증에 유용하므로 보존
+        if (best.pubDate) batch[i].__pubDate = best.pubDate;
       }
     }
   }
   Logger.log('[출처 3] RSS 매칭: ' + ok + '/' + done + '건');
 }
 
-/** RSS XML 에서 item title/link 추출 (CDATA, 엔티티 처리, 최대 10건) */
+/** RSS XML 에서 item title/link/pubDate 추출 (CDATA, 엔티티 처리, 최대 10건) */
 function parseRssItems(xml) {
   var items = [];
   var re = /<item>([\s\S]*?)<\/item>/g;
@@ -161,8 +190,13 @@ function parseRssItems(xml) {
     var block = m[1];
     var lm = block.match(/<link>\s*(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?\s*<\/link>/);
     var tm = block.match(/<title>\s*(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?\s*<\/title>/);
+    var pm = block.match(/<pubDate>\s*(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?\s*<\/pubDate>/i);
     if (lm && lm[1]) {
-      items.push({ link: decodeXmlEntities(lm[1].trim()), title: tm ? decodeXmlEntities(tm[1].trim()) : '' });
+      items.push({
+        link: decodeXmlEntities(lm[1].trim()),
+        title: tm ? decodeXmlEntities(tm[1].trim()) : '',
+        pubDate: pm ? decodeXmlEntities(pm[1].trim()) : ''
+      });
     }
   }
   return items;
@@ -182,23 +216,92 @@ function unwrapBingLink(link) {
   catch (e) { return ''; }
 }
 
-/** RSS 결과 중 항목과 가장 잘 맞는 발행사 원문 URL 선택 */
+/**
+ * RSS 결과 중 항목과 제목이 가장 잘 맞는 엔트리 선택.
+ * @return {{link:string, pubDate:string} | null}
+ *   link 는 발행사 원문 URL (bing/msn 등 비원문이면 ''). pubDate 는 해당
+ *   엔트리의 객관적 발행일(enforceRecency 최신성 검증용) — link 채택 여부와 무관하게 반환.
+ *   임계(NEWS_MATCH_THRESHOLD) 미달이면 null.
+ */
 function pickBestNewsMatch(item, entries) {
   var titleN = normalizeTitle(item.titleEn || item.title);
   var srcN = normalizeSourceName(item.sourceName);
-  var best = null, bestScore = 0;
+  var best = null, bestScore = -1, bestEntry = null;
   entries.forEach(function(e) {
-    var link = unwrapBingLink(e.link);
-    if (!link || !/^https?:\/\//.test(link)) return;
-    var dom = extractDomain(link);
-    if (!dom || dom.indexOf('bing.com') !== -1 || dom.indexOf('msn.com') !== -1) return;
     var score = diceSimilarity(titleN, normalizeTitle(e.title));
-    var domCore = normalizeSourceName(dom.split('.')[0]);
-    if (srcN.length >= 3 && domCore.length >= 3 &&
-        (srcN.indexOf(domCore) !== -1 || domCore.indexOf(srcN) !== -1)) score += 0.25;
-    if (score > bestScore) { bestScore = score; best = link; }
+    if (score > bestScore) { bestScore = score; bestEntry = e; }
   });
-  return bestScore >= NEWS_MATCH_THRESHOLD ? best : null;
+  if (!bestEntry || bestScore < NEWS_MATCH_THRESHOLD) return null;
+
+  var link = unwrapBingLink(bestEntry.link);
+  var dom = (link && /^https?:\/\//.test(link)) ? extractDomain(link) : '';
+  var isOriginal = dom && dom.indexOf('bing.com') === -1 && dom.indexOf('msn.com') === -1;
+  var domCore = normalizeSourceName(dom.split('.')[0] || '');
+  if (isOriginal && srcN.length >= 3 && domCore.length >= 3 &&
+      (srcN.indexOf(domCore) !== -1 || domCore.indexOf(srcN) !== -1)) {
+    // 출처명-도메인 일치 가산 — link 채택 여부에는 영향 없이 참고용으로만 유지
+  }
+  return { link: isOriginal ? link : '', pubDate: bestEntry.pubDate || '' };
+}
+
+/** RSS pubDate(RFC-822 등) 문자열 → Date. 파싱 불가 시 null. */
+function parsePubDate(s) {
+  if (!s) return null;
+  var t = Date.parse(s);
+  return isNaN(t) ? null : new Date(t);
+}
+
+/**
+ * 최신성 객관 검증(안전망): 모델이 자기보고한 announcedDate 가 실제보다
+ * 최신으로 환각된 경우를 방어한다. RSS 매칭(searchNewsRss)에서 이미
+ * pubDate 를 얻은 항목은 그것을 쓰고, 아직 못 얻은 항목은 제목으로 한 번 더
+ * Bing 뉴스 RSS 를 조회해 객관적 발행일만 보강한다. 이 발행일이 수집 기간
+ * 시작보다 RECENCY_GRACE_HOURS 이상 오래됐으면 항목을 제거한다.
+ * @param {Object} data 공통 데이터 구조
+ * @param {Date} fromDate 수집 기간 시작
+ */
+function enforceRecency(data, fromDate) {
+  var floor = new Date(fromDate.getTime() - RECENCY_GRACE_HOURS * 60 * 60 * 1000);
+
+  // 1) 아직 __pubDate 가 없는 항목 → 제목으로 RSS 조회해 발행일만 보강
+  var need = [];
+  forEachItem(data, function(it) {
+    if (!it.__pubDate && !it.__rssTried && (it.titleEn || it.title)) need.push(it);
+  });
+  need = need.slice(0, NEWS_SEARCH_MAX);
+  if (need.length > 0) {
+    Logger.log('[신선도] 발행일 보강 RSS 조회: ' + need.length + '건');
+    var resps = safeFetchAll(need.map(function(it) {
+      var q = it.titleEn || it.title;
+      return { url: 'https://www.bing.com/news/search?q=' + encodeURIComponent(q) + '&format=rss',
+        method: 'get', muteHttpExceptions: true };
+    }));
+    for (var i = 0; i < need.length; i++) {
+      if (!resps[i] || resps[i].getResponseCode() !== 200) continue;
+      var best = pickBestNewsMatch(need[i], parseRssItems(resps[i].getContentText()));
+      if (best && best.pubDate) need[i].__pubDate = best.pubDate;
+    }
+  }
+
+  // 2) 객관적 발행일이 기간 시작보다 오래된 항목 제거
+  var dropped = 0, verified = 0;
+  forEachUnit(data, function(domain, unit, items, setItems) {
+    var kept = items.filter(function(it) {
+      var pd = parsePubDate(it.__pubDate);
+      if (!pd) return true; // 객관적 발행일 확인 불가 → 모델 날짜 필터에 위임(유지)
+      verified++;
+      if (pd.getTime() < floor.getTime()) {
+        dropped++;
+        Logger.log('[신선도] 제외(' + domain.label + '/' + unit.key + '): ' + it.title +
+          ' / 모델주장 ' + it.announcedDate + ' / 실제발행 ' + it.__pubDate);
+        return false;
+      }
+      return true;
+    });
+    setItems(kept);
+  });
+  Logger.log('[신선도] 객관 검증 ' + verified + '건, 기간초과 제외 ' + dropped + '건 (하한 ' +
+    Utilities.formatDate(floor, 'Asia/Seoul', 'yyyy-MM-dd HH:mm') + ' KST)');
 }
 
 /** 도메인 뒤 실제 경로가 있는 URL 인지 (홈페이지 단독 URL 배제) */

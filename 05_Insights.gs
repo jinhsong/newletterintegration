@@ -40,7 +40,7 @@ function generateAllInsights(apiKey, data, startMs) {
     };
   });
 
-  var resps = safeFetchAll(requests);
+  var resps = safeFetchAll(requests, startMs);
   for (var i = 0; i < jobs.length; i++) {
     var domain = jobs[i];
     var resp = resps[i];
@@ -65,13 +65,17 @@ function generateAllInsights(apiKey, data, startMs) {
 
 function buildInsightPrompt(domain, data) {
   // 토큰 절약: 빈 카테고리 제외, 요약 150자 절단
+  // 발표국가(issuingCountry)는 무역구제 도메인 스키마에 없어 항상 빈 문자열이므로,
+  // 실제 조치 주체를 담고 있는 관련기관(agency, 예: USTR/MOFCOM)을 항상 함께 전달한다.
+  // 이게 없으면 모델이 '데이터 외 추측 금지' 규칙 아래 국가를 특정하지 못해
+  // 총평/분석이 공허해지거나(무역구제) 오히려 추측성 국가를 지어낼 위험이 있었다.
   var summary = {};
   domain.units.forEach(function(u) {
     var arr = (data[domain.key][u.key] || []).map(function(it) {
       var c = it.summary || '';
       if (c.length > 150) c = c.substring(0, 150) + '…';
       return { 제목: it.title, 요약: c, 중요도: it.importance,
-        발표국가: it.issuingCountry, 영향국가: it.targetCountries };
+        발표국가: it.issuingCountry, 영향국가: it.targetCountries, 관련기관: it.agency };
     });
     if (arr.length > 0) summary[u.key] = arr;
   });

@@ -9,11 +9,20 @@ function esc(t) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function buildCombinedEmailHTML(data, insights, now, fromDate) {
+/**
+ * @param {Object} data 공통 데이터 구조
+ * @param {Object} insights 도메인별 인사이트
+ * @param {Date} now 발행 기준 시각
+ * @param {Date} fromDate 수집 시작 시각
+ * @param {Object} stats computeStats(data, now) 결과 (호출자가 1회 계산해 전달 — 중복 계산 방지)
+ * @param {Array} [failedUnits] fetchAllDomainsWithRetry 가 반환한 수집 실패 유닛 목록
+ */
+function buildCombinedEmailHTML(data, insights, now, fromDate, stats, failedUnits) {
   var dateStr = Utilities.formatDate(now, 'Asia/Seoul', 'yyyy년 MM월 dd일 (E)');
   var timeStr = Utilities.formatDate(now, 'Asia/Seoul', 'HH:mm');
   var fromStr = Utilities.formatDate(fromDate, 'Asia/Seoul', 'MM월 dd일 HH:mm');
-  var stats = computeStats(data, now);
+  stats = stats || computeStats(data, now);
+  var failedByDomain = groupFailedUnitsByDomain(failedUnits);
 
   var h = '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1.0"></head>' +
@@ -25,13 +34,12 @@ function buildCombinedEmailHTML(data, insights, now, fromDate) {
 
   // ── 헤더 ──
   // 영역별 색 칩(목차 겸 범례): "색 = 영역" 을 학습시켜 본문 경계를 인지하게 함
-  var circled = ['①', '②', '③', '④', '⑤'];
   var domainChips = DOMAINS.map(function(domain, idx) {
     var dt = stats.byDomain[domain.key];
     var band = domain.palette.band;
     return '<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 11px;border-radius:14px;' +
       'background-color:' + band + ';color:#ffffff;font-size:12px;white-space:nowrap;">' +
-      circled[idx] + ' ' + esc(domain.label) + ' <b>' + dt.total + '</b></span>';
+      (DOMAIN_CIRCLED[idx] || '') + ' ' + esc(domain.label) + ' <b>' + dt.total + '</b></span>';
   }).join('');
 
   h += '<tr><td bgcolor="#0d1b30" style="padding:26px 28px;background-color:#0d1b30;">' +
@@ -50,10 +58,19 @@ function buildCombinedEmailHTML(data, insights, now, fromDate) {
     '</td></tr>';
 
   // ── 최신성 경고 ──
-  if (stats.maxDays !== null && stats.maxDays > 3) {
+  if (stats.maxDays !== null && stats.maxDays > STALE_WARN_DAYS) {
     h += '<tr><td bgcolor="#fdecea" style="padding:10px 28px;background-color:#fdecea;border-top:3px solid #c62828;' +
       'font-size:12px;color:#9c2a20;line-height:1.6;">' +
       '⚠ 발표일이 최대 ' + stats.maxDays + '일 경과한 항목이 포함되어 있습니다. 각 항목의 신선도 배지를 확인하세요.' +
+      '</td></tr>';
+  }
+
+  // ── 수집 실패 경고 (동향 없음과 구분) ──
+  if (failedUnits && failedUnits.length > 0) {
+    h += '<tr><td bgcolor="#fff3e0" style="padding:10px 28px;background-color:#fff3e0;border-top:3px solid #ef6c00;' +
+      'font-size:12px;color:#8a5300;line-height:1.6;">' +
+      '⚠ 아래 카테고리는 수집에 실패했습니다(동향이 없는 것과 다름 — 관리자 확인 필요): ' +
+      esc(failedUnits.map(function(f) { return f.domainLabel + '/' + f.unitLabel; }).join(', ')) +
       '</td></tr>';
   }
 
@@ -62,7 +79,7 @@ function buildCombinedEmailHTML(data, insights, now, fromDate) {
 
   // ── 도메인 섹션 3개 ──
   DOMAINS.forEach(function(domain, idx) {
-    h += buildDomainSection(domain, idx, data[domain.key], insights[domain.key], now);
+    h += buildDomainSection(domain, idx, data[domain.key], insights[domain.key], now, stats.byDomain[domain.key], failedByDomain[domain.key]);
   });
 
   // ── 푸터 ──
@@ -112,16 +129,16 @@ function buildHighlights(data, now) {
     rows + '</td></tr>';
 }
 
-/** 도메인 1개 섹션 (PART 대배너 + 총평 + 카테고리별). idx=0,1,2 */
-function buildDomainSection(domain, idx, domainData, domainInsight, now) {
+/**
+ * 도메인 1개 섹션 (PART 대배너 + 총평 + 카테고리별). idx=0,1,2
+ * @param {Object} domainStats stats.byDomain[domain.key] = {total, high} (호출자가 계산해 전달)
+ * @param {Array} [failedUnitKeys] 이 도메인에서 수집 실패한 unit.key 목록
+ */
+function buildDomainSection(domain, idx, domainData, domainInsight, now, domainStats, failedUnitKeys) {
   var pal = domain.palette;
-  var circled = ['①', '②', '③', '④', '⑤'];
-  var dt = 0, dhi = 0;
-  domain.units.forEach(function(u) {
-    var items = domainData[u.key] || [];
-    dt += items.length;
-    dhi += items.filter(function(x) { return x.importance === '상'; }).length;
-  });
+  var dt = domainStats.total, dhi = domainStats.high;
+  var failedSet = {};
+  (failedUnitKeys || []).forEach(function(k) { failedSet[k] = true; });
 
   // 영역 사이 큰 여백(중성 배경) — 영역 경계를 시각적으로 끊어줌
   var h = '<tr><td bgcolor="#eef1f5" style="background-color:#eef1f5;font-size:0;line-height:0;height:18px;">&nbsp;</td></tr>';
@@ -132,7 +149,7 @@ function buildDomainSection(domain, idx, domainData, domainInsight, now) {
     '<td style="font-family:' + FONT_STACK + ';">' +
     '<div style="font-size:11px;font-weight:bold;color:#ffd54f;letter-spacing:1px;">PART ' + (idx + 1) + '</div>' +
     '<div style="font-size:20px;font-weight:bold;color:#ffffff;line-height:1.3;margin-top:2px;">' +
-    circled[idx] + ' ' + esc(domain.label) + ' 동향</div></td>' +
+    (DOMAIN_CIRCLED[idx] || '') + ' ' + esc(domain.label) + ' 동향</div></td>' +
     '<td align="right" style="font-family:' + FONT_STACK + ';font-size:13px;color:#ffffff;white-space:nowrap;">' +
     '<b style="font-size:18px;">' + dt + '</b>건' + (dhi > 0 ? '<br><span style="font-size:11px;color:#ffd9d9;">중요 상 ' + dhi + '건</span>' : '') + '</td>' +
     '</tr></table></td></tr>';
@@ -146,10 +163,15 @@ function buildDomainSection(domain, idx, domainData, domainInsight, now) {
   }
 
   // 카테고리(unit) 섹션 — 항목 있는 것만 표시. 빈 카테고리는 하단 한 줄로 묶어 길이 절약.
+  // 단, 수집 자체가 실패한 카테고리는 "동향 없음"과 절대 같은 문구로 섞지 않는다.
   var emptyUnits = [];
+  var failedUnitLabels = [];
   domain.units.forEach(function(u) {
     var items = domainData[u.key] || [];
-    if (items.length === 0) { emptyUnits.push(u.label); return; }
+    if (items.length === 0) {
+      if (failedSet[u.key]) failedUnitLabels.push(u.label); else emptyUnits.push(u.label);
+      return;
+    }
     var hiCnt = items.filter(function(x) { return x.importance === '상'; }).length;
 
     h += '<tr><td style="padding:9px 28px 9px 24px;background-color:' + pal.catBg + ';border-left:4px solid ' + pal.catBorder + ';">' +
@@ -172,9 +194,16 @@ function buildDomainSection(domain, idx, domainData, domainInsight, now) {
     h += '</td></tr>';
   });
 
-  // 동향 없는 카테고리 묶음 (또는 영역 전체 무동향)
+  // 수집 실패 카테고리 묶음 (동향 없음과 구분되는 주황색 경고)
+  if (failedUnitLabels.length > 0) {
+    h += '<tr><td style="padding:9px 28px;font-size:11px;color:#a15c00;background-color:#fff8ec;' +
+      'border-bottom:1px solid #eef1f5;">⚠ 수집 실패(동향 없음 아님) · ' +
+      failedUnitLabels.map(esc).join(', ') + '</td></tr>';
+  }
+
+  // 동향 없는 카테고리 묶음 (또는 영역 전체 무동향, 수집 실패분 제외)
   if (emptyUnits.length > 0) {
-    var msg = (dt === 0)
+    var msg = (dt === 0 && failedUnitLabels.length === 0)
       ? '해당 수집 기간 내 확인된 ' + esc(domain.label) + ' 동향이 없습니다.'
       : '동향 없음 · ' + emptyUnits.map(esc).join(', ');
     h += '<tr><td style="padding:9px 28px;font-size:11px;color:#9aa7b4;font-style:italic;' +
@@ -182,6 +211,16 @@ function buildDomainSection(domain, idx, domainData, domainInsight, now) {
   }
 
   return h;
+}
+
+/** failedUnits 배열([{domainKey,unitKey,...}]) → { domainKey: [unitKey,...] } */
+function groupFailedUnitsByDomain(failedUnits) {
+  var out = {};
+  (failedUnits || []).forEach(function(f) {
+    if (!out[f.domainKey]) out[f.domainKey] = [];
+    out[f.domainKey].push(f.unitKey);
+  });
+  return out;
 }
 
 /** 항목 카드 (좌측 중요도 컬러 바). domain=소속 영역(색 가족), unit=카테고리 */
@@ -227,7 +266,7 @@ function buildItemCard(it, domain, unit, now) {
   var days = daysSinceKst(it.announcedDate, now || new Date());
   var freshHtml = '';
   if (days !== null) {
-    var stale = days > 3;
+    var stale = days > STALE_WARN_DAYS;
     var fColor = stale ? '#c62828' : (days <= 1 ? '#2e7d32' : '#5a6b7a');
     var fBg = stale ? '#fdecea' : (days <= 1 ? '#e8f5e9' : '#eef2f6');
     freshHtml = '&nbsp;<span style="display:inline-block;padding:1px 6px;font-size:10px;font-weight:bold;' +
@@ -266,12 +305,13 @@ function buildItemCard(it, domain, unit, now) {
 //  발송 (단일 메일 + BCC 분할)
 // ============================================================
 
-/** 제목줄 트리아지 접미사 */
+/** 제목줄 트리아지 접미사 (DOMAINS 반복 — 도메인 추가/변경 시 자동 반영) */
 function buildSubjectTriage(stats) {
   if (!stats || !stats.total) return ' · 동향 없음';
-  var d = stats.byDomain;
-  return ' · 관세 ' + d.customs.total + '/수출통제 ' + d.export.total + '/무역구제 ' + d.trade.total +
-    ' (상 ' + stats.high + ')';
+  var parts = DOMAINS.map(function(domain) {
+    return domain.label + ' ' + stats.byDomain[domain.key].total;
+  });
+  return ' · ' + parts.join('/') + ' (상 ' + stats.high + ')';
 }
 
 /**
@@ -280,23 +320,38 @@ function buildSubjectTriage(stats) {
  */
 function sendCombinedEmail(htmlContent, date, stats) {
   var recipients = getRecipients();
-  if (recipients.length === 0) { Logger.log('[주의] 유효한 수신자 없음'); return 0; }
+  if (recipients.length === 0) {
+    Logger.log('[주의] 유효한 수신자 없음');
+    notifyAdmin('[주의] 통상 모니터링 발송 대상 없음',
+      '발송인 명단에서 유효한 수신자를 찾지 못해 오늘 발송을 건너뛰었습니다.\n' +
+      '시트가 비어있는 것이 맞는지, 혹은 일시적인 조회 오류인지 확인해 주세요.');
+    return 0;
+  }
 
   var dateStr = Utilities.formatDate(date, 'Asia/Seoul', 'yyyy년 MM월 dd일');
   var subject = '[글로벌 통상 모니터링] ' + dateStr + buildSubjectTriage(stats);
   var plain = '이 메일은 HTML 형식입니다. HTML 뷰어를 지원하는 메일 클라이언트에서 확인하세요.';
 
-  // 쿼터 확인
-  var quotaWarning = '';
+  // 쿼터 확인 — 수신자 수 기준(잔여 쿼터는 "수신자 수" 단위이지 "발송 통 수" 단위가 아니다).
+  // 부족하면 부분 발송(일부는 받고 일부는 못 받음) 대신 전량 중단한다 — 저장은 발송
+  // 성공(sent>0) 이후에만 이뤄지므로, 여기서 던져도 그날 수집한 항목은 유실되지 않고
+  // 다음 실행에서 그대로 재시도된다.
   try {
     var quota = MailApp.getRemainingDailyQuota();
     Logger.log('잔여 메일 쿼터: ' + quota + ' / 수신자: ' + recipients.length + '명');
-    if (quota < Math.ceil(recipients.length / BCC_BATCH_SIZE)) {
-      quotaWarning = '잔여 쿼터(' + quota + ')가 부족할 수 있습니다.\n';
+    if (quota < recipients.length) {
+      throw new Error('Gmail 일일 발송 쿼터 부족 — 잔여 ' + quota + '건 / 필요 ' + recipients.length + '건');
     }
-  } catch (qe) { Logger.log('쿼터 조회 실패: ' + qe.message); }
+  } catch (qe) {
+    if (/쿼터 부족/.test(qe.message)) throw qe; // 쿼터 부족은 상위로 전파해 발송 자체를 중단
+    Logger.log('쿼터 조회 실패(계속 진행): ' + qe.message);
+  }
 
-  var me = Session.getEffectiveUser().getEmail();
+  var me = '';
+  try { me = Session.getEffectiveUser().getEmail(); } catch (e) { Logger.log('[발송] 발신 계정 조회 실패: ' + e.message); }
+  if (!me) me = getAdminEmail();
+  if (!me) throw new Error('발신 계정 이메일을 확인할 수 없어 발송을 중단합니다.');
+
   var sent = 0;
   var failures = [];
   for (var i = 0; i < recipients.length; i += BCC_BATCH_SIZE) {
@@ -315,9 +370,9 @@ function sendCombinedEmail(htmlContent, date, stats) {
   }
   Logger.log('발송 결과 - 성공 ' + sent + '명 / 실패 ' + failures.length + '배치');
 
-  if (failures.length > 0 || quotaWarning) {
-    notifyAdmin('[주의] 통상 뉴스레터 발송 이슈 (' + dateStr + ')',
-      quotaWarning + '성공 ' + sent + '명\n' + failures.join('\n'));
+  if (failures.length > 0) {
+    notifyAdmin('[주의] 통상 뉴스레터 일부 발송 실패 (' + dateStr + ')',
+      '성공 ' + sent + '명\n' + failures.join('\n'));
   }
   return sent;
 }

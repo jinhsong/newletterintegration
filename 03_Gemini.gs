@@ -23,10 +23,13 @@ function buildGeminiRequest(apiKey, domain, unit, ctx) {
 /**
  * 전 도메인·카테고리(9+5+3=17건)를 한 번의 fetchAll 로 병렬 발사.
  * 실패(503/429)한 건만 추려 지수 백오프로 재시도 (최대 RETRY_MAX 라운드).
- * @returns 공통 데이터 구조 { customs:{unit:[]}, ... }
+ * 끝까지 200을 받지 못한 카테고리는 "동향 없음"과 구분해 failedUnits 로 반환한다
+ * (그래야 API 전면 장애가 정상적인 '오늘은 뉴스 없음' 메일로 위장되지 않는다).
+ * @returns {{data:Object, failedUnits:Array}} data = { customs:{unit:[]}, ... }
  */
 function fetchAllDomainsWithRetry(apiKey, ctx, startMs) {
   var data = newEmptyData();
+  var succeeded = {}; // 'domainKey/unitKey' → true
 
   // 전 도메인·유닛을 펼친 작업 목록
   var pending = [];
@@ -35,6 +38,7 @@ function fetchAllDomainsWithRetry(apiKey, ctx, startMs) {
       pending.push({ domain: domain, unit: unit });
     });
   });
+  var allUnits = pending.slice();
 
   for (var round = 0; round < RETRY_MAX; round++) {
     if (pending.length === 0) break;
@@ -45,24 +49,27 @@ function fetchAllDomainsWithRetry(apiKey, ctx, startMs) {
 
     Logger.log('--- [라운드 ' + (round + 1) + '/' + RETRY_MAX + '] ' + pending.length + '개 병렬 요청 ---');
     var requests = pending.map(function(t) { return buildGeminiRequest(apiKey, t.domain, t.unit, ctx); });
-    var responses = safeFetchAll(requests);
+    // 라운드0(최초 수집)도 안전망을 태워 일괄 fetchAll 예외 시 무제한 순차 재시도로
+    // 6분 제한을 넘기지 않도록 startMs 를 전달한다.
+    var responses = safeFetchAll(requests, startMs);
 
     var stillFailing = [];
     for (var i = 0; i < responses.length; i++) {
       var t = pending[i];
       var resp = responses[i];
       var tag = '[' + t.domain.label + '/' + t.unit.key + ']';
-      if (!resp) { Logger.log(tag + ' 네트워크 예외 → 재시도'); stillFailing.push(t); continue; }
+      if (!resp) { Logger.log(tag + ' 네트워크 예외/예산초과 → 재시도'); stillFailing.push(t); continue; }
       var code = resp.getResponseCode();
       if (code === 200) {
         var items = parseUnitResponse(t.domain, t.unit, resp.getContentText());
         data[t.domain.key][t.unit.key] = items;
+        succeeded[t.domain.key + '/' + t.unit.key] = true;
         Logger.log(tag + ' 성공: ' + items.length + '건');
       } else if (code === 429 || code >= 500) {
         Logger.log(tag + ' HTTP ' + code + ' → 재시도');
         stillFailing.push(t);
       } else {
-        Logger.log(tag + ' HTTP ' + code + ' (재시도 불가) → 빈 배열');
+        Logger.log(tag + ' HTTP ' + code + ' (재시도 불가) → 수집 실패 처리');
         Logger.log('  ' + resp.getContentText().substring(0, 200));
       }
     }
@@ -78,7 +85,18 @@ function fetchAllDomainsWithRetry(apiKey, ctx, startMs) {
       Utilities.sleep(waitMs);
     }
   }
-  return data;
+
+  var failedUnits = allUnits
+    .filter(function(t) { return !succeeded[t.domain.key + '/' + t.unit.key]; })
+    .map(function(t) {
+      return { domainKey: t.domain.key, domainLabel: t.domain.label, unitKey: t.unit.key, unitLabel: t.unit.label };
+    });
+  if (failedUnits.length > 0) {
+    Logger.log('[수집 실패] ' + failedUnits.length + '개 카테고리 최종 실패: ' +
+      failedUnits.map(function(f) { return f.domainLabel + '/' + f.unitLabel; }).join(', '));
+  }
+
+  return { data: data, failedUnits: failedUnits };
 }
 
 /**
