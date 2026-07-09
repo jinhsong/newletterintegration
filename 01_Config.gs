@@ -37,6 +37,13 @@ var GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/'
 var RETRY_MAX = 4;            // 최대 재시도 라운드
 var RETRY_BASE_MS = 8000;     // 8s → 16s → 32s → 64s
 
+// ── 동시 요청 수 제한 (rate limit 완화) ──────────────────
+// 한 번의 fetchAll 로 동시에 보낼 최대 요청 수. 전 도메인 카테고리는 총 17개인데
+// gemini-2.5-pro + google_search 그라운딩 요청을 17개 한꺼번에 쏘면 분당 요청
+// 한도(RPM)를 넘겨 일부가 429/5xx 로 실패하기 쉽다. 이 값으로 청크를 나눠 발사한다.
+// 낮출수록 레이트 리밋 오류↓ 이지만 라운드 wall-time↑ (6분 제한과 트레이드오프).
+var FETCH_CONCURRENCY = 9;
+
 // ── 실행 시간 예산 (Apps Script 6분 제한 대응) ───────────
 var TOTAL_TIME_BUDGET_MS = 330000; // 전체 소프트 데드라인 (5.5분)
 var FINISH_RESERVE_MS = 70000;     // 저장 + HTML 빌드 + 발송 예약

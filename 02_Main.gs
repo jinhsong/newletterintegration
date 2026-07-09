@@ -46,12 +46,16 @@ function runDailyMonitoring(e) {
       Logger.log('[주의] 발송 대상 0건 → 저장 생략 (다음 실행에서 재수집)');
     }
 
-    // 수집 실패 카테고리가 있으면 "동향 없음"과 구분해 관리자에게 알림
+    // 수집 실패 카테고리가 있으면 "동향 없음"과 구분해 관리자에게 알림 (사유 포함)
     if (result.failedUnits && result.failedUnits.length > 0) {
       notifyAdmin('[주의] 통상 모니터링 일부 카테고리 수집 실패',
-        '아래 카테고리는 수집에 실패하여 "동향 없음"으로 표시되었을 수 있습니다 ' +
-        '(API 오류·쿼터 소진 등 확인 필요):\n\n' +
-        result.failedUnits.map(function(f) { return '- ' + f.domainLabel + ' / ' + f.unitLabel; }).join('\n'));
+        '아래 카테고리는 수집에 실패하여 "동향 없음"으로 표시되었을 수 있습니다.\n' +
+        '사유가 HTTP 429 계열이면 동시 요청이 많아 레이트 리밋에 걸린 것이므로 ' +
+        'FETCH_CONCURRENCY 값을 낮추거나 API 등급을 확인하고, finishReason=SAFETY/RECITATION ' +
+        '이면 해당 주제가 안전필터에 걸린 것입니다.\n\n' +
+        result.failedUnits.map(function(f) {
+          return '- ' + f.domainLabel + ' / ' + f.unitLabel + ' — ' + (f.reason || '원인 미상');
+        }).join('\n'));
     }
 
     logExecution('정기', sent, result.stats, '');
