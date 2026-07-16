@@ -31,16 +31,29 @@ function initializeSheets() {
   var list = ss.getSheetByName(SHEET_RECIPIENTS);
   if (!list) {
     list = ss.insertSheet(SHEET_RECIPIENTS);
-    list.getRange(1, 1, 1, 5).setValues([['이름', '이메일', '부서', '직급', '발송여부']])
+    list.getRange(1, 1, 1, 6).setValues([['이름', '이메일', '부서', '직급', '발송여부', '관심영역']])
       .setFontWeight('bold').setBackground('#1a2a4a').setFontColor('#ffffff');
     list.setFrozenRows(1);
-    list.getRange(2, 1, 1, 5).setValues([['홍길동(예시)', 'example@company.com', '', '', '']]);
-    Logger.log(SHEET_RECIPIENTS + ' 생성 (B:이메일, E:발송여부 — N이면 제외, 그 외/빈칸은 발송)');
+    list.getRange(2, 1, 2, 6).setValues([
+      ['홍길동(예시)', 'example@company.com', '', '', '', ''],
+      ['김수출(예시)', 'export@company.com', '', '', '', '수출통제']
+    ]);
+    Logger.log(SHEET_RECIPIENTS + ' 생성 (B:이메일, E:발송여부 N이면 제외, F:관심영역 — 관세/수출통제/무역구제 중 입력 시 그 영역이 메일 맨 앞)');
+  } else {
+    ensureRecipientsFocusColumn(list);
   }
 
   getOrCreateSheet(ss, SHEET_LOG, logHeaders(), '#37474f');
 
   Logger.log('=== 시트 초기화 완료 ===');
+}
+
+/** 기존 발송인 명단에 F열 '관심영역'이 없으면 헤더만 추가 (마이그레이션) */
+function ensureRecipientsFocusColumn(sheet) {
+  if (sheet.getLastColumn() >= 6) return;
+  sheet.getRange(1, 6).setValue('관심영역')
+    .setFontWeight('bold').setBackground('#1a2a4a').setFontColor('#ffffff');
+  Logger.log(SHEET_RECIPIENTS + " 헤더 확장: 관심영역(F열) — 관세/수출통제/무역구제 입력 시 해당 영역이 메일 맨 앞");
 }
 
 /** 기존 시트에 신규 컬럼을 맨 끝에 자동 추가 (마이그레이션) */
@@ -178,7 +191,12 @@ function removeCrossDomainOverlap(data) {
   if (removed > 0) Logger.log('[교차중복] 합계 ' + removed + '건 제거');
 }
 
-/** 발송인 명단 → [{name,email}] (B열 이메일, E열 발송여부: N이면 제외, 그 외/빈칸은 발송) */
+/**
+ * 발송인 명단 → [{name, email, focus}]
+ *  - B열 이메일, E열 발송여부(N이면 제외, 그 외/빈칸은 발송)
+ *  - F열 관심영역(관세/수출통제/무역구제 등) → focus(도메인 key). 지정 시 그 영역이
+ *    메일 맨 앞(PART 1)에 배치된다. 빈칸/불명이면 focus='' (기본 순서).
+ */
 function getRecipients() {
   var out = [];
   var seen = {};
@@ -195,7 +213,7 @@ function getRecipients() {
       var key = email.toLowerCase();
       if (seen[key]) return;
       seen[key] = true;
-      out.push({ name: (r[0] || '').toString(), email: email });
+      out.push({ name: (r[0] || '').toString(), email: email, focus: focusKeyFromText(r[5]) });
     });
   } catch (e) {
     // 일시적 조회 오류와 "명단이 정말 비어있음"을 구분하지 못하면 상위(sendCombinedEmail)가

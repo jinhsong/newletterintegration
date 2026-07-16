@@ -10,19 +10,33 @@ function esc(t) {
 }
 
 /**
+ * 관심영역(focusKey)이 지정되면 해당 도메인을 맨 앞(PART 1)으로 재배열.
+ * 수출통제·무역구제 담당자가 자기 섹션을 찾아 스크롤하는 불편을 해소한다.
+ * @returns {Array} 재배열된 도메인 배열 (미지정/불명이면 기본 DOMAINS 순서)
+ */
+function reorderDomains(focusKey) {
+  if (!focusKey) return DOMAINS;
+  var focus = domainByKey(focusKey);
+  if (!focus) return DOMAINS;
+  return [focus].concat(DOMAINS.filter(function(d) { return d.key !== focusKey; }));
+}
+
+/**
  * @param {Object} data 공통 데이터 구조
  * @param {Object} insights 도메인별 인사이트
  * @param {Date} now 발행 기준 시각
  * @param {Date} fromDate 수집 시작 시각
  * @param {Object} stats computeStats(data, now) 결과 (호출자가 1회 계산해 전달 — 중복 계산 방지)
  * @param {Array} [failedUnits] fetchAllDomainsWithRetry 가 반환한 수집 실패 유닛 목록
+ * @param {string} [focusKey] 수신자 관심영역 도메인 key — 지정 시 그 영역을 PART 1로 배치
  */
-function buildCombinedEmailHTML(data, insights, now, fromDate, stats, failedUnits) {
+function buildCombinedEmailHTML(data, insights, now, fromDate, stats, failedUnits, focusKey) {
   var dateStr = Utilities.formatDate(now, 'Asia/Seoul', 'yyyy년 MM월 dd일 (E)');
   var timeStr = Utilities.formatDate(now, 'Asia/Seoul', 'HH:mm');
   var fromStr = Utilities.formatDate(fromDate, 'Asia/Seoul', 'MM월 dd일 HH:mm');
   stats = stats || computeStats(data, now);
   var failedByDomain = groupFailedUnitsByDomain(failedUnits);
+  var ordered = reorderDomains(focusKey);
 
   var h = '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1.0"></head>' +
@@ -33,13 +47,15 @@ function buildCombinedEmailHTML(data, insights, now, fromDate, stats, failedUnit
     'style="width:680px;max-width:680px;background-color:#ffffff;border:1px solid #dde1e7;font-family:' + FONT_STACK + ';">';
 
   // ── 헤더 ──
-  // 영역별 색 칩(목차 겸 범례): "색 = 영역" 을 학습시켜 본문 경계를 인지하게 함
-  var domainChips = DOMAINS.map(function(domain, idx) {
+  // 영역별 색 칩(목차 겸 범례): "색 = 영역" 을 학습시켜 본문 경계를 인지하게 함.
+  // 칩을 클릭하면 해당 영역 섹션으로 점프(앵커 지원 메일 클라이언트) — 미지원이어도 무해.
+  // 순서는 수신자 관심영역(focusKey)에 맞춰 재배열되어, 담당 영역이 맨 앞에 온다.
+  var domainChips = ordered.map(function(domain, idx) {
     var dt = stats.byDomain[domain.key];
     var band = domain.palette.band;
-    return '<span style="display:inline-block;margin:4px 6px 0 0;padding:4px 11px;border-radius:14px;' +
-      'background-color:' + band + ';color:#ffffff;font-size:12px;white-space:nowrap;">' +
-      (DOMAIN_CIRCLED[idx] || '') + ' ' + esc(domain.label) + ' <b>' + dt.total + '</b></span>';
+    return '<a href="#sec-' + domain.key + '" style="display:inline-block;margin:4px 6px 0 0;padding:4px 11px;border-radius:14px;' +
+      'background-color:' + band + ';color:#ffffff;font-size:12px;white-space:nowrap;text-decoration:none;">' +
+      (DOMAIN_CIRCLED[idx] || '') + ' ' + esc(domain.label) + ' <b>' + dt.total + '</b></a>';
   }).join('');
 
   h += '<tr><td bgcolor="#0d1b30" style="padding:26px 28px;background-color:#0d1b30;">' +
@@ -74,11 +90,11 @@ function buildCombinedEmailHTML(data, insights, now, fromDate, stats, failedUnit
       '</td></tr>';
   }
 
-  // ── 오늘의 하이라이트 (전 영역 중요도 '상' 다이제스트) ──
-  h += buildHighlights(data, now);
+  // ── 오늘의 하이라이트 (전 영역 중요도 '상' 다이제스트, 관심영역 우선 정렬) ──
+  h += buildHighlights(data, now, ordered);
 
-  // ── 도메인 섹션 3개 ──
-  DOMAINS.forEach(function(domain, idx) {
+  // ── 도메인 섹션 (관심영역이 PART 1) ──
+  ordered.forEach(function(domain, idx) {
     h += buildDomainSection(domain, idx, data[domain.key], insights[domain.key], now, stats.byDomain[domain.key], failedByDomain[domain.key]);
   });
 
@@ -97,9 +113,9 @@ function buildCombinedEmailHTML(data, insights, now, fromDate, stats, failedUnit
  * 오늘의 하이라이트: 전 영역 중요도 '상' 항목을 상단에 모아 한눈에.
  * 스크롤 없이 핵심 파악 → 본문 길이 부담 완화.
  */
-function buildHighlights(data, now) {
+function buildHighlights(data, now, ordered) {
   var highs = [];
-  DOMAINS.forEach(function(domain) {
+  (ordered || DOMAINS).forEach(function(domain) {
     domain.units.forEach(function(u) {
       (data[domain.key][u.key] || []).forEach(function(it) {
         if (it.importance === '상') highs.push({ domain: domain, unit: u, it: it });
@@ -140,8 +156,10 @@ function buildDomainSection(domain, idx, domainData, domainInsight, now, domainS
   var failedSet = {};
   (failedUnitKeys || []).forEach(function(k) { failedSet[k] = true; });
 
-  // 영역 사이 큰 여백(중성 배경) — 영역 경계를 시각적으로 끊어줌
-  var h = '<tr><td bgcolor="#eef1f5" style="background-color:#eef1f5;font-size:0;line-height:0;height:18px;">&nbsp;</td></tr>';
+  // 영역 사이 큰 여백(중성 배경) — 영역 경계를 시각적으로 끊어줌.
+  // 헤더 목차 칩의 점프 대상 앵커를 이 셀 안에 둔다(앵커 미지원 클라이언트에서도 무해).
+  var h = '<tr><td bgcolor="#eef1f5" style="background-color:#eef1f5;font-size:0;line-height:0;height:18px;">' +
+    '<a name="sec-' + domain.key + '"></a>&nbsp;</td></tr>';
 
   // 도메인 대배너 (PART N · 영역명) — 왼쪽 굵은 컬러 라인 + 큰 글씨 + 넉넉한 패딩
   h += '<tr><td bgcolor="' + pal.band + '" style="padding:18px 28px;background-color:' + pal.band + ';border-left:8px solid #ffd54f;">' +
@@ -315,10 +333,13 @@ function buildSubjectTriage(stats) {
 }
 
 /**
- * 발송인 명단(B열 이메일, E열 'Y' 발송여부=있으면 준수) → 단일 메일 BCC 발송.
- * @returns {number} 발송 대상 수
+ * 발송인 명단으로 발송. 수신자를 관심영역(focus)별로 묶어, 그룹마다 담당 영역이
+ * 맨 앞(PART 1)에 오도록 재배열한 HTML 을 BCC 로 보낸다. 수집·정규화는 1회 그대로이고
+ * HTML 조립만 그룹 수(최대 도메인 수 + 기본, 4벌)만큼 반복하므로 추가 비용은 미미.
+ * @param {Object} result runMonitoringCore 결과 { data, insights, now, fromDate, stats, failedUnits }
+ * @returns {number} 발송 성공 인원 수
  */
-function sendCombinedEmail(htmlContent, date, stats) {
+function sendCombinedEmail(result) {
   var recipients = getRecipients();
   if (recipients.length === 0) {
     Logger.log('[주의] 유효한 수신자 없음');
@@ -328,14 +349,12 @@ function sendCombinedEmail(htmlContent, date, stats) {
     return 0;
   }
 
-  var dateStr = Utilities.formatDate(date, 'Asia/Seoul', 'yyyy년 MM월 dd일');
-  var subject = '[글로벌 통상 모니터링] ' + dateStr + buildSubjectTriage(stats);
+  var dateStr = Utilities.formatDate(result.now, 'Asia/Seoul', 'yyyy년 MM월 dd일');
+  var subject = '[글로벌 통상 모니터링] ' + dateStr + buildSubjectTriage(result.stats);
   var plain = '이 메일은 HTML 형식입니다. HTML 뷰어를 지원하는 메일 클라이언트에서 확인하세요.';
 
   // 쿼터 확인 — 수신자 수 기준(잔여 쿼터는 "수신자 수" 단위이지 "발송 통 수" 단위가 아니다).
-  // 부족하면 부분 발송(일부는 받고 일부는 못 받음) 대신 전량 중단한다 — 저장은 발송
-  // 성공(sent>0) 이후에만 이뤄지므로, 여기서 던져도 그날 수집한 항목은 유실되지 않고
-  // 다음 실행에서 그대로 재시도된다.
+  // 부족하면 부분 발송 대신 전량 중단한다 — 저장은 발송 성공 후에만 이뤄지므로 유실 없음.
   try {
     var quota = MailApp.getRemainingDailyQuota();
     Logger.log('잔여 메일 쿼터: ' + quota + ' / 수신자: ' + recipients.length + '명');
@@ -343,7 +362,7 @@ function sendCombinedEmail(htmlContent, date, stats) {
       throw new Error('Gmail 일일 발송 쿼터 부족 — 잔여 ' + quota + '건 / 필요 ' + recipients.length + '건');
     }
   } catch (qe) {
-    if (/쿼터 부족/.test(qe.message)) throw qe; // 쿼터 부족은 상위로 전파해 발송 자체를 중단
+    if (/쿼터 부족/.test(qe.message)) throw qe;
     Logger.log('쿼터 조회 실패(계속 진행): ' + qe.message);
   }
 
@@ -352,23 +371,32 @@ function sendCombinedEmail(htmlContent, date, stats) {
   if (!me) me = getAdminEmail();
   if (!me) throw new Error('발신 계정 이메일을 확인할 수 없어 발송을 중단합니다.');
 
+  // 관심영역(focus)별로 수신자 묶기 → 그룹당 HTML 1벌
+  var groups = {}; // focusKey('' 포함) → [email,...]
+  recipients.forEach(function(r) {
+    var f = r.focus || '';
+    if (!groups[f]) groups[f] = [];
+    groups[f].push(r.email);
+  });
+
   var sent = 0;
   var failures = [];
-  for (var i = 0; i < recipients.length; i += BCC_BATCH_SIZE) {
-    var batch = recipients.slice(i, i + BCC_BATCH_SIZE);
-    try {
-      GmailApp.sendEmail(me, subject, plain, {
-        htmlBody: htmlContent,
-        bcc: batch.map(function(r) { return r.email; }).join(','),
-        name: '통상 모니터링 시스템'
-      });
-      sent += batch.length;
-    } catch (e) {
-      failures.push(batch.length + '명 배치 실패: ' + e.message);
-      Logger.log('발송 실패: ' + e.message);
+  Object.keys(groups).forEach(function(focus) {
+    var html = buildCombinedEmailHTML(result.data, result.insights, result.now, result.fromDate,
+      result.stats, result.failedUnits, focus);
+    var emails = groups[focus];
+    for (var i = 0; i < emails.length; i += BCC_BATCH_SIZE) {
+      var batch = emails.slice(i, i + BCC_BATCH_SIZE);
+      try {
+        GmailApp.sendEmail(me, subject, plain, { htmlBody: html, bcc: batch.join(','), name: '통상 모니터링 시스템' });
+        sent += batch.length;
+      } catch (e) {
+        failures.push('[' + (focus || '기본') + '] ' + batch.length + '명 배치 실패: ' + e.message);
+        Logger.log('발송 실패: ' + e.message);
+      }
     }
-  }
-  Logger.log('발송 결과 - 성공 ' + sent + '명 / 실패 ' + failures.length + '배치');
+  });
+  Logger.log('발송 결과 - 성공 ' + sent + '명 / 실패 ' + failures.length + '배치 / 그룹 ' + Object.keys(groups).length + '개');
 
   if (failures.length > 0) {
     notifyAdmin('[주의] 통상 뉴스레터 일부 발송 실패 (' + dateStr + ')',

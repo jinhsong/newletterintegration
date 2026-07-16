@@ -26,7 +26,7 @@ function runDailyMonitoring(e) {
   try {
     var result = runMonitoringCore({ startMs: startMs });
     Logger.log('이메일 발송 중...');
-    var sent = sendCombinedEmail(result.html, result.now, result.stats);
+    var sent = sendCombinedEmail(result);
 
     // 저장은 발송 성공(1건 이상 발송) 후에만 수행한다 — 발송이 실패했는데
     // 먼저 저장해 버리면, 다음 실행의 7일 중복제거 이력에 걸려 그 항목들은

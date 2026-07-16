@@ -102,11 +102,16 @@ function checkEmailRequests() {
           var result = runMonitoringCore({ startMs: startMs });
           var dateStr = Utilities.formatDate(result.now, 'Asia/Seoul', 'yyyy년 MM월 dd일');
           var subject = '[글로벌 통상 모니터링] ' + dateStr + buildSubjectTriage(result.stats) + ' (요청)';
+          // 요청자별 관심영역(F열)을 반영해 담당 영역을 맨 앞에 배치
+          var focusMap = {};
+          getRecipients().forEach(function(r) { focusMap[r.email.toLowerCase()] = r.focus; });
           allowed.forEach(function(em) {
             try {
+              var html = buildCombinedEmailHTML(result.data, result.insights, result.now, result.fromDate,
+                result.stats, result.failedUnits, focusMap[em] || '');
               GmailApp.sendEmail(em, subject,
                 '이 메일은 HTML 형식입니다. HTML 뷰어로 확인하세요.',
-                { htmlBody: result.html, name: '통상 모니터링 시스템' });
+                { htmlBody: html, name: '통상 모니터링 시스템' });
               Logger.log('[요청] 발송 완료 → ' + em);
               // 실제 발송 성공 후에만 한도 차감 + 처리완료 표시.
               commitQuota('ONDEMAND_COUNTS', em);

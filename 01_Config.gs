@@ -393,3 +393,18 @@ function domainByKey(k) {
   for (var i = 0; i < DOMAINS.length; i++) if (DOMAINS[i].key === k) return DOMAINS[i];
   return null;
 }
+
+/**
+ * 발송인 명단 '관심영역' 열의 자유 입력 텍스트 → 도메인 key.
+ * 도메인 라벨(관세/수출통제/무역구제) 또는 key(customs/export/trade)를 느슨하게 매칭.
+ * 빈칸·'전체'·불명 → '' (기본 순서로 발송).
+ */
+function focusKeyFromText(text) {
+  var s = (text || '').toString().trim().toLowerCase();
+  if (!s || s === '전체' || s === 'all') return '';
+  for (var i = 0; i < DOMAINS.length; i++) {
+    var d = DOMAINS[i];
+    if (s === d.key.toLowerCase() || s.indexOf(d.label) !== -1 || d.label.indexOf(s) !== -1) return d.key;
+  }
+  return '';
+}
