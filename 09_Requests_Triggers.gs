@@ -99,7 +99,9 @@ function checkEmailRequests() {
       if (allowed.length > 0) {
         Logger.log('[요청] 처리 시작 → ' + allowed.join(', '));
         try {
-          var result = runMonitoringCore({ startMs: startMs });
+          // 온디맨드는 "지금 이 시점의 전체 현황"을 원하므로 DB 이력 중복제거를 건너뛴다
+          // (정기 발송분이 이미 DB에 있어 중복제거하면 빈 결과가 됨).
+          var result = runMonitoringCore({ startMs: startMs, dedupe: false });
           var dateStr = Utilities.formatDate(result.now, 'Asia/Seoul', 'yyyy년 MM월 dd일');
           var subject = '[글로벌 통상 모니터링] ' + dateStr + buildSubjectTriage(result.stats) + ' (요청)';
           // 요청자별 관심영역(F열)을 반영해 담당 영역을 맨 앞에 배치

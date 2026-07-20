@@ -58,6 +58,10 @@ function runDailyMonitoring(e) {
         }).join('\n'));
     }
 
+    // 발송 결과 스냅샷 저장 → resendLastBriefing() 이 재수집 없이 그대로 재발송할 수 있게.
+    // (수신자 0명이라 sent=0 이어도, 명단 보완 후 재전송할 수 있도록 저장해 둔다.)
+    saveResultSnapshot(result);
+
     logExecution('정기', sent, result.stats, '');
     Logger.log('=== 통합 모니터링 완료 ===');
   } catch (err) {
@@ -74,11 +78,56 @@ function runMonitoringNow() {
 }
 
 /**
+ * 재전송: 직전에 발송한 브리핑을 재수집 없이 그대로 다시 발송한다.
+ * 발송 실패분 보완, 뒤늦게 추가된 수신자 대상 재전송 등에 사용. 저장된 스냅샷을
+ * 재생하므로 오늘 내용이 그대로 유지되고(재수집 시 중복제거로 빈 결과가 되는 문제 없음),
+ * 관심영역 순서도 각 수신자에 맞춰 다시 적용된다.
+ * @param {string} [toEmails] 특정 수신자에게만 재전송 (쉼표/공백 구분). 생략 시 현재 명단 전체.
+ */
+function resendLastBriefing(toEmails) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(60000)) { Logger.log('[재전송] 잠금 실패 → 다른 실행 진행 중'); return; }
+  try {
+    var result = loadResultSnapshot();
+    if (!result) {
+      Logger.log('[재전송] 저장된 스냅샷 없음');
+      notifyAdmin('[재전송 불가] 스냅샷 없음',
+        '재전송할 직전 발송 내역이 없습니다. runMonitoringNow() 로 새로 발송하세요.');
+      return;
+    }
+
+    var override = null;
+    if (toEmails && toEmails.toString().trim()) {
+      var focusMap = {};
+      getRecipients().forEach(function(r) { focusMap[r.email.toLowerCase()] = r.focus; });
+      override = toEmails.toString().split(/[,;\s]+/)
+        .map(function(e) { return e.trim(); })
+        .filter(function(e) { return e.indexOf('@') !== -1; })
+        .map(function(e) { return { name: '', email: e, focus: focusMap[e.toLowerCase()] || '' }; });
+      if (override.length === 0) { Logger.log('[재전송] 유효한 수신자 지정 없음'); return; }
+    }
+
+    var sent = sendCombinedEmail(result, override);
+    logExecution('재전송', sent, result.stats, override ? ('지정 ' + override.length + '명') : '명단 전체');
+    Logger.log('[재전송] 완료 — ' + sent + '명 (' +
+      Utilities.formatDate(result.now, 'Asia/Seoul', 'yyyy-MM-dd HH:mm') + ' 발송분)');
+  } catch (e) {
+    Logger.log('[재전송] 오류: ' + e.message);
+    notifyAdmin('[재전송 오류]', e.message + '\n\n' + (e.stack || ''));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
  * 수집 → 발송용 HTML 빌드까지의 공통 파이프라인 (정기/요청 공용).
  * 저장(시트/옵시디안)은 이 함수가 하지 않는다 — 호출자가 발송 성공을 확인한
  * 뒤에 저장해야 "발송 실패 시 항목이 중복제거 이력에 걸려 영구 유실"되는
  * 사고를 막을 수 있다 (runDailyMonitoring 참조).
- * @param {Object} [opts] {startMs}
+ * @param {Object} [opts] {startMs, dedupe}
+ *   dedupe=false 면 동향DB 이력 대비 중복 제거를 생략하고 "현재 전체 현황"을 반환한다.
+ *   온디맨드 요청/재전송처럼 지금 이 시점의 전체를 원할 때 사용 (정기 발송분이 이미
+ *   DB에 저장돼 있어 중복제거하면 빈 결과가 되는 것을 방지).
  * @returns {Object} { html, now, fromDate, data, insights, stats, failedUnits }
  */
 function runMonitoringCore(opts) {
@@ -109,13 +158,17 @@ function runMonitoringCore(opts) {
     setItems(kept);
   });
 
-  // 3. 중복 제거 (도메인별 DB 최근 7일 + 런 내)
-  DOMAINS.forEach(function(domain) {
-    var history = loadRecentTitles(domain, DEDUPE_LOOKBACK_DAYS, fromDate);
-    dedupeDomain(data[domain.key], history);
-  });
+  // 3. 중복 제거 (동향DB 이력 대비) — dedupe=false(온디맨드/재전송)면 생략해 전체 현황 유지
+  if (opts.dedupe !== false) {
+    DOMAINS.forEach(function(domain) {
+      var history = loadRecentTitles(domain, DEDUPE_LOOKBACK_DAYS, fromDate);
+      dedupeDomain(data[domain.key], history);
+    });
+  } else {
+    Logger.log('[중복] DB 이력 대비 중복 제거 생략 (전체 현황 요청)');
+  }
 
-  // 3-1. 교차 영역 중복 제거 (안전망): 일반 버킷 도메인 ∩ 전문 도메인 → 일반 버킷에서 제거
+  // 3-1. 교차 영역 중복 제거 (같은 메일 안에서 관세↔전문영역 중복 방지) — 항상 수행
   removeCrossDomainOverlap(data);
 
   // 4. 원문 URL 확보 (grounding → 모델 URL 검증 → 뉴스 RSS → 검색 링크 폴백)

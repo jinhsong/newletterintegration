@@ -337,15 +337,18 @@ function buildSubjectTriage(stats) {
  * 맨 앞(PART 1)에 오도록 재배열한 HTML 을 BCC 로 보낸다. 수집·정규화는 1회 그대로이고
  * HTML 조립만 그룹 수(최대 도메인 수 + 기본, 4벌)만큼 반복하므로 추가 비용은 미미.
  * @param {Object} result runMonitoringCore 결과 { data, insights, now, fromDate, stats, failedUnits }
+ * @param {Array} [recipientsOverride] 지정 시 명단 대신 이 수신자 목록으로 발송(재전송 등). [{email,focus}]
  * @returns {number} 발송 성공 인원 수
  */
-function sendCombinedEmail(result) {
-  var recipients = getRecipients();
+function sendCombinedEmail(result, recipientsOverride) {
+  var recipients = recipientsOverride || getRecipients();
   if (recipients.length === 0) {
     Logger.log('[주의] 유효한 수신자 없음');
-    notifyAdmin('[주의] 통상 모니터링 발송 대상 없음',
-      '발송인 명단에서 유효한 수신자를 찾지 못해 오늘 발송을 건너뛰었습니다.\n' +
-      '시트가 비어있는 것이 맞는지, 혹은 일시적인 조회 오류인지 확인해 주세요.');
+    if (!recipientsOverride) {
+      notifyAdmin('[주의] 통상 모니터링 발송 대상 없음',
+        '발송인 명단에서 유효한 수신자를 찾지 못해 오늘 발송을 건너뛰었습니다.\n' +
+        '시트가 비어있는 것이 맞는지, 혹은 일시적인 조회 오류인지 확인해 주세요.');
+    }
     return 0;
   }
 

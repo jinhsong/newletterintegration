@@ -63,6 +63,56 @@ function clearObsidianFolderId() {
   Logger.log('[옵시디안] 폴더 ID 해제 → 폴더명("' + OBSIDIAN_FOLDER + '") 방식 전환');
 }
 
+
+// ============================================================
+//  발송 결과 스냅샷 (재전송용)
+//  직전 발송의 data/insights/시각을 Drive JSON 으로 저장해 두었다가,
+//  resendLastBriefing() 이 재수집 없이 그대로 재발송할 수 있게 한다.
+//  (스크립트 속성은 값당 9KB 제한이라 큰 HTML/데이터를 담기 어려워 Drive 파일 사용.)
+// ============================================================
+var SNAPSHOT_FILE = '_last_run_snapshot.json';
+
+function saveResultSnapshot(result) {
+  try {
+    var folder = getObsidianFolder();
+    var payload = JSON.stringify({
+      nowISO: result.now.toISOString(),
+      fromISO: result.fromDate.toISOString(),
+      data: result.data,
+      insights: result.insights,
+      failedUnits: result.failedUnits || []
+    });
+    var files = folder.getFilesByName(SNAPSHOT_FILE);
+    if (files.hasNext()) files.next().setContent(payload);
+    else folder.createFile(SNAPSHOT_FILE, payload, 'application/json');
+    Logger.log('[스냅샷] 저장 완료 (' + payload.length + ' bytes)');
+  } catch (e) {
+    Logger.log('[스냅샷] 저장 실패(재전송 불가 가능): ' + e.message);
+  }
+}
+
+/**
+ * 직전 발송 스냅샷을 읽어 sendCombinedEmail 이 바로 쓸 수 있는 result 형태로 복원.
+ * @returns {Object|null} { data, insights, now, fromDate, stats, failedUnits } 또는 없으면 null
+ */
+function loadResultSnapshot() {
+  var folder = getObsidianFolder();
+  var files = folder.getFilesByName(SNAPSHOT_FILE);
+  if (!files.hasNext()) return null;
+  var raw = files.next().getBlob().getDataAsString('UTF-8');
+  var s = JSON.parse(raw);
+  var now = new Date(s.nowISO);
+  var fromDate = new Date(s.fromISO);
+  return {
+    data: s.data,
+    insights: s.insights,
+    now: now,
+    fromDate: fromDate,
+    stats: computeStats(s.data, now),
+    failedUnits: s.failedUnits || []
+  };
+}
+
 function saveToObsidian(data, insights, now, fromDate) {
   try {
     var folder = getObsidianFolder();
