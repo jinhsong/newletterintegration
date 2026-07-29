@@ -125,7 +125,7 @@ async function runPool(jobs, worker, limit) {
   return output;
 }
 
-function normalizeTitle(value) {
+export function normalizeTitle(value) {
   return String(value || '')
     .toLowerCase()
     .replace(/\s+/g, '')
@@ -192,6 +192,23 @@ function dedupeCurrentRun(data) {
   }
 }
 
+function dedupeHistory(data, historyTitles) {
+  if (!historyTitles) return;
+  for (const domain of domains) {
+    const seen = Array.isArray(historyTitles[domain.key])
+      ? historyTitles[domain.key].filter(Boolean)
+      : [];
+    for (const unit of domain.units) {
+      data[domain.key][unit.key] = data[domain.key][unit.key].filter((item) => {
+        if (isDuplicate(item.title, seen)) return false;
+        const normalized = normalizeTitle(item.title);
+        if (normalized) seen.push(normalized);
+        return true;
+      });
+    }
+  }
+}
+
 function filterDates(items, ctx) {
   return items.filter((item) => (
     /^\d{4}-\d{2}-\d{2}$/.test(item.announcedDate || '')
@@ -200,8 +217,29 @@ function filterDates(items, ctx) {
   ));
 }
 
-function statsFor(data) {
-  const stats = { total: 0, high: 0, byDomain: {} };
+function daysSinceKst(dateString, now) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString || '')) return null;
+  const today = formatKst(now, false);
+  const itemMs = Date.UTC(
+    Number(dateString.slice(0, 4)),
+    Number(dateString.slice(5, 7)) - 1,
+    Number(dateString.slice(8, 10)),
+  );
+  const todayMs = Date.UTC(
+    Number(today.slice(0, 4)),
+    Number(today.slice(5, 7)) - 1,
+    Number(today.slice(8, 10)),
+  );
+  return Math.round((todayMs - itemMs) / 86400000);
+}
+
+function statsFor(data, now) {
+  const stats = {
+    total: 0,
+    high: 0,
+    maxDays: null,
+    byDomain: {},
+  };
   for (const domain of domains) {
     const domainStats = { total: 0, high: 0 };
     for (const unit of domain.units) {
@@ -211,6 +249,10 @@ function statsFor(data) {
         if (item.importance === '상') {
           domainStats.high += 1;
           stats.high += 1;
+        }
+        const days = daysSinceKst(item.announcedDate, now);
+        if (days !== null && (stats.maxDays === null || days > stats.maxDays)) {
+          stats.maxDays = days;
         }
       }
     }
@@ -276,6 +318,7 @@ export async function collectWithGeminiCli(options = {}) {
     throw new Error('17개 수집 단위가 모두 실패했습니다. 결과 파일을 전달하지 않습니다.');
   }
   dedupeCurrentRun(data);
+  dedupeHistory(data, options.historyTitles);
 
   const insights = plain(makeEmptyInsights());
   if (!options.skipInsights) {
@@ -306,7 +349,7 @@ export async function collectWithGeminiCli(options = {}) {
     }, Math.min(3, concurrency));
   }
 
-  const stats = statsFor(data);
+  const stats = statsFor(data, ctx.now);
   const deliveryKey = options.deliveryKey || ctx.toISO;
   return {
     version: 1,

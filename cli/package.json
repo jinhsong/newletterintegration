@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Gemini Code Assist Enterprise OAuth 기반 통상 모니터링 수집기",
+  "description": "Gemini Code Assist Enterprise OAuth + 사내 SMTP 기반 로컬 통상 모니터링",
   "scripts": {
     "monitor": "node run.mjs",
-    "test": "node --test test/*.test.mjs",
-    "check": "node --check run.mjs && node --test test/*.test.mjs"
+    "test": "node --test test/runner.test.mjs test/local-delivery.test.mjs",
+    "check": "node --check run.mjs && node --test test/runner.test.mjs test/local-delivery.test.mjs"
   },
   "engines": {
     "node": ">=20"

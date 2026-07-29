@@ -22,13 +22,6 @@
 // ============================================================
 
 function checkEmailRequests() {
-  // 온디맨드 요청은 즉시 모델 호출이 필요하므로 현재 CLI inbox 모드에서는 지원하지 않는다.
-  // API 모드로 되돌리면 setupTriggers()가 이 트리거를 다시 등록한다.
-  if (typeof isCliRuntime_ === 'function' && isCliRuntime_()) {
-    Logger.log('[요청] Gemini CLI 모드에서는 이메일 온디맨드 요청을 처리하지 않음');
-    return;
-  }
-
   var startMs = Date.now();
   try {
     var label = GmailApp.getUserLabelByName(PROCESSED_LABEL) || GmailApp.createLabel(PROCESSED_LABEL);
@@ -198,12 +191,9 @@ function extractEmail(raw) {
 
 /** 평일(월~금) 09시 정기 + 5분 요청 폴링 등록 */
 function setupTriggers() {
-  PropertiesService.getScriptProperties().setProperty(MONITORING_RUNTIME_PROP, 'API');
   ScriptApp.getProjectTriggers().forEach(function(t) {
     var fn = t.getHandlerFunction();
-    if (fn === 'runDailyMonitoring' || fn === 'checkEmailRequests' || fn === 'processCliInbox') {
-      ScriptApp.deleteTrigger(t);
-    }
+    if (fn === 'runDailyMonitoring' || fn === 'checkEmailRequests') ScriptApp.deleteTrigger(t);
   });
 
   [ScriptApp.WeekDay.MONDAY, ScriptApp.WeekDay.TUESDAY, ScriptApp.WeekDay.WEDNESDAY,

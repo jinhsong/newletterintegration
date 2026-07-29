@@ -1,3 +1,6 @@
 cli/.env
 cli/output/
+cli/data/
+cli/logs/
+cli/config/recipients.csv
 **/*.log

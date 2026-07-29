@@ -9,9 +9,9 @@ import { domains, repoRoot } from '../src/config-loader.mjs';
 import { collectWithGeminiCli, createContext } from '../src/pipeline.mjs';
 import { parseJsonArray, parseJsonObject } from '../src/json-utils.mjs';
 
-test('Apps Script 소스가 JavaScript 문법으로 파싱된다', async () => {
+test('공통 .gs 소스가 JavaScript 문법으로 파싱된다', async () => {
   const names = (await fs.readdir(repoRoot)).filter((name) => name.endsWith('.gs'));
-  assert.equal(names.length, 10);
+  assert.equal(names.length, 9);
   for (const name of names) {
     const source = await fs.readFile(path.join(repoRoot, name), 'utf8');
     assert.doesNotThrow(() => new vm.Script(source, { filename: name }));
@@ -43,8 +43,12 @@ test('fixture는 유효한 JSON이며 임시 경로에서 치환할 수 있다',
   assert.equal(fixture.units['customs/북미'][0]['발표일'], today);
 
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'trade-monitor-test-'));
-  await fs.writeFile(path.join(temp, 'responses.json'), JSON.stringify(fixture), 'utf8');
-  assert.ok((await fs.stat(path.join(temp, 'responses.json'))).isFile());
+  try {
+    await fs.writeFile(path.join(temp, 'responses.json'), JSON.stringify(fixture), 'utf8');
+    assert.ok((await fs.stat(path.join(temp, 'responses.json'))).isFile());
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
 });
 
 test('mock 수집이 공통 스키마 payload를 만든다', async () => {
