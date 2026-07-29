@@ -1,0 +1,15 @@
+{
+  "name": "trade-monitor-gemini-cli",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Gemini Code Assist Enterprise OAuth 기반 통상 모니터링 수집기",
+  "scripts": {
+    "monitor": "node run.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check run.mjs && node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

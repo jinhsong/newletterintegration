@@ -10,6 +10,13 @@
 function runDailyMonitoring(e) {
   var startMs = Date.now();
 
+  // CLI 모드에서는 로컬 Gemini CLI가 수집한 Drive inbox 파일만 처리한다.
+  // 예전에 등록된 API 정기 트리거가 남아 있어도 Gemini API를 호출하지 않도록 방어.
+  if (e && typeof isCliRuntime_ === 'function' && isCliRuntime_()) {
+    Logger.log('Gemini CLI 모드 → API 정기 모니터링 트리거 생략');
+    return;
+  }
+
   // 주말 자동 실행만 차단. 수동 실행(e 없음)은 주말에도 테스트 가능.
   if (shouldSkipWeekendRun(e, new Date())) {
     Logger.log('주말 자동 실행 → 정기 모니터링 생략');

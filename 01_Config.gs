@@ -19,14 +19,15 @@
 //
 // [초기 설정 순서]
 //  1. 프로젝트 설정 > 스크립트 속성
-//       GEMINI_API_KEY      (필수)
+//       GEMINI_API_KEY      (Gemini API 모드에서만 필수)
 //       ADMIN_EMAIL         (선택, 오류 알림 수신)
 //       OBSIDIAN_FOLDER_ID  (선택, 옵시디안 저장)
 //  2. initializeSheets()        실행 → 시트 생성
 //  3. 발송인 명단 시트에 수신자 입력 (A:이름 B:이메일 / E열 발송여부:
 //     'N' 이면 제외, 비어있거나 그 외 값이면 발송 — 명시적으로 뺄 사람만 'N' 표시)
-//  4. setupTriggers()           실행 → 평일 09시 정기 + 5분 요청 폴링 등록
-//  5. runMonitoringNow()        실행 → 즉시 테스트 발송
+//  4-A. API 모드: setupApiModeTriggers() → 평일 09시 정기 + 5분 요청 폴링
+//  4-B. CLI 모드: setCliInboxFolderId() → setupCliModeTriggers()
+//  5. 각 모드의 README 테스트 절차를 수행
 // ============================================================
 
 // ── 공통 모델/엔드포인트 ─────────────────────────────────
@@ -73,6 +74,17 @@ var BCC_BATCH_SIZE = 45;           // 메일 1통당 BCC 인원
 // ── 옵시디안 ─────────────────────────────────────────────
 var OBSIDIAN_FOLDER_ID_PROP = 'OBSIDIAN_FOLDER_ID';
 var OBSIDIAN_FOLDER = '통상동향';   // 폴더 ID 미지정 시 사용할 폴더명
+
+// ── Gemini CLI 연동 ───────────────────────────────────────
+// 로컬 Gemini CLI가 Google Drive for desktop 동기화 폴더에 결과 JSON을 놓으면,
+// Apps Script가 같은 Drive 폴더를 폴링해 기존 메일/시트/옵시디안 파이프라인을 실행한다.
+// API 모드와 CLI 모드는 MONITORING_RUNTIME 스크립트 속성으로 구분한다.
+var MONITORING_RUNTIME_PROP = 'MONITORING_RUNTIME';
+var CLI_INBOX_FOLDER_ID_PROP = 'CLI_INBOX_FOLDER_ID';
+var CLI_PAYLOAD_VERSION = 1;
+var CLI_INBOX_PENDING_PREFIX = 'trade-monitor-pending-';
+var CLI_INBOX_MAX_BYTES = 1500000;
+var CLI_LAST_DELIVERY_KEY_PROP = 'CLI_LAST_DELIVERY_KEY';
 
 // ── 이메일 요청 (온디맨드) ───────────────────────────────
 var REQUEST_KEYWORD = '통상 요청';            // 제목에 포함되면 처리
@@ -276,7 +288,7 @@ var DOMAIN_EXPORT = {
       sourceName: _str(raw.source_name),
       importanceReason: '',
       notes: _str(raw.notes),
-      __modelUrl: ''
+      __modelUrl: _modelUrl(raw.source_url)
     };
   },
   buildPrompt: function(unit, ctx) {
@@ -288,6 +300,7 @@ var DOMAIN_EXPORT = {
       '"target_countries":"대상/영향 국가",' +
       '"related_agencies":"BIS|OFAC|DDTC|백악관|산업통상부|무역안보관리원|무역협회|관세청|European Commission|METI|MOFCOM|UN|WA|NSG|MTCR|AG|기타",' +
       '"source_name":"출처 기관/매체 짧은 이름",' +
+      '"source_url":"정부·기관·언론의 원문 전체 URL, 확인 불가하면 빈 문자열",' +
       '"search_query":"영문 검색 키워드 5-8단어",' +
       '"notes":"확실한 맥락만, 불확실하면 빈 문자열"}]';
     return 'You are an expert analyst of global export control regulations.\n' +

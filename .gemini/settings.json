@@ -1,0 +1,7 @@
+{
+  "security": {
+    "auth": {
+      "enforcedType": "oauth-personal"
+    }
+  }
+}

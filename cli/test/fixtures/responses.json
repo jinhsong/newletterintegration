@@ -1,0 +1,51 @@
+{
+  "units": {
+    "customs/북미": [
+      {
+        "구분": "관세율",
+        "중요도": "상",
+        "제목": "미국 전자부품 관세 조정 시험 데이터",
+        "제목EN": "US electronic components tariff adjustment",
+        "주요내용": "CLI 파이프라인 검증을 위한 시험 데이터입니다.",
+        "발표일": "__TODAY__",
+        "시행일": "",
+        "HS코드": "8517",
+        "발표국가": "미국",
+        "영향국가": "한국",
+        "관련기관": "USTR",
+        "출처명": "USTR",
+        "출처URL": "https://ustr.gov/example",
+        "중요도근거": "시험 데이터"
+      }
+    ],
+    "export/US": [
+      {
+        "importance": "중",
+        "title": "미국 수출통제 시험 데이터",
+        "summary": "CLI 수출통제 정규화 검증용입니다.",
+        "published_date": "__TODAY__",
+        "issuing_country": "미국",
+        "target_countries": "한국",
+        "related_agencies": "BIS",
+        "source_name": "BIS",
+        "source_url": "https://www.bis.gov/example",
+        "search_query": "BIS export control test",
+        "notes": ""
+      }
+    ]
+  },
+  "insights": {
+    "customs": {
+      "overall": "시험 관세 인사이트입니다.",
+      "byCategory": {
+        "북미": "시험 북미 인사이트입니다."
+      }
+    },
+    "export": {
+      "overall": "시험 수출통제 인사이트입니다.",
+      "byCategory": {
+        "US": "시험 미국 인사이트입니다."
+      }
+    }
+  }
+}
