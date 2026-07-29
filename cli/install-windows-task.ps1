@@ -24,7 +24,7 @@ Register-ScheduledTask `
   -Action $action `
   -Trigger $trigger `
   -Settings $settings `
-  -Description '사내 Gemini CLI로 수집하고 사내 SMTP로 통상 뉴스레터 자동 발송' `
+  -Description '사내 Gemini CLI로 통상 동향을 수집해 PC에 HTML 파일 저장' `
   -Force
 
 Write-Host "작업 스케줄러 등록 완료: $TaskName / 평일 $At"

@@ -11,7 +11,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   throw 'Node.js 20 이상이 필요합니다.'
 }
 
-node .\run.mjs --send *>> $logPath
+node .\run.mjs *>> $logPath
 if ($LASTEXITCODE -ne 0) {
-  throw "통상 모니터링 실행 실패 (exit $LASTEXITCODE) — 로그: $logPath"
+  throw "통상 모니터링 HTML 생성 실패 (exit $LASTEXITCODE) — 로그: $logPath"
 }
