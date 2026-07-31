@@ -26,13 +26,14 @@ const ITEM_SCHEMA = `{
   "summary": "핵심 조치·수치·일정을 담은 한국어 2~3문장",
   "businessImpact": "전자·가전·부품 기업 관점의 영향 1문장, 없으면 빈 문자열",
   "announcedDate": "YYYY-MM-DD",
+  "announcedAt": "원문에서 확인한 발표시각(시간대 포함 ISO 8601) 또는 빈 문자열",
   "effectiveDate": "YYYY-MM-DD 또는 빈 문자열",
   "hsCode": "관련 HS 코드 또는 빈 문자열",
   "issuingCountry": "발표 주체 국가 또는 기구",
   "targetCountries": "대상·영향 국가",
   "agency": "발표 기관",
   "sourceName": "원문 기관 또는 매체명",
-  "sourceUrl": "확인한 HTTPS 원문 URL 또는 빈 문자열",
+  "sourceUrl": "확인한 HTTPS 원문 URL(필수, 없으면 항목 자체 제외)",
   "notes": "적용 범위 등 확실한 추가 정보 또는 빈 문자열"
 }`;
 
@@ -42,10 +43,10 @@ const customsUnits = [
   ['인도', '인도'],
   ['유럽', '영국, EU 및 회원국'],
   ['중동', '이집트, 사우디아라비아, UAE, 모로코, 튀니지, 요르단, 알제리, 튀르키예, 파키스탄, 이스라엘, 이라크'],
-  ['동남아', '인도네시아, 말레이시아, 태국, 베트남, 호주, 필리핀, 뉴질랜드, 싱가포르'],
+  ['동남아/오세아니아', '인도네시아, 말레이시아, 태국, 베트남, 필리핀, 싱가포르, 호주, 뉴질랜드'],
   ['아프리카', '남아프리카공화국, 나이지리아, 케냐'],
   ['CIS', '러시아, 카자흐스탄, 우즈베키스탄'],
-  ['중국', '중국'],
+  ['동아시아', '중국, 한국, 일본, 대만, 홍콩'],
 ];
 
 const exportUnits = [
@@ -53,6 +54,7 @@ const exportUnits = [
   ['한국', '산업통상부, 무역안보관리원, 관세청, 한국무역협회(KITA), 국가정보원 등'],
   ['EU/일본', 'European Commission, Council of the EU, 일본 METI'],
   ['중국/베트남', '중국 MOFCOM·국무원·MIIT·해관, 베트남 산업무역부·세관'],
+  ['영국/캐나다/호주/인도', '영국 DBT·OFSI, 캐나다 Global Affairs, 호주 DFAT, 인도 DGFT'],
   ['UN 및 다자체제', 'UN 안보리, Wassenaar, NSG, MTCR, Australia Group'],
 ];
 
@@ -111,11 +113,17 @@ export const domains = [
 
 export const unitCount = domains.reduce((sum, domain) => sum + domain.units.length, 0);
 
-export function buildDomainPrompt(domain, context) {
-  const categoryTemplate = domain.units
+export function buildDomainPrompt(domain, context, requestedUnits = domain.units) {
+  const selectedUnits = requestedUnits.filter((requested) => (
+    domain.units.some((unit) => unit.key === requested.key)
+  ));
+  if (selectedUnits.length === 0) {
+    throw new Error(`${domain.label} 조사 카테고리가 비어 있습니다.`);
+  }
+  const categoryTemplate = selectedUnits
     .map((unit) => `    "${unit.key}": [${ITEM_SCHEMA}]`)
     .join(',\n');
-  const categoryScope = domain.units
+  const categoryScope = selectedUnits
     .map((unit) => `- ${unit.key}: ${unit.description}`)
     .join('\n');
 
@@ -129,8 +137,13 @@ export function buildDomainPrompt(domain, context) {
     categoryScope,
     domain.scope.trim(),
     COMMON_RULES.trim(),
+    '- 원문에 발표시각과 시간대가 명시된 경우에만 announcedAt을 기록한다. 시각을 추정하지 않고, ISO 8601의 날짜 부분은 announcedDate와 같아야 한다.',
+    '- announcedAt이 없으면 announcedDate 기준의 KST 달력 날짜 범위로 판정된다는 점을 고려한다.',
+    '- 포함하는 항목은 importance, importanceReason, measureType, title, summary, announcedDate, issuingCountry, agency, sourceName, sourceUrl을 모두 채운다.',
+    '- sourceUrl은 실제로 검색에서 확인한 공개 HTTPS 원문이어야 한다. URL이 없거나 중요도가 상·중·하 중 하나가 아니면 항목을 제외한다.',
     '',
     '[수집 수량]',
+    '- 각 카테고리마다 그 범위를 명시한 Google 웹 검색을 최소 1회 별도로 실행한다. 하나의 광범위한 검색으로 여러 카테고리를 검색했다고 간주하지 않는다.',
     '- 각 카테고리별 최대 5건. 해당 기간에 검증된 신규 동향이 없으면 빈 배열을 둔다.',
     '- 모든 카테고리 키를 반드시 한 번씩 포함한다.',
     '',

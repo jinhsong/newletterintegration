@@ -1,11 +1,20 @@
 import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { stopAllGeminiProcesses } from './src/gemini-client.mjs';
+import { parseArgs } from './src/cli-args.mjs';
+import {
+  prepareResearchWorkspace,
+  preflightGeminiCli,
+  stopAllGeminiProcesses,
+  totalTimeoutMs,
+} from './src/gemini-client.mjs';
 import { renderMonitoringHtml } from './src/html-renderer.mjs';
 import { collectMonitoring } from './src/pipeline.mjs';
+import { acquireRunLock } from './src/run-lock.mjs';
 import {
   resolveOutputFile,
   saveHtmlOutput,
@@ -13,6 +22,15 @@ import {
 
 const cliDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(cliDir);
+const LOCAL_ENV_KEYS = new Set([
+  'GEMINI_CLI_BIN',
+  'GEMINI_CLI_MODEL',
+  'GEMINI_CLI_RETRY_MAX',
+  'GEMINI_CLI_TIMEOUT_MS',
+  'GEMINI_RUN_TIMEOUT_MS',
+  'GOOGLE_CLOUD_PROJECT',
+  'LOCAL_OUTPUT_FILE',
+]);
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -24,6 +42,10 @@ function loadEnvFile(filePath) {
     const key = trimmed.slice(0, index).trim();
     let value = trimmed.slice(index + 1).trim();
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key) || process.env[key] !== undefined) continue;
+    if (!LOCAL_ENV_KEYS.has(key)) {
+      console.warn(`cli/.env의 허용되지 않은 설정을 무시했습니다: ${key}`);
+      continue;
+    }
     if ((value.startsWith('"') && value.endsWith('"'))
       || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
     process.env[key] = value;
@@ -35,29 +57,37 @@ loadEnvFile(path.join(cliDir, '.env'));
 function help() {
   console.log(`
 사용법:
-  node run.mjs [--lookback 24|72|168] [--out FILE] [--open]
+  node run.mjs [--lookback 24|72|168] [--out FILE] [--open|--no-open]
   node run.mjs --mock test/fixtures/responses.json [--out FILE]
 
 회사 계정으로 로그인된 Gemini CLI를 사용해 통상 동향을 조사하고
 PC에 HTML 파일 하나만 저장합니다.
 
 기본 결과: cli/output/monitoring.html
+목 테스트 기본 결과: cli/output/mock-monitoring.html
 `);
 }
 
-function parseArgs(argv) {
-  const options = { open: false };
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === '--lookback') options.lookbackHours = Number.parseInt(argv[++index], 10);
-    else if (arg === '--out') options.outputFile = path.resolve(process.cwd(), argv[++index]);
-    else if (arg === '--mock') options.mockPath = path.resolve(process.cwd(), argv[++index]);
-    else if (arg === '--open') options.open = true;
-    else if (arg === '--no-open') options.open = false;
-    else if (arg === '--help' || arg === '-h') options.help = true;
-    else throw new Error(`알 수 없는 인자: ${arg}`);
+async function createResearchWorkspace() {
+  const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'trade-monitor-gemini-'));
+  try {
+    await prepareResearchWorkspace(directory);
+    return directory;
+  } catch (error) {
+    await removeResearchWorkspace(directory).catch(() => {});
+    throw error;
   }
-  return options;
+}
+
+async function removeResearchWorkspace(directory) {
+  if (!directory) return;
+  const tempRoot = path.resolve(os.tmpdir());
+  const resolved = path.resolve(directory);
+  if (!resolved.startsWith(`${tempRoot}${path.sep}`)
+    || !path.basename(resolved).startsWith('trade-monitor-gemini-')) {
+    throw new Error(`임시 작업 폴더 경로가 안전하지 않아 삭제하지 않았습니다: ${resolved}`);
+  }
+  await fsPromises.rm(resolved, { recursive: true, force: true });
 }
 
 function openHtml(filePath) {
@@ -78,6 +108,15 @@ function openHtml(filePath) {
   child.unref();
 }
 
+function throwIfAborted(signal, code = 'ABORTED') {
+  if (!signal.aborted) return;
+  // 전체 제한시간 도달은 이미 pipeline이 미조사 범위를 표시했으므로 부분 HTML 저장을 허용한다.
+  if (signal.reason?.code === 'RUN_TIMEOUT') return;
+  const error = new Error('사용자가 실행을 중단했습니다.');
+  error.code = code;
+  throw error;
+}
+
 async function main() {
   const nodeMajor = Number.parseInt(process.versions.node.split('.')[0], 10);
   if (!Number.isInteger(nodeMajor) || nodeMajor < 20) {
@@ -89,13 +128,18 @@ async function main() {
     return;
   }
 
-  const outputFile = resolveOutputFile(
-    cliDir,
-    process.env.LOCAL_OUTPUT_FILE,
-    options.outputFile,
-  );
+  const outputFile = options.mockPath && !options.outputFile
+    ? path.join(cliDir, 'output', 'mock-monitoring.html')
+    : resolveOutputFile(
+      cliDir,
+      process.env.LOCAL_OUTPUT_FILE,
+      options.outputFile,
+    );
   const controller = new AbortController();
   let interrupted = false;
+  let runLock;
+  let researchWorkspace;
+  let deadlineTimer;
   const onInterrupt = () => {
     if (interrupted) return;
     interrupted = true;
@@ -106,18 +150,39 @@ async function main() {
   process.on('SIGTERM', onInterrupt);
 
   try {
+    runLock = await acquireRunLock(outputFile);
+    if (!options.mockPath) {
+      researchWorkspace = await createResearchWorkspace();
+      console.log('Gemini CLI 및 사내 보안 정책 호환성을 확인합니다...');
+      await preflightGeminiCli({ cwd: researchWorkspace, signal: controller.signal });
+      const deadline = totalTimeoutMs();
+      console.log(`전체 실행 제한: ${Math.round(deadline / 60000)}분`);
+      deadlineTimer = setTimeout(() => {
+        const error = new Error(
+          `전체 실행 제한 ${Math.round(deadline / 60000)}분을 초과해 남은 범위를 중단했습니다.`,
+        );
+        error.code = 'RUN_TIMEOUT';
+        controller.abort(error);
+      }, deadline);
+      deadlineTimer.unref();
+    }
     const payload = await collectMonitoring({
-      cwd: repoRoot,
+      cwd: researchWorkspace || repoRoot,
       lookbackHours: options.lookbackHours,
       mockPath: options.mockPath,
       signal: controller.signal,
     });
+    throwIfAborted(controller.signal);
     if (payload.collection.completedDomains === 0) {
-      throw new Error('세 영역이 모두 실패하여 기존 HTML을 덮어쓰지 않았습니다. 위 오류 코드를 확인하세요.');
+      const error = new Error('세 영역이 모두 실패하여 기존 HTML을 덮어쓰지 않았습니다. 위 오류 코드를 확인하세요.');
+      if (payload.failures.some((failure) => failure.code === 'RUN_TIMEOUT')) error.code = 'RUN_TIMEOUT';
+      throw error;
     }
 
     const html = renderMonitoringHtml(payload);
+    throwIfAborted(controller.signal);
     await saveHtmlOutput(html, outputFile);
+    throwIfAborted(controller.signal, 'ABORTED_AFTER_SAVE');
     console.log('');
     console.log(`HTML 저장 완료: ${outputFile}`);
     console.log(`수집 결과: 총 ${payload.stats.total}건 / 중요도 상 ${payload.stats.high}건`);
@@ -125,20 +190,40 @@ async function main() {
       console.warn(`주의: ${payload.failures.length}개 영역 실패가 HTML 상단에 표시되었습니다.`);
     }
     console.log('메일 발송, 예약 실행, 외부 저장은 수행하지 않았습니다.');
-    if (options.open) openHtml(outputFile);
+    if (options.open) {
+      throwIfAborted(controller.signal, 'ABORTED_AFTER_SAVE');
+      openHtml(outputFile);
+    }
   } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    await stopAllGeminiProcesses();
+    const cleanup = await Promise.allSettled([
+      removeResearchWorkspace(researchWorkspace),
+      runLock?.release(),
+    ]);
+    for (const result of cleanup) {
+      if (result.status === 'rejected') {
+        console.warn(`임시 실행 정보 정리 경고: ${result.reason?.message || result.reason}`);
+      }
+    }
     process.removeListener('SIGINT', onInterrupt);
     process.removeListener('SIGTERM', onInterrupt);
-    await stopAllGeminiProcesses();
   }
 }
 
 main().catch((error) => {
+  if (error?.code === 'ABORTED_AFTER_SAVE') {
+    console.error('중단 요청이 HTML 교체 중 접수되어 파일 저장은 안전하게 마쳤지만 브라우저는 열지 않았습니다.');
+    process.exitCode = 130;
+    return;
+  }
   if (error?.code === 'ABORTED') {
-    console.error('실행을 중단했습니다. 잠금 파일과 Gemini 프로세스를 정리했습니다.');
+    console.error('실행을 중단했습니다. Gemini 프로세스와 임시 실행 정보를 정리했습니다.');
     process.exitCode = 130;
     return;
   }
   console.error(`실행 실패: ${error.message}`);
+  if (error?.details) console.error(`상세: ${error.details}`);
+  if (error?.code) console.error(`오류 코드: ${error.code}`);
   process.exitCode = 1;
 });

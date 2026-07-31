@@ -1,6 +1,6 @@
 {
   "name": "trade-monitor-gemini-cli",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "description": "회사 Gemini CLI 기반 로컬 HTML 통상 모니터링",

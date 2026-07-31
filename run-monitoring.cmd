@@ -23,14 +23,6 @@ if %NODE_MAJOR% LSS 20 (
   exit /b 1
 )
 
-where gemini >nul 2>nul
-if errorlevel 1 (
-  echo [ERROR] Gemini CLI was not found.
-  echo Install and sign in to the company Gemini CLI first.
-  pause
-  exit /b 1
-)
-
 node "%~dp0cli\run.mjs" --open %*
 set "MONITOR_EXIT=%ERRORLEVEL%"
 if not "%MONITOR_EXIT%"=="0" (
