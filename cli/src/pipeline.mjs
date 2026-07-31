@@ -1,17 +1,21 @@
 import fs from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import net from 'node:net';
 import {
-  buildInsightPrompt,
+  buildDomainPrompt,
   domains,
-  makeEmptyInsights,
-  parseInsightsWithRecovery,
-  repoRoot,
-} from './config-loader.mjs';
-import { parseJsonArray, parseJsonObject } from './json-utils.mjs';
+} from './config.mjs';
+import {
+  callGeminiCli,
+  GeminiCliError,
+  isRetryableGeminiError,
+  retryMax,
+} from './gemini-client.mjs';
+import { parseJsonObject } from './json-utils.mjs';
 
 const KST = 'Asia/Seoul';
+const IMPORTANCE_ORDER = { 상: 0, 중: 1, 하: 2 };
 
-function formatKst(date, withTime) {
+function formatKst(date, withTime = false) {
   const options = {
     timeZone: KST,
     year: 'numeric',
@@ -29,21 +33,20 @@ function formatKst(date, withTime) {
       .filter((part) => part.type !== 'literal')
       .map((part) => [part.type, part.value]),
   );
-  const ymd = `${parts.year}-${parts.month}-${parts.day}`;
-  return withTime ? `${ymd} ${parts.hour}:${parts.minute}` : ymd;
+  const day = `${parts.year}-${parts.month}-${parts.day}`;
+  return withTime ? `${day} ${parts.hour}:${parts.minute}` : day;
 }
 
 function weekdayKst(date) {
-  const short = new Intl.DateTimeFormat('en-US', {
+  const day = new Intl.DateTimeFormat('en-US', {
     timeZone: KST,
     weekday: 'short',
   }).format(date);
-  return { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[short];
+  return { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[day];
 }
 
 export function createContext(now = new Date(), lookbackOverride) {
-  const weekday = weekdayKst(now);
-  const lookbackHours = lookbackOverride || (weekday === 1 ? 72 : 24);
+  const lookbackHours = lookbackOverride || (weekdayKst(now) === 1 ? 72 : 24);
   if (![24, 72, 168].includes(lookbackHours)) {
     throw new Error('lookback은 24, 72, 168시간 중 하나여야 합니다.');
   }
@@ -52,207 +55,168 @@ export function createContext(now = new Date(), lookbackOverride) {
     now,
     fromDate,
     lookbackHours,
+    fromISO: formatKst(fromDate),
+    toISO: formatKst(now),
     fromStr: formatKst(fromDate, true),
     toStr: formatKst(now, true),
-    fromISO: formatKst(fromDate, false),
-    toISO: formatKst(now, false),
   };
 }
 
-function emptyData() {
-  const out = {};
-  for (const domain of domains) {
-    out[domain.key] = {};
-    for (const unit of domain.units) out[domain.key][unit.key] = [];
+function text(value, maximum = 2000) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, maximum);
+}
+
+export function safeSourceUrl(value) {
+  let url;
+  try {
+    url = new URL(text(value, 3000));
+  } catch {
+    return '';
   }
-  return out;
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
+  if (
+    url.protocol !== 'https:'
+    || url.username
+    || url.password
+    || (url.port && url.port !== '443')
+    || !hostname.includes('.')
+    || hostname === 'localhost'
+    || hostname.endsWith('.local')
+    || net.isIP(hostname)
+  ) return '';
+  url.hash = '';
+  return url.href;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function normalizeImportance(value) {
+  return Object.hasOwn(IMPORTANCE_ORDER, value) ? value : '하';
 }
 
-function plain(value) {
-  return JSON.parse(JSON.stringify(value));
+function normalizeItem(raw) {
+  return {
+    importance: normalizeImportance(text(raw?.importance, 5)),
+    importanceReason: text(raw?.importanceReason, 500),
+    measureType: text(raw?.measureType, 100),
+    title: text(raw?.title, 180),
+    titleEn: text(raw?.titleEn, 240),
+    summary: text(raw?.summary, 1200),
+    businessImpact: text(raw?.businessImpact, 600),
+    announcedDate: text(raw?.announcedDate, 10),
+    effectiveDate: text(raw?.effectiveDate, 10),
+    hsCode: text(raw?.hsCode, 120),
+    issuingCountry: text(raw?.issuingCountry, 160),
+    targetCountries: Array.isArray(raw?.targetCountries)
+      ? raw.targetCountries.map((item) => text(item, 80)).filter(Boolean).join(', ')
+      : text(raw?.targetCountries, 240),
+    agency: text(raw?.agency, 240),
+    sourceName: text(raw?.sourceName, 160),
+    sourceUrl: safeSourceUrl(raw?.sourceUrl),
+    notes: text(raw?.notes, 600),
+  };
 }
 
-function unitPrompt(domain, unit, ctx) {
-  return [
-    'You are running inside the official Gemini CLI with a company Gemini Code Assist Enterprise account.',
-    'Use the built-in Google web search tool to verify current information and original publication dates.',
-    'Do not edit files or run shell commands. Research only.',
-    'Return only the JSON requested below. Do not add markdown fences or commentary.',
-    '',
-    domain.buildPrompt(unit, ctx),
-  ].join('\n');
-}
-
-async function callWithRetry(prompt, tag, mockValue, client) {
-  if (mockValue !== undefined) {
-    return typeof mockValue === 'string' ? mockValue : JSON.stringify(mockValue);
-  }
-
-  const retries = client.cliRetryMax();
-  let lastError;
-  for (let attempt = 1; attempt <= retries; attempt += 1) {
-    try {
-      const result = await client.callGeminiCli(prompt, { cwd: repoRoot });
-      return result.response;
-    } catch (error) {
-      lastError = error;
-      if (attempt < retries) {
-        const delay = 3000 * 2 ** (attempt - 1);
-        console.warn(`[${tag}] 실패 ${attempt}/${retries}: ${error.message} — ${delay}ms 후 재시도`);
-        await sleep(delay);
-      }
-    }
-  }
-  throw lastError;
-}
-
-async function runPool(jobs, worker, limit) {
-  const output = new Array(jobs.length);
-  let cursor = 0;
-  async function consume() {
-    while (true) {
-      const index = cursor;
-      cursor += 1;
-      if (index >= jobs.length) return;
-      output[index] = await worker(jobs[index], index);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, jobs.length) }, () => consume()));
-  return output;
+function inDateRange(item, context) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(item.announcedDate)
+    && item.announcedDate >= context.fromISO
+    && item.announcedDate <= context.toISO;
 }
 
 export function normalizeTitle(value) {
-  return String(value || '')
+  return text(value, 300)
     .toLowerCase()
     .replace(/\s+/g, '')
     .replace(/[^\p{L}\p{N}]/gu, '');
 }
 
-function bigrams(value) {
-  if (value.length < 2) return [value];
-  const out = [];
-  for (let i = 0; i < value.length - 1; i += 1) out.push(value.slice(i, i + 2));
-  return out;
+function emptyDomainResult(domain) {
+  return {
+    insight: '',
+    categories: Object.fromEntries(domain.units.map((unit) => [unit.key, []])),
+  };
 }
 
-function diceSimilarity(a, b) {
-  if (a === b) return 1;
-  const aa = bigrams(a);
-  const bb = bigrams(b);
-  const counts = new Map();
-  for (const gram of aa) counts.set(gram, (counts.get(gram) || 0) + 1);
-  let overlap = 0;
-  for (const gram of bb) {
-    const count = counts.get(gram) || 0;
-    if (count > 0) {
-      overlap += 1;
-      counts.set(gram, count - 1);
-    }
+export function parseDomainResponse(domain, response, context) {
+  let parsed;
+  try {
+    parsed = typeof response === 'string' ? parseJsonObject(response) : response;
+  } catch (error) {
+    throw new GeminiCliError('BAD_JSON', `${domain.label} 응답 JSON을 읽지 못했습니다.`, error.message);
   }
-  return (2 * overlap) / (aa.length + bb.length);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new GeminiCliError('BAD_JSON', `${domain.label} 응답이 JSON 객체가 아닙니다.`);
+  }
+  if (parsed.domain !== domain.key) {
+    throw new GeminiCliError('BAD_JSON', `${domain.label} 응답의 domain 값이 올바르지 않습니다.`);
+  }
+  if (!parsed.categories || typeof parsed.categories !== 'object' || Array.isArray(parsed.categories)) {
+    throw new GeminiCliError('BAD_JSON', `${domain.label} 응답에 categories 객체가 없습니다.`);
+  }
+  const invalidUnit = domain.units.find((unit) => !Array.isArray(parsed.categories[unit.key]));
+  if (invalidUnit) {
+    throw new GeminiCliError(
+      'BAD_JSON',
+      `${domain.label} 응답에 ${invalidUnit.key} 배열이 없습니다.`,
+    );
+  }
+
+  const result = emptyDomainResult(domain);
+  result.insight = text(parsed.insight, 1000);
+  const categories = parsed.categories;
+  for (const unit of domain.units) {
+    const rawItems = Array.isArray(categories[unit.key]) ? categories[unit.key] : [];
+    result.categories[unit.key] = rawItems
+      .slice(0, 5)
+      .map(normalizeItem)
+      .filter((item) => item.title && inDateRange(item, context));
+  }
+  return result;
 }
 
-function isDuplicate(title, seen) {
-  const normalized = normalizeTitle(title);
-  if (!normalized) return false;
-  return seen.some((other) => other === normalized || diceSimilarity(other, normalized) >= 0.7);
-}
-
-function dedupeCurrentRun(data) {
+function dedupeAndSort(results) {
   for (const domain of domains) {
-    const seen = [];
+    const seen = new Set();
     for (const unit of domain.units) {
-      data[domain.key][unit.key] = data[domain.key][unit.key].filter((item) => {
-        if (isDuplicate(item.title, seen)) return false;
-        const normalized = normalizeTitle(item.title);
-        if (normalized) seen.push(normalized);
-        return true;
-      });
+      results[domain.key].categories[unit.key] = results[domain.key].categories[unit.key]
+        .filter((item) => {
+          const key = normalizeTitle(item.title);
+          if (!key || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .sort((a, b) => (
+          IMPORTANCE_ORDER[a.importance] - IMPORTANCE_ORDER[b.importance]
+          || b.announcedDate.localeCompare(a.announcedDate)
+        ));
     }
   }
 
-  const specialized = [];
-  for (const domain of domains.filter((item) => !item.generalBucket)) {
+  const specialized = new Set();
+  for (const domainKey of ['export', 'trade']) {
+    const domain = domains.find((item) => item.key === domainKey);
     for (const unit of domain.units) {
-      for (const item of data[domain.key][unit.key]) {
-        const normalized = normalizeTitle(item.title);
-        if (normalized) specialized.push(normalized);
+      for (const item of results[domainKey].categories[unit.key]) {
+        specialized.add(normalizeTitle(item.title));
       }
     }
   }
-  for (const domain of domains.filter((item) => item.generalBucket)) {
-    for (const unit of domain.units) {
-      data[domain.key][unit.key] = data[domain.key][unit.key]
-        .filter((item) => !isDuplicate(item.title, specialized));
-    }
+  const customs = domains.find((item) => item.key === 'customs');
+  for (const unit of customs.units) {
+    results.customs.categories[unit.key] = results.customs.categories[unit.key]
+      .filter((item) => !specialized.has(normalizeTitle(item.title)));
   }
 }
 
-function dedupeHistory(data, historyTitles) {
-  if (!historyTitles) return;
-  for (const domain of domains) {
-    const seen = Array.isArray(historyTitles[domain.key])
-      ? historyTitles[domain.key].filter(Boolean)
-      : [];
-    for (const unit of domain.units) {
-      data[domain.key][unit.key] = data[domain.key][unit.key].filter((item) => {
-        if (isDuplicate(item.title, seen)) return false;
-        const normalized = normalizeTitle(item.title);
-        if (normalized) seen.push(normalized);
-        return true;
-      });
-    }
-  }
-}
-
-function filterDates(items, ctx) {
-  return items.filter((item) => (
-    /^\d{4}-\d{2}-\d{2}$/.test(item.announcedDate || '')
-    && item.announcedDate >= ctx.fromISO
-    && item.announcedDate <= ctx.toISO
-  ));
-}
-
-function daysSinceKst(dateString, now) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString || '')) return null;
-  const today = formatKst(now, false);
-  const itemMs = Date.UTC(
-    Number(dateString.slice(0, 4)),
-    Number(dateString.slice(5, 7)) - 1,
-    Number(dateString.slice(8, 10)),
-  );
-  const todayMs = Date.UTC(
-    Number(today.slice(0, 4)),
-    Number(today.slice(5, 7)) - 1,
-    Number(today.slice(8, 10)),
-  );
-  return Math.round((todayMs - itemMs) / 86400000);
-}
-
-function statsFor(data, now) {
-  const stats = {
-    total: 0,
-    high: 0,
-    maxDays: null,
-    byDomain: {},
-  };
+function calculateStats(results) {
+  const stats = { total: 0, high: 0, byDomain: {} };
   for (const domain of domains) {
     const domainStats = { total: 0, high: 0 };
     for (const unit of domain.units) {
-      for (const item of data[domain.key][unit.key]) {
+      for (const item of results[domain.key].categories[unit.key]) {
         domainStats.total += 1;
         stats.total += 1;
         if (item.importance === '상') {
           domainStats.high += 1;
           stats.high += 1;
-        }
-        const days = daysSinceKst(item.announcedDate, now);
-        if (days !== null && (stats.maxDays === null || days > stats.maxDays)) {
-          stats.maxDays = days;
         }
       }
     }
@@ -261,139 +225,110 @@ function statsFor(data, now) {
   return stats;
 }
 
-async function loadMock(mockPath, ctx) {
+async function loadMock(mockPath) {
   if (!mockPath) return null;
-  const raw = await fs.readFile(mockPath, 'utf8');
-  return JSON.parse(
-    raw
-      .replaceAll('__TODAY__', ctx.toISO)
-      .replaceAll('__FROM__', ctx.fromISO),
-  );
+  return JSON.parse(await fs.readFile(mockPath, 'utf8'));
 }
 
-export async function collectWithGeminiCli(options = {}) {
-  const ctx = createContext(options.now || new Date(), options.lookbackHours);
-  const mock = await loadMock(options.mockPath, ctx);
-  const client = mock ? null : await import('./gemini-client.mjs');
-  const concurrency = options.concurrency || (client ? client.cliConcurrency() : 3);
-  const data = emptyData();
-  const failedUnits = [];
-  const jobs = [];
-  for (const domain of domains) {
-    for (const unit of domain.units) jobs.push({ domain, unit });
+async function collectDomain(domain, context, options, mock) {
+  if (mock) {
+    const value = mock.domains?.[domain.key] || { insight: '', categories: {} };
+    if (value.__error) {
+      throw new GeminiCliError(
+        text(value.__error.code, 40) || 'MOCK_ERROR',
+        text(value.__error.message, 500) || `${domain.label} mock 실패`,
+      );
+    }
+    const serialized = JSON.stringify(value)
+      .replaceAll('__TODAY__', context.toISO)
+      .replaceAll('__FROM__', context.fromISO);
+    return parseDomainResponse(domain, serialized, context);
   }
 
-  console.log(`수집 시작: ${ctx.fromStr} ~ ${ctx.toStr} KST / ${jobs.length}개 단위`);
-  await runPool(jobs, async ({ domain, unit }) => {
-    const key = `${domain.key}/${unit.key}`;
-    const mockValue = mock
-      ? (Object.hasOwn(mock.units || {}, key) ? mock.units[key] : [])
-      : undefined;
+  const attempts = retryMax();
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const response = await callWithRetry(
-        unitPrompt(domain, unit, ctx),
-        key,
-        mockValue,
-        client,
-      );
-      const rawItems = parseJsonArray(response).slice(0, 12);
-      const normalized = rawItems
-        .map((item) => plain(domain.normalize(item)))
-        .filter((item) => item.title);
-      data[domain.key][unit.key] = filterDates(normalized, ctx);
-      console.log(`[${domain.label}/${unit.label}] ${data[domain.key][unit.key].length}건`);
+      const envelope = await callGeminiCli(buildDomainPrompt(domain, context), {
+        cwd: options.cwd,
+        signal: options.signal,
+      });
+      return parseDomainResponse(domain, envelope.response, context);
     } catch (error) {
-      failedUnits.push({
+      lastError = error instanceof GeminiCliError
+        ? error
+        : new GeminiCliError('UNKNOWN', error.message);
+      if (lastError.code === 'ABORTED') throw lastError;
+      const retryable = isRetryableGeminiError(lastError) || lastError.code === 'BAD_JSON';
+      if (!retryable || attempt >= attempts) break;
+      const delay = 30000 * 2 ** (attempt - 1);
+      console.warn(`  ${lastError.code}: ${delay / 1000}초 후 한 번 더 시도합니다.`);
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, delay);
+        options.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new GeminiCliError('ABORTED', '사용자가 실행을 중단했습니다.'));
+        }, { once: true });
+      });
+    }
+  }
+  throw lastError;
+}
+
+export async function collectMonitoring(options = {}) {
+  const context = createContext(options.now || new Date(), options.lookbackHours);
+  const mock = await loadMock(options.mockPath);
+  const results = Object.fromEntries(domains.map((domain) => [domain.key, emptyDomainResult(domain)]));
+  const failures = [];
+  let completed = 0;
+
+  console.log(`조사 기간: ${context.fromStr} ~ ${context.toStr} KST`);
+  console.log(`Gemini 호출: ${domains.length}개 영역을 한 번에 하나씩 조사합니다.`);
+
+  for (let index = 0; index < domains.length; index += 1) {
+    const domain = domains[index];
+    if (options.signal?.aborted) throw new GeminiCliError('ABORTED', '사용자가 실행을 중단했습니다.');
+    console.log(`[${index + 1}/${domains.length}] ${domain.label} 조사 시작`);
+    try {
+      results[domain.key] = await collectDomain(domain, context, options, mock);
+      const count = domain.units.reduce(
+        (sum, unit) => sum + results[domain.key].categories[unit.key].length,
+        0,
+      );
+      completed += 1;
+      console.log(`[${index + 1}/${domains.length}] ${domain.label} 완료: ${count}건`);
+    } catch (error) {
+      if (error?.code === 'ABORTED') throw error;
+      const failure = {
         domainKey: domain.key,
         domainLabel: domain.label,
-        unitKey: unit.key,
-        unitLabel: unit.label,
-        reason: error.message,
-      });
-      console.error(`[${domain.label}/${unit.label}] 실패: ${error.message}`);
+        code: error?.code || 'UNKNOWN',
+        reason: error?.message || String(error),
+        details: text(error?.details, 1000),
+      };
+      failures.push(failure);
+      console.error(`[${index + 1}/${domains.length}] ${domain.label} 실패 (${failure.code}): ${failure.reason}`);
+      if (failure.details) console.error(`  상세: ${failure.details}`);
     }
-  }, concurrency);
-
-  if (failedUnits.length === jobs.length) {
-    throw new Error('17개 수집 단위가 모두 실패했습니다. 결과 파일을 전달하지 않습니다.');
-  }
-  dedupeCurrentRun(data);
-  dedupeHistory(data, options.historyTitles);
-
-  const insights = plain(makeEmptyInsights());
-  if (!options.skipInsights) {
-    const insightJobs = domains.filter((domain) => (
-      domain.units.some((unit) => data[domain.key][unit.key].length > 0)
-    ));
-    await runPool(insightJobs, async (domain) => {
-      const key = `insight/${domain.key}`;
-      const mockValue = mock
-        ? (Object.hasOwn(mock.insights || {}, domain.key)
-          ? mock.insights[domain.key]
-          : { overall: null, byCategory: {} })
-        : undefined;
-      try {
-        const response = await callWithRetry(
-          buildInsightPrompt(domain, data),
-          key,
-          mockValue,
-          client,
-        );
-        const parsed = parseJsonObject(response);
-        insights[domain.key] = plain(
-          parseInsightsWithRecovery(domain, JSON.stringify(parsed)),
-        );
-      } catch (error) {
-        console.warn(`[인사이트/${domain.label}] 생략: ${error.message}`);
-      }
-    }, Math.min(3, concurrency));
   }
 
-  const stats = statsFor(data, ctx.now);
-  const deliveryKey = options.deliveryKey || ctx.toISO;
+  dedupeAndSort(results);
   return {
-    version: 1,
-    deliveryKey,
-    runId: `${ctx.toISO.replaceAll('-', '')}-${randomUUID()}`,
+    version: 2,
     createdAt: new Date().toISOString(),
-    nowISO: ctx.now.toISOString(),
-    fromISO: ctx.fromDate.toISOString(),
-    lookbackHours: ctx.lookbackHours,
-    data,
-    insights,
-    failedUnits,
-    stats,
+    context: {
+      fromISO: context.fromISO,
+      toISO: context.toISO,
+      fromStr: context.fromStr,
+      toStr: context.toStr,
+      lookbackHours: context.lookbackHours,
+    },
+    results,
+    failures,
+    collection: {
+      totalDomains: domains.length,
+      completedDomains: completed,
+    },
+    stats: calculateStats(results),
   };
-}
-
-export function buildMarkdownSummary(payload) {
-  const lines = [
-    `# 글로벌 통상 모니터링 ${payload.deliveryKey}`,
-    '',
-    `- 수집 기간: ${payload.fromISO} ~ ${payload.nowISO}`,
-    `- 총 ${payload.stats.total}건 / 중요도 상 ${payload.stats.high}건`,
-    `- 실패 단위: ${payload.failedUnits.length}개`,
-    '',
-  ];
-  for (const domain of domains) {
-    lines.push(`## ${domain.label} (${payload.stats.byDomain[domain.key].total}건)`, '');
-    for (const unit of domain.units) {
-      const items = payload.data[domain.key][unit.key];
-      if (items.length === 0) continue;
-      lines.push(`### ${unit.label}`);
-      for (const item of items) {
-        const url = item.__modelUrl || '';
-        lines.push(`- [${item.importance}] ${url ? `[${item.title}](${url})` : item.title} — ${item.announcedDate}`);
-      }
-      lines.push('');
-    }
-  }
-  if (payload.failedUnits.length > 0) {
-    lines.push('## 수집 실패', '');
-    for (const failed of payload.failedUnits) {
-      lines.push(`- ${failed.domainLabel}/${failed.unitLabel}: ${failed.reason}`);
-    }
-    lines.push('');
-  }
-  return `${lines.join('\n')}\n`;
 }

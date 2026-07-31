@@ -1,50 +1,76 @@
 {
-  "units": {
-    "customs/북미": [
-      {
-        "구분": "관세율",
-        "중요도": "상",
-        "제목": "미국 전자부품 관세 조정 시험 데이터",
-        "제목EN": "US electronic components tariff adjustment",
-        "주요내용": "CLI 파이프라인 검증을 위한 시험 데이터입니다.",
-        "발표일": "__TODAY__",
-        "시행일": "",
-        "HS코드": "8517",
-        "발표국가": "미국",
-        "영향국가": "한국",
-        "관련기관": "USTR",
-        "출처명": "USTR",
-        "출처URL": "https://ustr.gov/example",
-        "중요도근거": "시험 데이터"
-      }
-    ],
-    "export/US": [
-      {
-        "importance": "중",
-        "title": "미국 수출통제 시험 데이터",
-        "summary": "CLI 수출통제 정규화 검증용입니다.",
-        "published_date": "__TODAY__",
-        "issuing_country": "미국",
-        "target_countries": "한국",
-        "related_agencies": "BIS",
-        "source_name": "BIS",
-        "source_url": "https://www.bis.gov/example",
-        "search_query": "BIS export control test",
-        "notes": ""
-      }
-    ]
-  },
-  "insights": {
+  "domains": {
     "customs": {
-      "overall": "시험 관세 인사이트입니다.",
-      "byCategory": {
-        "북미": "시험 북미 인사이트입니다."
+      "domain": "customs",
+      "insight": "전자부품의 일반 관세와 통관 변화에 대한 점검이 필요합니다.",
+      "categories": {
+        "북미": [
+          {
+            "importance": "상",
+            "importanceReason": "관세율 변화 가능성이 있어 중요합니다.",
+            "measureType": "관세율",
+            "title": "미국 전자부품 관세 조정 시험 데이터",
+            "titleEn": "US electronic components tariff adjustment",
+            "summary": "HTML 생성 파이프라인 검증을 위한 시험 데이터입니다.",
+            "businessImpact": "관련 부품의 원가와 통관 일정을 점검해야 합니다.",
+            "announcedDate": "__TODAY__",
+            "effectiveDate": "",
+            "hsCode": "8517",
+            "issuingCountry": "미국",
+            "targetCountries": "한국",
+            "agency": "USTR",
+            "sourceName": "USTR",
+            "sourceUrl": "https://ustr.gov/example",
+            "notes": ""
+          }
+        ],
+        "중남미": [],
+        "인도": [],
+        "유럽": [],
+        "중동": [],
+        "동남아": [],
+        "아프리카": [],
+        "CIS": [],
+        "중국": []
       }
     },
     "export": {
-      "overall": "시험 수출통제 인사이트입니다.",
-      "byCategory": {
-        "US": "시험 미국 인사이트입니다."
+      "domain": "export",
+      "insight": "수출통제 준수 범위 변화를 지속적으로 확인해야 합니다.",
+      "categories": {
+        "미국": [
+          {
+            "importance": "중",
+            "importanceReason": "준수 범위 점검이 필요합니다.",
+            "measureType": "수출통제",
+            "title": "미국 수출통제 시험 데이터",
+            "titleEn": "BIS export control test",
+            "summary": "수출통제 데이터 정규화 검증용입니다.",
+            "businessImpact": "거래 상대방과 품목 분류를 재점검해야 합니다.",
+            "announcedDate": "__TODAY__",
+            "effectiveDate": "",
+            "hsCode": "",
+            "issuingCountry": "미국",
+            "targetCountries": "한국",
+            "agency": "BIS",
+            "sourceName": "BIS",
+            "sourceUrl": "https://www.bis.gov/example",
+            "notes": ""
+          }
+        ],
+        "한국": [],
+        "EU/일본": [],
+        "중국/베트남": [],
+        "UN 및 다자체제": []
+      }
+    },
+    "trade": {
+      "domain": "trade",
+      "insight": "신규 무역구제 시험 동향은 없습니다.",
+      "categories": {
+        "반덤핑": [],
+        "세이프가드": [],
+        "보조금/상계관세": []
       }
     }
   }

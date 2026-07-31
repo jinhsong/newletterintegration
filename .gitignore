@@ -1,4 +1,2 @@
 cli/.env
 cli/output/
-cli/logs/
-*.log

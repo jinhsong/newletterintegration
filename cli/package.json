@@ -1,13 +1,13 @@
 {
   "name": "trade-monitor-gemini-cli",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Gemini Code Assist Enterprise OAuth 기반 로컬 HTML 통상 모니터링",
+  "description": "회사 Gemini CLI 기반 로컬 HTML 통상 모니터링",
   "scripts": {
-    "monitor": "node run.mjs",
-    "test": "node --test test/runner.test.mjs test/local-html.test.mjs",
-    "check": "node --check run.mjs && node --test test/runner.test.mjs test/local-html.test.mjs"
+    "monitor": "node run.mjs --open",
+    "test": "node --test",
+    "check": "node --check run.mjs && node --test"
   },
   "engines": {
     "node": ">=20"
