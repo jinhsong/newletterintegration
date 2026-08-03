@@ -25,6 +25,7 @@ const repoRoot = path.dirname(cliDir);
 const LOCAL_ENV_KEYS = new Set([
   'GEMINI_CLI_BIN',
   'GEMINI_CLI_MODEL',
+  'GEMINI_CLI_PREFLIGHT_TIMEOUT_MS',
   'GEMINI_CLI_RETRY_MAX',
   'GEMINI_CLI_TIMEOUT_MS',
   'GEMINI_RUN_TIMEOUT_MS',
@@ -153,8 +154,9 @@ async function main() {
     runLock = await acquireRunLock(outputFile);
     if (!options.mockPath) {
       researchWorkspace = await createResearchWorkspace();
-      console.log('Gemini CLI 및 사내 보안 정책 호환성을 확인합니다...');
-      await preflightGeminiCli({ cwd: researchWorkspace, signal: controller.signal });
+      console.log('Gemini CLI 버전과 실행기 보안 설정을 확인합니다...');
+      const preflight = await preflightGeminiCli({ cwd: researchWorkspace, signal: controller.signal });
+      console.log(`Gemini CLI ${preflight.version} 확인 완료.`);
       const deadline = totalTimeoutMs();
       console.log(`전체 실행 제한: ${Math.round(deadline / 60000)}분`);
       deadlineTimer = setTimeout(() => {

@@ -45,7 +45,7 @@ gemini --version
 이 PC에 `newletterintegration` 폴더가 없을 때만 실행합니다.
 
 ```powershell
-git clone --branch agent/gemini-cli-html-only-v3 https://github.com/jinhsong/newletterintegration.git
+git clone --branch agent/gemini-cli-html-only-v4 https://github.com/jinhsong/newletterintegration.git
 Set-Location .\newletterintegration
 ```
 
@@ -54,7 +54,7 @@ Set-Location .\newletterintegration
 ```powershell
 Set-Location "C:\기존-저장경로\newletterintegration"
 git fetch origin
-git switch agent/gemini-cli-html-only-v3
+git switch agent/gemini-cli-html-only-v4
 git pull --ff-only
 ```
 
@@ -184,13 +184,11 @@ Gemini를 호출하지 않고 실행 인자를 확인할 때:
 
 ## 자동 사전 점검과 보안 제한
 
-실제 조사를 시작하기 전에 프로그램이 회사 Gemini CLI를 한 번 자동 점검합니다.
-다음 최소 기능이 없는 구버전 CLI는 조사를 시작하지 않습니다.
-
-- JSON headless 출력과 웹 검색 통계
-- 도구 허용·차단 정책 파일
-- 확장·MCP 서버 비활성화
-- 신뢰 프롬프트 건너뛰기
+실제 조사를 시작하기 전에 프로그램이 `gemini --version`으로 회사 Gemini CLI의 버전을
+확인합니다. 회사 PC의 보안 검사 지연을 고려해 기본 60초를 기다리며, 최소 0.40.0보다
+낮은 버전은 조사를 시작하지 않습니다. 첫 실제 조사 호출에는 필수 보안 플래그를
+모두 전달하며, CLI가 하나라도 거부하면 결과를 저장하지 않고 `CLI_VERSION`으로
+중단합니다. 보안 제한을 빼고 계속 실행하지 않습니다.
 
 실행기는 임시 작업 폴더의 설정에서 내장 도구를 `google_web_search` 하나로
 allowlist하고 hooks·skills·사용자 정의 도구를 끕니다. 여기에
@@ -227,11 +225,32 @@ URL 문자열의 형식만 통과했다는 뜻이며 페이지 존재, 발표 �
 
 ## 오류 코드별 확인 방법
 
+### `CLI_STARTUP_TIMEOUT`
+
+Gemini CLI의 시작·버전 확인이 기본 60초 안에 끝나지 않았습니다. 이는 구버전이라는
+뜻이 아닙니다. 먼저 PowerShell에서 다음 명령이 끝나는지 확인하세요.
+
+```powershell
+gemini --version
+```
+
+회사 보안 검사가 특히 느린 PC에서는 이번 PowerShell 창에서만 시작 제한을 2분으로
+늘린 뒤 다시 실행할 수 있습니다.
+
+```powershell
+$env:GEMINI_CLI_PREFLIGHT_TIMEOUT_MS = "120000"
+.\run-monitoring.cmd
+```
+
+최대 5분까지 설정할 수 있습니다. 직접 `gemini --version`도 끝나지 않으면 `Ctrl+C`로
+중단하고 사내 Gemini 관리자에게 문의하세요.
+
 ### `CLI_VERSION`
 
-회사 Gemini CLI가 위의 보안 플래그를 지원하지 않는 구버전입니다. 최소 0.40.0이
-필요하며, 회사 승인 소프트웨어 채널에서 Gemini CLI 업데이트를 요청하세요. 프로그램이 보안 제한을
-빼고 계속 실행하지는 않습니다.
+회사 Gemini CLI가 최소 0.40.0보다 낮거나 실제 조사에 필요한 보안 플래그를 지원하지
+않습니다. 회사 승인 소프트웨어 채널에서 Gemini CLI 업데이트를 요청하세요. 프로그램이
+보안 제한을 빼고 계속 실행하지는 않습니다. 단순 시작 지연은 이 코드가 아니라
+`CLI_STARTUP_TIMEOUT`으로 표시됩니다.
 
 ### `SECURITY_POLICY`
 

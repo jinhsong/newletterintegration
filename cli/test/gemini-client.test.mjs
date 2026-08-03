@@ -6,7 +6,9 @@ import test from 'node:test';
 import {
   callGeminiCli,
   extractToolEvidence,
+  parseCliVersion,
   prepareResearchWorkspace,
+  preflightTimeoutMs,
   preflightGeminiCli,
   retryMax,
   stopAllGeminiProcesses,
@@ -111,6 +113,40 @@ test('전체 실행 제한은 기본 45분이며 안전한 정수 환경변수�
   }
 });
 
+test('CLI 시작 확인 제한은 기본 60초이며 최대 5분까지만 허용한다', () => {
+  const original = process.env.GEMINI_CLI_PREFLIGHT_TIMEOUT_MS;
+  try {
+    delete process.env.GEMINI_CLI_PREFLIGHT_TIMEOUT_MS;
+    assert.equal(preflightTimeoutMs(), 60000);
+    process.env.GEMINI_CLI_PREFLIGHT_TIMEOUT_MS = '120000';
+    assert.equal(preflightTimeoutMs(), 120000);
+    process.env.GEMINI_CLI_PREFLIGHT_TIMEOUT_MS = '300000';
+    assert.equal(preflightTimeoutMs(), 300000);
+    process.env.GEMINI_CLI_PREFLIGHT_TIMEOUT_MS = '300001';
+    assert.equal(preflightTimeoutMs(), 60000);
+    for (const invalid of ['0', '-1', '1.5', 'minute']) {
+      process.env.GEMINI_CLI_PREFLIGHT_TIMEOUT_MS = invalid;
+      assert.equal(preflightTimeoutMs(), 60000);
+    }
+  } finally {
+    if (original === undefined) delete process.env.GEMINI_CLI_PREFLIGHT_TIMEOUT_MS;
+    else process.env.GEMINI_CLI_PREFLIGHT_TIMEOUT_MS = original;
+  }
+});
+
+test('CLI 버전 파서는 독립된 공식 형식만 읽고 사내 배너 버전은 무시한다', () => {
+  assert.deepEqual(parseCliVersion('Security Agent 8.2.1\r\nv0.53.0\r\n'), {
+    parts: [0, 53, 0],
+    prerelease: '',
+  });
+  assert.deepEqual(parseCliVersion('Gemini CLI 0.53.0-preview.1+corp'), {
+    parts: [0, 53, 0],
+    prerelease: '-preview.1',
+  });
+  assert.equal(parseCliVersion('Security Agent 8.2.1'), null);
+  assert.equal(parseCliVersion(''), null);
+});
+
 test('Windows headless Gemini JSON 응답과 warnings 및 검색 증거를 보존한다', {
   skip: process.platform !== 'win32',
 }, async () => {
@@ -175,6 +211,18 @@ test('Windows Gemini 실행에는 검색 전용 정책과 확장/MCP 차단 옵�
     assert.match(args, /"--allowed-mcp-server-names"\s+"__newsletter_runner_no_mcp__"/);
     assert.match(args, /"--approval-mode"\s+"default"/);
     assert.match(args, /"--skip-trust"/);
+  });
+});
+
+test('실제 조사 호출에서 필수 보안 옵션을 거부하면 CLI_VERSION으로 분류한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const script = '@echo off\r\necho Unknown argument: prompt 1>&2\r\nexit /b 1\r\n';
+  await withFakeGemini(script, async (directory) => {
+    await assert.rejects(
+      () => callGeminiCli('시험', { cwd: directory, timeoutMs: 5000 }),
+      (error) => error.code === 'CLI_VERSION' && /prompt/.test(error.details),
+    );
   });
 });
 
@@ -245,24 +293,76 @@ test('종료 코드가 실패여도 stdout의 구조화 오류와 stderr를 함�
   });
 });
 
-test('사전 점검은 보안 실행에 필요한 최신 CLI 옵션을 확인한다', {
+test('사전 점검은 공식 버전 명령으로 지원 CLI 버전을 확인한다', {
   skip: process.platform !== 'win32',
 }, async () => {
-  const help = '--prompt --output-format --policy --extensions --allowed-mcp-server-names --approval-mode --skip-trust';
-  await withFakeGemini(`@echo off\r\necho ${help}\r\n`, async (directory) => {
+  const script = [
+    '@echo off',
+    'if not "%~1"=="--version" exit /b 9',
+    'if not "%~2"=="" exit /b 9',
+    'echo 0.53.0',
+    '',
+  ].join('\r\n');
+  await withFakeGemini(script, async (directory) => {
     const result = await preflightGeminiCli({ cwd: directory, timeoutMs: 5000 });
-    assert.ok(result.supportedFlags.includes('--policy'));
+    assert.equal(result.version, '0.53.0');
     assert.match(result.policyPath, /research-only\.toml$/);
   });
 });
 
-test('사전 점검은 정책 옵션이 없는 구버전 CLI를 명확히 거부한다', {
+test('사전 점검은 최소 안정 버전 0.40.0을 허용한다', {
   skip: process.platform !== 'win32',
 }, async () => {
-  await withFakeGemini('@echo off\r\necho --output-format --extensions\r\n', async (directory) => {
+  await withFakeGemini('@echo off\r\necho 0.40.0\r\n', async (directory) => {
+    const result = await preflightGeminiCli({ cwd: directory, timeoutMs: 5000 });
+    assert.equal(result.version, '0.40.0');
+  });
+});
+
+test('사전 점검은 사내 배너의 다른 버전이 아니라 독립된 Gemini 버전 행을 사용한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const script = '@echo off\r\necho Security Agent 8.2.1\r\necho 0.53.0\r\n';
+  await withFakeGemini(script, async (directory) => {
+    const result = await preflightGeminiCli({ cwd: directory, timeoutMs: 5000 });
+    assert.equal(result.version, '0.53.0');
+  });
+});
+
+test('사전 점검은 최소 버전보다 낮은 CLI를 명확히 거부한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  await withFakeGemini('@echo off\r\necho 0.39.9\r\n', async (directory) => {
     await assert.rejects(
       () => preflightGeminiCli({ cwd: directory, timeoutMs: 5000 }),
-      (error) => error.code === 'CLI_VERSION' && /--policy/.test(error.details),
+      (error) => error.code === 'CLI_VERSION' && /0\.39\.9/.test(error.details),
+    );
+  });
+});
+
+test('사전 점검은 최소 안정 버전의 prerelease 빌드를 거부한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  await withFakeGemini('@echo off\r\necho 0.40.0-preview.1\r\n', async (directory) => {
+    await assert.rejects(
+      () => preflightGeminiCli({ cwd: directory, timeoutMs: 5000 }),
+      (error) => error.code === 'CLI_VERSION' && /0\.40\.0-preview\.1/.test(error.details),
+    );
+  });
+});
+
+test('사전 점검 시작 시간 초과는 구버전이 아닌 CLI_STARTUP_TIMEOUT으로 분류한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  await withFakeGemini([
+    '@echo off',
+    'ping 127.0.0.1 -n 20 >nul',
+    'echo 0.53.0',
+    '',
+  ].join('\r\n'), async (directory) => {
+    await assert.rejects(
+      () => preflightGeminiCli({ cwd: directory, timeoutMs: 100 }),
+      (error) => error.code === 'CLI_STARTUP_TIMEOUT' && /1초/.test(error.message),
     );
   });
 });

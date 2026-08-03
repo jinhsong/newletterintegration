@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_TASKKILL_CAPTURE_BYTES = 64 * 1024;
-const PREFLIGHT_TIMEOUT_MS = 15000;
+const DEFAULT_PREFLIGHT_TIMEOUT_MS = 60000;
+const MAX_PREFLIGHT_TIMEOUT_MS = 300000;
+const MINIMUM_CLI_VERSION = [0, 40, 0];
 const RESEARCH_TOOL = 'google_web_search';
 const MCP_DENY_SENTINEL = '__newsletter_runner_no_mcp__';
 const POLICY_FILE = fileURLToPath(new URL('../policies/research-only.toml', import.meta.url));
@@ -50,15 +52,6 @@ priority = 998
 interactive = false
 denyMessage = "This runner permits Google web search only."
 `;
-const REQUIRED_HELP_FLAGS = [
-  '--prompt',
-  '--output-format',
-  '--policy',
-  '--extensions',
-  '--allowed-mcp-server-names',
-  '--approval-mode',
-  '--skip-trust',
-];
 const activeChildren = new Set();
 const stoppingChildren = new WeakMap();
 
@@ -230,7 +223,7 @@ function classifyError(message, exitCode) {
   if (/not recognized|command not found|찾을 수 없/i.test(text)) return 'CLI_NOT_FOUND';
   if (
     /unknown (?:argument|option)|unknown arguments|unrecognized option|invalid values?.*argument/i.test(text)
-    && /policy|extensions|output-format|allowed-mcp-server-names|approval-mode|skip-trust/i.test(text)
+    && /prompt|policy|extensions|output-format|allowed-mcp-server-names|approval-mode|skip-trust/i.test(text)
   ) return 'CLI_VERSION';
   if (/failed to (?:load|parse).*policy|invalid.*policy|policy.*(?:parse|syntax).*error|invalid toml/i.test(text)) {
     return 'SECURITY_POLICY';
@@ -418,23 +411,35 @@ function runTaskkill(pid) {
     }
     const capture = createCapture(MAX_TASKKILL_CAPTURE_BYTES);
     let finished = false;
+    let timedOut = false;
     let truncated = false;
+    let stopTimer;
+    let confirmationTimer;
     killer.stdout?.on('data', (chunk) => { if (!capture.append(chunk)) truncated = true; });
     killer.stderr?.on('data', (chunk) => { if (!capture.append(chunk)) truncated = true; });
     const done = (code = null, fallback = '') => {
       if (finished) return;
       finished = true;
-      clearTimeout(timer);
-      clearTimeout(killTimer);
+      clearTimeout(stopTimer);
+      clearTimeout(confirmationTimer);
       const suffix = truncated ? ' (출력 일부 생략)' : '';
       resolve({ code, details: `${capture.text().trim() || fallback}${suffix}`.trim() });
     };
-    const killTimer = setTimeout(() => done(null, 'taskkill 종료 확인 실패'), 6500);
-    const timer = setTimeout(() => {
+    confirmationTimer = setTimeout(() => {
+      done(null, 'taskkill 종료 명령이 5초 안에 끝나지 않아 중단했습니다.');
+    }, 6500);
+    stopTimer = setTimeout(() => {
+      timedOut = true;
       try { killer.kill(); } catch {}
     }, 5000);
     killer.once('error', (error) => done(null, error.message));
-    killer.once('close', (code, signal) => done(code, signal ? `taskkill이 ${signal} 신호로 종료됨` : ''));
+    killer.once('close', (code, signal) => {
+      if (timedOut) {
+        done(null, 'taskkill 종료 명령이 5초 안에 끝나지 않아 중단했습니다.');
+        return;
+      }
+      done(code, signal ? `taskkill이 ${signal} 신호로 종료됨` : '');
+    });
   });
 }
 
@@ -489,6 +494,14 @@ export function timeoutMs() {
   return positiveInt(process.env.GEMINI_CLI_TIMEOUT_MS, 600000, 1800000);
 }
 
+export function preflightTimeoutMs() {
+  return positiveInt(
+    process.env.GEMINI_CLI_PREFLIGHT_TIMEOUT_MS,
+    DEFAULT_PREFLIGHT_TIMEOUT_MS,
+    MAX_PREFLIGHT_TIMEOUT_MS,
+  );
+}
+
 export function totalTimeoutMs() {
   return positiveInt(process.env.GEMINI_RUN_TIMEOUT_MS, 2700000, 14400000);
 }
@@ -502,7 +515,7 @@ function signalError(signal) {
 
 async function executeCli(args, options = {}) {
   await assertWindowsCliAvailable();
-  const timeout = positiveInt(options.timeoutMs, PREFLIGHT_TIMEOUT_MS, 1800000);
+  const timeout = positiveInt(options.timeoutMs, DEFAULT_PREFLIGHT_TIMEOUT_MS, 1800000);
   const spec = launchSpec(args);
 
   return new Promise((resolve, reject) => {
@@ -552,8 +565,7 @@ async function executeCli(args, options = {}) {
       const cleanup = await stopProcessTree(child);
       if (!cleanup.closed || !cleanup.treeConfirmed) {
         const cleanupDetail = cleanup.details || 'Gemini 프로세스 트리의 완전한 종료를 확인하지 못했습니다.';
-        error.details = [error.details, cleanupDetail].filter(Boolean).join('\n');
-        console.warn(`Gemini 프로세스 트리 종료 경고: ${cleanupDetail}`);
+        console.warn(`프로세스 정리 추가 경고(원래 오류와 별개): ${cleanupDetail}`);
       }
       finish(() => reject(error));
     };
@@ -680,28 +692,62 @@ function assertObservedToolBoundary(evidence) {
   }
 }
 
+export function parseCliVersion(output) {
+  for (const line of String(output || '').split(/\r?\n/)) {
+    const match = line.match(
+      /^\s*(?:gemini(?:\s+cli)?\s+)?v?(\d+)\.(\d+)\.(\d+)(-[0-9a-z.-]+)?(?:\+[0-9a-z.-]+)?\s*$/i,
+    );
+    if (!match) continue;
+    const parts = match.slice(1, 4).map((value) => Number.parseInt(value, 10));
+    if (parts.some((value) => !Number.isSafeInteger(value) || value < 0)) return null;
+    return { parts, prerelease: match[4] || '' };
+  }
+  return null;
+}
+
+function isMinimumCliVersion(version) {
+  for (let index = 0; index < MINIMUM_CLI_VERSION.length; index += 1) {
+    if (version.parts[index] > MINIMUM_CLI_VERSION[index]) return true;
+    if (version.parts[index] < MINIMUM_CLI_VERSION[index]) return false;
+  }
+  return !version.prerelease;
+}
+
 export async function preflightGeminiCli(options = {}) {
   await verifyBundledPolicy();
   await verifyResearchWorkspace(options.cwd);
-  const result = await executeCli(['--help'], {
+  const timeout = positiveInt(
+    options.timeoutMs,
+    preflightTimeoutMs(),
+    MAX_PREFLIGHT_TIMEOUT_MS,
+  );
+  const result = await executeCli(['--version'], {
     cwd: options.cwd,
     signal: options.signal,
-    timeoutMs: positiveInt(options.timeoutMs, PREFLIGHT_TIMEOUT_MS, 60000),
-    timeoutCode: 'CLI_VERSION',
-    timeoutMessage: 'Gemini CLI 호환성 확인이 제한 시간 안에 끝나지 않았습니다.',
+    timeoutMs: timeout,
+    timeoutCode: 'CLI_STARTUP_TIMEOUT',
+    timeoutMessage: `Gemini CLI 시작 확인이 ${Math.max(1, Math.round(timeout / 1000))}초 안에 끝나지 않았습니다.`,
   });
   if (result.exitCode !== 0) throw exitFailure(result, 'Gemini CLI 사전 점검 오류');
 
-  const help = `${result.stdout}\n${result.stderr}`;
-  const missing = REQUIRED_HELP_FLAGS.filter((flag) => !help.includes(flag));
-  if (missing.length > 0) {
+  const versionOutput = `${result.stdout}\n${result.stderr}`.trim();
+  const version = parseCliVersion(versionOutput);
+  if (!version) {
     throw new GeminiCliError(
       'CLI_VERSION',
-      '설치된 Gemini CLI가 안전한 자동 조사에 필요한 옵션을 지원하지 않습니다.',
-      `누락된 옵션: ${missing.join(', ')}\nGemini CLI 0.40.0 이상으로 업데이트해 주세요.`,
+      '설치된 Gemini CLI의 버전을 확인하지 못했습니다.',
+      `버전 출력: ${versionOutput.slice(0, 1000) || '(출력 없음)'}`,
     );
   }
-  return { policyPath: POLICY_FILE, supportedFlags: [...REQUIRED_HELP_FLAGS] };
+  const versionText = `${version.parts.join('.')}${version.prerelease}`;
+  if (!isMinimumCliVersion(version)) {
+    throw new GeminiCliError(
+      'CLI_VERSION',
+      '설치된 Gemini CLI가 안전한 자동 조사에 필요한 최소 버전보다 낮습니다.',
+      `감지된 버전: ${versionText}\n필요한 최소 버전: ${MINIMUM_CLI_VERSION.join('.')}`,
+    );
+  }
+  return { policyPath: POLICY_FILE, version: versionText };
 }
 
 export async function callGeminiCli(prompt, options = {}) {
