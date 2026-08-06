@@ -268,6 +268,21 @@ claude auth status --text
 WebSearch는 Claude Code 공식 지원 범위가 아닐 수 있으므로 IT 담당자에게 현재 공급자와
 정책을 확인하세요.
 
+상세 메시지에 `permission mode forced to default`와
+`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`이 함께 표시되면 먼저 이 브랜치의 최신 코드를
+받으세요. 실행기는 이 변수를 자체적으로 켜지 않으며, 회사가 설정한 값은 그대로
+존중합니다.
+
+```powershell
+git pull --ff-only
+Get-ChildItem Env:CLAUDE_CODE_SUBPROCESS_ENV_SCRUB -ErrorAction SilentlyContinue
+```
+
+업데이트 후에도 두 번째 명령이 `1`을 표시한다면 회사 정책에서 설정한 값입니다.
+`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0`으로 우회하지 말고, IT 담당자에게 명시적인
+`WebSearch` 허용 목록과 비대화형 `dontAsk` 모드를 함께 사용할 수 있는지 문의하세요.
+실행기는 권한 모드가 `default`로 낮아지면 결과를 저장하지 않고 중단합니다.
+
 ### `TIMEOUT` 또는 `TURN_LIMIT`
 
 조사 호출 한 번은 기본 10분, 전체 실행은 기본 45분으로 제한됩니다. `TIMEOUT`은 같은

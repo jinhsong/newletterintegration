@@ -712,6 +712,7 @@ test('Claude 자식 환경은 사내 인증·프록시 설정을 보존하고 �
   process.env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = '1';
   process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1';
   process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY = '0';
+  process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = 'company-managed';
   try {
     await withFakeClaude({
       captureEnv: names,
@@ -734,7 +735,7 @@ test('Claude 자식 환경은 사내 인증·프록시 설정을 보존하고 �
       assert.equal(observed.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, '1');
       assert.equal(observed.env.NO_COLOR, '1');
       assert.equal(observed.env.CLAUDE_CODE_SAFE_MODE, '1');
-      assert.equal(observed.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, '1');
+      assert.equal(observed.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, 'company-managed');
       assert.equal(observed.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, '1');
       assert.equal(observed.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1');
       assert.equal(observed.env.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS, '1');
@@ -748,6 +749,27 @@ test('Claude 자식 환경은 사내 인증·프록시 설정을 보존하고 �
       if (originals[name] === undefined) delete process.env[name];
       else process.env[name] = originals[name];
     }
+  }
+});
+
+test('실행기는 subprocess credential scrub을 자체 활성화하지 않는다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const name = 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB';
+  const original = process.env[name];
+  delete process.env[name];
+  try {
+    await withFakeClaude({
+      captureEnv: [name],
+      events: successfulSearchEvents(),
+    }, async ({ directory, invocation }) => {
+      await callClaudeCli('시험', { cwd: directory, timeoutMs: 5000 });
+      const observed = await readInvocation(invocation);
+      assert.equal(observed.env[name], null);
+    });
+  } finally {
+    if (original === undefined) delete process.env[name];
+    else process.env[name] = original;
   }
 });
 

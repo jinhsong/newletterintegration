@@ -274,7 +274,9 @@ function enterpriseEnvironment() {
   env.CLAUDE_CODE_DISABLE_AGENT_VIEW = '1';
   env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
   env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
-  env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = '1';
+  // Do not activate CLAUDE_CODE_SUBPROCESS_ENV_SCRUB here. Recent enterprise
+  // hardening can force `dontAsk` back to `default` when it is enabled. Any
+  // company-managed value already present in process.env remains inherited.
   env.DISABLE_AUTOUPDATER = '1';
   env.ENABLE_CLAUDEAI_MCP_SERVERS = 'false';
   env.NO_COLOR = '1';
