@@ -7,7 +7,7 @@ import {
   domains,
   unitCount,
 } from '../src/config.mjs';
-import { GeminiCliError } from '../src/gemini-client.mjs';
+import { ClaudeCliError } from '../src/claude-client.mjs';
 import {
   collectMonitoring,
   createContext,
@@ -61,21 +61,23 @@ function searchedEnvelope(response, overrides = {}) {
     ? Object.keys(response.categories).length
     : 1;
   const searchCount = overrides.expectedSearches ?? categoryCount;
+  const search = {
+    count: searchCount,
+    success: searchCount,
+    fail: 0,
+    ...overrides.search,
+  };
   return {
     response: JSON.stringify(response),
-    stats: {
-      tools: {
-        byName: {
-          google_web_search: {
-            count: searchCount,
-            success: searchCount,
-            fail: 0,
-            ...overrides.search,
-          },
-        },
-      },
+    toolEvidence: {
+      available: true,
+      totalCalls: search.count,
+      totalSuccess: search.success,
+      totalFail: search.fail,
+      byName: { WebSearch: search },
     },
     warnings: overrides.warnings || [],
+    groundingUrls: overrides.groundingUrls || [],
   };
 }
 
@@ -101,7 +103,7 @@ test('영역 프롬프트는 전체 또는 선택 카테고리와 발표시각 �
   for (const domain of domains) {
     const prompt = buildDomainPrompt(domain, context);
     for (const unit of domain.units) assert.ok(prompt.includes(unit.key));
-    assert.match(prompt, /Google 웹 검색/);
+    assert.match(prompt, /WebSearch/);
     assert.match(prompt, /파일을 읽거나 수정하지 말고/);
     assert.match(prompt, /announcedAt/);
   }
@@ -137,7 +139,7 @@ test('공개 HTTPS 링크와 실제 달력 날짜만 허용한다', () => {
   assert.equal(isCalendarDate('2026-13-01'), false);
 });
 
-test('Gemini 응답은 성공한 Google 웹 검색과 정상 경고만 통과한다', () => {
+test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', () => {
   const good = validateResearchEnvelope(searchedEnvelope('{}', { warnings: ['일반 업데이트 안내'] }));
   assert.equal(good.webSearchSuccesses, 1);
   assert.equal(good.warnings.length, 1);
@@ -148,7 +150,16 @@ test('Gemini 응답은 성공한 Google 웹 검색과 정상 경고만 통과한
   );
 
   assert.throws(
-    () => validateResearchEnvelope({ response: '{}', stats: { tools: { byName: {} } } }),
+    () => validateResearchEnvelope({
+      response: '{}',
+      toolEvidence: {
+        available: true,
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        byName: {},
+      },
+    }),
     (error) => error.code === 'SEARCH_NOT_RUN',
   );
   assert.throws(
@@ -290,7 +301,7 @@ test('제목 유사도는 단순 문장 변형을 감지한다', () => {
   assert.ok(titleSimilarity('미국 관세 조정', 'EU 수출통제 개정') < 0.4);
 });
 
-test('mock 수집은 Gemini 호출 없이 상태를 포함한 공통 payload를 만든다', async () => {
+test('mock 수집은 Claude 호출 없이 상태를 포함한 공통 payload를 만든다', async () => {
   const payload = await collectMonitoring({
     mockPath: fixture,
     now,
@@ -309,28 +320,49 @@ test('mock 수집은 Gemini 호출 없이 상태를 포함한 공통 payload를 
   assert.equal(payload.results.trade.categoryStatus.반덤핑.status, 'empty');
 });
 
-test('영역 시간초과 시 해당 영역만 카테고리별로 복구한다', async () => {
+test('영역 시간초과 시 해당 영역은 재호출하지 않고 다음 영역을 계속한다', async () => {
   let calls = 0;
-  const callGemini = async (prompt) => {
+  const requestedUnitCounts = [];
+  const callClaude = async (prompt) => {
     calls += 1;
-    if (calls === 1) throw new GeminiCliError('TIMEOUT', '시험 시간초과');
     const { domain, units } = promptDomainAndUnits(prompt);
+    requestedUnitCounts.push(units.length);
+    if (calls === 1) throw new ClaudeCliError('TIMEOUT', '시험 시간초과');
     return searchedEnvelope(responseFor(domain, units));
   };
 
-  const payload = await collectMonitoring({ callGemini, now, lookbackHours: 24 });
-  assert.equal(calls, 12);
-  assert.equal(payload.collection.fullyCompletedDomains, 3);
-  assert.equal(payload.failures.length, 0);
-  assert.equal(payload.results.customs.coverage.recoveryUsed, true);
-  assert.equal(payload.results.customs.coverage.recoveryReason, 'TIMEOUT');
-  assert.equal(payload.results.customs.categoryStatus.북미.coverage, 'fallback');
-  assert.equal(payload.results.customs.categoryStatus.동아시아.coverage, 'fallback');
+  const payload = await collectMonitoring({ callClaude, now, lookbackHours: 24 });
+  assert.equal(calls, 3);
+  assert.deepEqual(requestedUnitCounts, [9, 6, 3]);
+  assert.equal(payload.collection.fullyCompletedDomains, 2);
+  assert.equal(payload.failures.length, 1);
+  assert.equal(payload.failures[0].code, 'TIMEOUT');
+  assert.equal(Boolean(payload.results.customs.coverage.recoveryUsed), false);
+  assert.equal(payload.results.customs.categoryStatus.북미.coverage, 'none');
+  assert.equal(payload.results.customs.categoryStatus.동아시아.status, 'failure');
+});
+
+test('프로세스 트리 정리 실패는 즉시 전체 조사를 중단하고 후속 호출을 막는다', async () => {
+  let calls = 0;
+  const callClaude = async () => {
+    calls += 1;
+    throw new ClaudeCliError(
+      'PROCESS_CLEANUP',
+      'Claude 프로세스 트리를 완전히 종료하지 못했습니다.',
+      'taskkill 종료 명령 시간 초과',
+    );
+  };
+
+  await assert.rejects(
+    () => collectMonitoring({ callClaude, now, lookbackHours: 24 }),
+    (error) => error.code === 'PROCESS_CLEANUP' && /taskkill/.test(error.details),
+  );
+  assert.equal(calls, 1);
 });
 
 test('누락 카테고리만 재조사하고 정상 카테고리 결과를 보존한다', async () => {
   let customsCalls = 0;
-  const callGemini = async (prompt) => {
+  const callClaude = async (prompt) => {
     const { domain, units } = promptDomainAndUnits(prompt);
     if (domain.key === 'customs') {
       customsCalls += 1;
@@ -345,7 +377,7 @@ test('누락 카테고리만 재조사하고 정상 카테고리 결과를 보�
     return searchedEnvelope(responseFor(domain, units));
   };
 
-  const payload = await collectMonitoring({ callGemini, now, lookbackHours: 24 });
+  const payload = await collectMonitoring({ callClaude, now, lookbackHours: 24 });
   assert.equal(customsCalls, 2);
   assert.equal(payload.results.customs.categories.북미[0].title, '보존할 북미 결과');
   assert.equal(payload.results.customs.categoryStatus.북미.coverage, 'full');
@@ -355,7 +387,7 @@ test('누락 카테고리만 재조사하고 정상 카테고리 결과를 보�
 
 test('카테고리별 재조사도 실패하면 정상 결과를 보존하고 PARTIAL_COVERAGE를 기록한다', async () => {
   let customsCalls = 0;
-  const callGemini = async (prompt) => {
+  const callClaude = async (prompt) => {
     const { domain, units } = promptDomainAndUnits(prompt);
     if (domain.key === 'customs') {
       customsCalls += 1;
@@ -365,12 +397,12 @@ test('카테고리별 재조사도 실패하면 정상 결과를 보존하고 PA
           북미: [item({ title: '유지되는 부분 결과', sourceUrl: 'https://example.com/partial' })],
         }), { expectedSearches: units.length });
       }
-      throw new GeminiCliError('POLICY', '사내 검색 정책으로 재조사 차단');
+      throw new ClaudeCliError('POLICY', '사내 검색 정책으로 재조사 차단');
     }
     return searchedEnvelope(responseFor(domain, units));
   };
 
-  const payload = await collectMonitoring({ callGemini, now, lookbackHours: 24 });
+  const payload = await collectMonitoring({ callClaude, now, lookbackHours: 24 });
   assert.equal(payload.results.customs.categories.북미[0].title, '유지되는 부분 결과');
   assert.equal(payload.results.customs.categoryStatus.동아시아.status, 'failure');
   assert.equal(payload.results.customs.coverage.complete, false);
@@ -380,7 +412,7 @@ test('카테고리별 재조사도 실패하면 정상 결과를 보존하고 PA
 });
 
 test('날짜·국가·조치·URL·제목 유사도로 중복을 제거하고 품질 높은 전문영역 항목을 남긴다', async () => {
-  const callGemini = async (prompt) => {
+  const callClaude = async (prompt) => {
     const { domain, units } = promptDomainAndUnits(prompt);
     const categoryItems = {};
     if (domain.key === 'customs') {
@@ -413,7 +445,7 @@ test('날짜·국가·조치·URL·제목 유사도로 중복을 제거하고 �
     return searchedEnvelope(responseFor(domain, units, categoryItems));
   };
 
-  const payload = await collectMonitoring({ callGemini, now, lookbackHours: 24 });
+  const payload = await collectMonitoring({ callClaude, now, lookbackHours: 24 });
   assert.equal(payload.results.customs.categories.북미.length, 0);
   assert.equal(payload.results.export.categories.미국.length, 1);
   assert.match(payload.results.export.categories.미국[0].summary, /더 충실한 설명/);
@@ -421,7 +453,7 @@ test('날짜·국가·조치·URL·제목 유사도로 중복을 제거하고 �
 });
 
 test('재사용 URL의 날짜가 다르거나 같은 일반 제목의 발표 주체가 다르면 별도 사안으로 보존한다', async () => {
-  const callGemini = async (prompt) => {
+  const callClaude = async (prompt) => {
     const { domain, units } = promptDomainAndUnits(prompt);
     const categoryItems = {};
     if (domain.key === 'export') {
@@ -459,12 +491,12 @@ test('재사용 URL의 날짜가 다르거나 같은 일반 제목의 발표 주
     return searchedEnvelope(responseFor(domain, units, categoryItems));
   };
 
-  const payload = await collectMonitoring({ callGemini, now, lookbackHours: 24 });
+  const payload = await collectMonitoring({ callClaude, now, lookbackHours: 24 });
   assert.equal(payload.results.export.categories.미국.length, 5);
 });
 
 test('같은 사안의 중복 후보에서는 더 높은 중요도를 상세도보다 우선한다', async () => {
-  const callGemini = async (prompt) => {
+  const callClaude = async (prompt) => {
     const { domain, units } = promptDomainAndUnits(prompt);
     const categoryItems = {};
     if (domain.key === 'export') {
@@ -491,7 +523,7 @@ test('같은 사안의 중복 후보에서는 더 높은 중요도를 상세도�
     return searchedEnvelope(responseFor(domain, units, categoryItems));
   };
 
-  const payload = await collectMonitoring({ callGemini, now, lookbackHours: 24 });
+  const payload = await collectMonitoring({ callClaude, now, lookbackHours: 24 });
   assert.equal(payload.results.export.categories.미국.length, 1);
   assert.equal(payload.results.export.categories.미국[0].importance, '상');
   assert.equal(payload.results.export.categories.한국.length, 0);
@@ -512,15 +544,15 @@ test('전체 실행 제한 신호는 남은 영역을 RUN_TIMEOUT으로 표시�
 
 test('조사 호출 중 도달한 전체 실행 제한도 RUN_TIMEOUT 부분 결과로 정리한다', async () => {
   const controller = new AbortController();
-  const callGemini = async (_prompt, options) => new Promise((_resolve, reject) => {
-    const onAbort = () => reject(new GeminiCliError(
+  const callClaude = async (_prompt, options) => new Promise((_resolve, reject) => {
+    const onAbort = () => reject(new ClaudeCliError(
       options.signal.reason?.code || 'ABORTED',
       options.signal.reason?.message || '중단',
     ));
     options.signal.addEventListener('abort', onAbort, { once: true });
   });
   const collection = collectMonitoring({
-    callGemini,
+    callClaude,
     signal: controller.signal,
     now,
     lookbackHours: 24,

@@ -5,11 +5,11 @@ import {
   domains,
 } from './config.mjs';
 import {
-  callGeminiCli,
-  GeminiCliError,
-  isRetryableGeminiError,
+  callClaudeCli,
+  ClaudeCliError,
+  isRetryableClaudeError,
   retryMax,
-} from './gemini-client.mjs';
+} from './claude-client.mjs';
 import { parseJsonObject } from './json-utils.mjs';
 
 const KST = 'Asia/Seoul';
@@ -18,13 +18,13 @@ const FALLBACK_BATCH_SIZE = 1;
 const FALLBACK_ERROR_CODES = new Set([
   'BAD_JSON',
   'BAD_OUTPUT',
-  'TIMEOUT',
   'TURN_LIMIT',
   'SEARCH_NOT_RUN',
   'SEARCH_INCOMPLETE',
   'SEARCH_FAILED',
   'SEARCH_WARNING',
 ]);
+const FATAL_ERROR_CODES = new Set(['ABORTED', 'PROCESS_CLEANUP']);
 
 function formatKst(date, withTime = false) {
   const options = {
@@ -278,16 +278,16 @@ export function parseDomainResponse(domain, response, context, options = {}) {
   try {
     parsed = typeof response === 'string' ? parseJsonObject(response) : response;
   } catch (error) {
-    throw new GeminiCliError('BAD_JSON', `${domain.label} 응답 JSON을 읽지 못했습니다.`, error.message);
+    throw new ClaudeCliError('BAD_JSON', `${domain.label} 응답 JSON을 읽지 못했습니다.`, error.message);
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new GeminiCliError('BAD_JSON', `${domain.label} 응답이 JSON 객체가 아닙니다.`);
+    throw new ClaudeCliError('BAD_JSON', `${domain.label} 응답이 JSON 객체가 아닙니다.`);
   }
   if (parsed.domain !== domain.key) {
-    throw new GeminiCliError('BAD_JSON', `${domain.label} 응답의 domain 값이 올바르지 않습니다.`);
+    throw new ClaudeCliError('BAD_JSON', `${domain.label} 응답의 domain 값이 올바르지 않습니다.`);
   }
   if (!parsed.categories || typeof parsed.categories !== 'object' || Array.isArray(parsed.categories)) {
-    throw new GeminiCliError('BAD_JSON', `${domain.label} 응답에 categories 객체가 없습니다.`);
+    throw new ClaudeCliError('BAD_JSON', `${domain.label} 응답에 categories 객체가 없습니다.`);
   }
 
   const requestedUnits = options.units || domain.units;
@@ -353,42 +353,42 @@ export function parseDomainResponse(domain, response, context, options = {}) {
 function warningStrings(value) {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
-    throw new GeminiCliError('BAD_OUTPUT', 'Gemini CLI의 warnings 형식이 올바르지 않습니다.');
+    throw new ClaudeCliError('BAD_OUTPUT', 'Claude CLI의 warnings 형식이 올바르지 않습니다.');
   }
   return value.map((warning) => text(warning, 1000)).filter(Boolean);
 }
 
 export function validateResearchEnvelope(envelope, label = '조사', expectedSearches = 1) {
   if (!envelope || typeof envelope !== 'object') {
-    throw new GeminiCliError('BAD_OUTPUT', `${label} 응답 봉투가 올바르지 않습니다.`);
+    throw new ClaudeCliError('BAD_OUTPUT', `${label} 응답 봉투가 올바르지 않습니다.`);
   }
   const warnings = warningStrings(envelope.warnings);
-  const search = envelope.stats?.tools?.byName?.google_web_search;
+  const search = envelope.toolEvidence?.byName?.WebSearch;
   const success = Number(search?.success);
   const fail = Number(search?.fail || 0);
 
   if (!Number.isSafeInteger(success) || success < 1) {
     const code = Number.isSafeInteger(fail) && fail > 0 ? 'SEARCH_FAILED' : 'SEARCH_NOT_RUN';
-    throw new GeminiCliError(
+    throw new ClaudeCliError(
       code,
-      `${label}에서 성공한 Google 웹 검색을 확인하지 못했습니다.`,
+      `${label}에서 성공한 Claude WebSearch 호출을 확인하지 못했습니다.`,
       warnings.join('\n'),
     );
   }
   if (!Number.isSafeInteger(expectedSearches) || expectedSearches < 1) {
-    throw new GeminiCliError('CONFIG', `${label}의 최소 검색 횟수 설정이 올바르지 않습니다.`);
+    throw new ClaudeCliError('CONFIG', `${label}의 최소 검색 횟수 설정이 올바르지 않습니다.`);
   }
   if (success < expectedSearches) {
-    throw new GeminiCliError(
+    throw new ClaudeCliError(
       'SEARCH_INCOMPLETE',
       `${label}에서 카테고리별 검색 횟수가 부족합니다.`,
       `필요 ${expectedSearches}회, 성공 ${success}회`,
     );
   }
   if (!Number.isSafeInteger(fail) || fail < 0 || fail > 0) {
-    throw new GeminiCliError(
+    throw new ClaudeCliError(
       'SEARCH_FAILED',
-      `${label} 중 Google 웹 검색 실패가 감지되었습니다.`,
+      `${label} 중 Claude WebSearch 실패가 감지되었습니다.`,
       warnings.join('\n'),
     );
   }
@@ -397,9 +397,9 @@ export function validateResearchEnvelope(envelope, label = '조사', expectedSea
     /\b(?:error|failed|failure|denied|forbidden|blocked|disabled|unavailable)\b|오류|실패|거부|차단|비활성|사용할 수 없/i.test(warning)
   ));
   if (blockingWarnings.length > 0) {
-    throw new GeminiCliError(
+    throw new ClaudeCliError(
       'SEARCH_WARNING',
-      `${label} 중 결과 신뢰성에 영향을 주는 Gemini CLI 경고가 발생했습니다.`,
+      `${label} 중 결과 신뢰성에 영향을 주는 Claude CLI 경고가 발생했습니다.`,
       blockingWarnings.join('\n').slice(0, 3000),
     );
   }
@@ -572,10 +572,10 @@ async function loadMock(mockPath) {
   return JSON.parse(await fs.readFile(mockPath, 'utf8'));
 }
 
-function asGeminiError(error) {
-  return error instanceof GeminiCliError
+function asClaudeError(error) {
+  return error instanceof ClaudeCliError
     ? error
-    : new GeminiCliError('UNKNOWN', error?.message || String(error));
+    : new ClaudeCliError('UNKNOWN', error?.message || String(error));
 }
 
 function abortableDelay(delay, signal) {
@@ -583,8 +583,8 @@ function abortableDelay(delay, signal) {
     if (signal?.aborted) {
       const reason = signal.reason;
       reject(reason?.code === 'RUN_TIMEOUT'
-        ? new GeminiCliError('RUN_TIMEOUT', reason.message || '전체 실행 제한 시간을 초과했습니다.', reason.details || '')
-        : new GeminiCliError('ABORTED', '사용자가 실행을 중단했습니다.'));
+        ? new ClaudeCliError('RUN_TIMEOUT', reason.message || '전체 실행 제한 시간을 초과했습니다.', reason.details || '')
+        : new ClaudeCliError('ABORTED', '사용자가 실행을 중단했습니다.'));
       return;
     }
     let timer;
@@ -592,8 +592,8 @@ function abortableDelay(delay, signal) {
       clearTimeout(timer);
       const reason = signal.reason;
       reject(reason?.code === 'RUN_TIMEOUT'
-        ? new GeminiCliError('RUN_TIMEOUT', reason.message || '전체 실행 제한 시간을 초과했습니다.', reason.details || '')
-        : new GeminiCliError('ABORTED', '사용자가 실행을 중단했습니다.'));
+        ? new ClaudeCliError('RUN_TIMEOUT', reason.message || '전체 실행 제한 시간을 초과했습니다.', reason.details || '')
+        : new ClaudeCliError('ABORTED', '사용자가 실행을 중단했습니다.'));
     };
     timer = setTimeout(() => {
       signal?.removeEventListener('abort', onAbort);
@@ -607,7 +607,7 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
   if (mock) {
     const value = mock.domains?.[domain.key] || { insight: '', categories: {} };
     if (value.__error) {
-      throw new GeminiCliError(
+      throw new ClaudeCliError(
         text(value.__error.code, 40) || 'MOCK_ERROR',
         text(value.__error.message, 500) || `${domain.label} mock 실패`,
       );
@@ -625,7 +625,7 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const caller = options.callGemini || callGeminiCli;
+      const caller = options.callClaude || callClaudeCli;
       const envelope = await caller(buildDomainPrompt(domain, context, units), {
         cwd: options.cwd,
         signal: options.signal,
@@ -642,9 +642,9 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
         audit,
       };
     } catch (error) {
-      lastError = asGeminiError(error);
-      if (lastError.code === 'ABORTED') throw lastError;
-      const retryable = isRetryableGeminiError(lastError) && lastError.code !== 'TIMEOUT';
+      lastError = asClaudeError(error);
+      if (FATAL_ERROR_CODES.has(lastError.code)) throw lastError;
+      const retryable = isRetryableClaudeError(lastError) && lastError.code !== 'TIMEOUT';
       if (!retryable || attempt >= attempts) break;
       const delay = 30000 * 2 ** (attempt - 1);
       console.warn(`  ${lastError.code}: ${delay / 1000}초 후 한 번 더 시도합니다.`);
@@ -697,7 +697,9 @@ async function recoverBatch(domain, batch, context, options, mock, target, audit
     }
   } catch (error) {
     if (error?.code === 'ABORTED') throw error;
-    markUnitsFailed(target, batch, asGeminiError(error));
+    const claudeError = asClaudeError(error);
+    if (FATAL_ERROR_CODES.has(claudeError.code)) throw claudeError;
+    markUnitsFailed(target, batch, claudeError);
   }
 }
 
@@ -712,8 +714,8 @@ async function collectDomain(domain, context, options, mock) {
     auditTotals.webSearchSuccesses += primary.audit.webSearchSuccesses;
     auditTotals.warningCount += primary.audit.warnings.length;
   } catch (error) {
-    initialError = asGeminiError(error);
-    if (initialError.code === 'ABORTED') throw initialError;
+    initialError = asClaudeError(error);
+    if (FATAL_ERROR_CODES.has(initialError.code)) throw initialError;
     if (!FALLBACK_ERROR_CODES.has(initialError.code) || mock) throw initialError;
     markUnitsFailed(result, domain.units, initialError);
   }
@@ -750,7 +752,7 @@ async function collectDomain(domain, context, options, mock) {
     .join('\n');
   return {
     result,
-    failure: new GeminiCliError(
+    failure: new ClaudeCliError(
       'PARTIAL_COVERAGE',
       `${domain.label} ${unresolved.length}개 카테고리의 조사를 완료하지 못했습니다.`,
       details,
@@ -775,17 +777,17 @@ export async function collectMonitoring(options = {}) {
   const failures = [];
 
   console.log(`조사 기간: ${context.fromStr} ~ ${context.toStr} KST`);
-  console.log('Gemini 호출: 3개 영역을 순차 조사하고 실패한 카테고리만 하나씩 다시 조사합니다.');
+  console.log('Claude 호출: 3개 영역을 순차 조사하고 실패한 카테고리만 하나씩 다시 조사합니다.');
 
   for (let index = 0; index < domains.length; index += 1) {
     const domain = domains[index];
     if (options.signal?.aborted) {
       const reason = options.signal.reason;
       if (reason?.code !== 'RUN_TIMEOUT') {
-        throw new GeminiCliError('ABORTED', '사용자가 실행을 중단했습니다.');
+        throw new ClaudeCliError('ABORTED', '사용자가 실행을 중단했습니다.');
       }
       for (const pendingDomain of domains.slice(index)) {
-        const deadlineError = new GeminiCliError(
+        const deadlineError = new ClaudeCliError(
           'RUN_TIMEOUT',
           reason.message || '전체 실행 제한 시간을 초과했습니다.',
         );
@@ -809,10 +811,11 @@ export async function collectMonitoring(options = {}) {
       console.log(`[${index + 1}/${domains.length}] ${domain.label} 완료: ${count}건${suffix}`);
     } catch (error) {
       if (error?.code === 'ABORTED') throw error;
-      const geminiError = asGeminiError(error);
-      markUnitsFailed(results[domain.key], domain.units, geminiError);
+      const claudeError = asClaudeError(error);
+      if (FATAL_ERROR_CODES.has(claudeError.code)) throw claudeError;
+      markUnitsFailed(results[domain.key], domain.units, claudeError);
       refreshCoverage(results[domain.key]);
-      const failure = failureRecord(domain, geminiError);
+      const failure = failureRecord(domain, claudeError);
       failures.push(failure);
       console.error(`[${index + 1}/${domains.length}] ${domain.label} 실패 (${failure.code}): ${failure.reason}`);
       if (failure.details) console.error(`  상세: ${failure.details}`);

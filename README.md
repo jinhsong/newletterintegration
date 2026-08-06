@@ -1,335 +1,314 @@
-# Gemini CLI 글로벌 통상 모니터링
+# Claude Code CLI 글로벌 통상 모니터링
 
-회사 계정으로 로그인된 Gemini CLI가 관세·수출통제·무역구제 동향을 조사하고,
-결과를 Windows PC의 자체 포함 HTML 파일 하나로 저장하는 수동 실행 도구입니다.
+회사 계정으로 로그인된 Claude Code CLI가 관세·수출통제·무역구제의 최신 동향을
+`WebSearch`로 조사하고, 결과를 PC의 자체 포함 HTML 파일 하나로 저장합니다.
 
-이 저장소는 메일·SMTP 발송, 예약 트리거, Google Drive·Apps Script·Sheets,
-Obsidian, 별도 Gemini API 키를 사용하지 않습니다.
+메일 발송, 예약 실행, Google Drive, Apps Script, Obsidian, 외부 데이터베이스는 사용하지
+않습니다. 별도 API 키를 이 저장소에 입력하거나 저장할 필요도 없습니다.
 
-## 결과물과 한계
+## 처음 한 번만 준비하기
 
-- 기본 결과: `cli/output/monitoring.html`
-- 관세 9개, 수출통제 6개, 무역구제 3개(총 18개) 카테고리를 조사합니다.
-- 관세 지역 분류에는 `동남아/오세아니아`와 `동아시아`(중국·한국·일본·대만·홍콩),
-  수출통제에는 `영국/캐나다/호주/인도` 카테고리가 포함됩니다.
-- 결과는 **AI 예비 조사 자료**입니다. 링크, 발표일, 적용 대상, 수치를 원문에서
-  직접 확인한 뒤 업무 판단에 사용하세요.
-- 링크는 공개 HTTPS 형식만 표시하지만, 프로그램이 대상 페이지의 존재나 내용을
-  별도로 검증하지는 않습니다.
-- 동시 실행 잠금은 같은 Windows PC 안에서만 조정됩니다. 여러 PC가 하나의 네트워크
-  공유 HTML을 동시에 갱신하는 용도로 사용하지 말고 PC별 로컬 파일을 사용하세요.
+### 1. PowerShell 열기
 
-## 최초 한 번만 준비하기
+Windows 시작 메뉴에서 `PowerShell`을 검색해 실행합니다. 관리자 권한은 보통 필요하지
+않습니다.
 
-### 1. Node.js와 Gemini CLI 확인
+### 2. 필수 프로그램 확인
 
-PowerShell을 열고 다음을 입력합니다.
+아래 두 줄을 한 줄씩 입력합니다.
 
 ```powershell
 node --version
-gemini --version
+claude --version
 ```
 
-- Node.js 20 이상이 필요합니다.
-- Gemini CLI는 회사에서 승인한 설치 방법을 사용하세요.
-- `gemini`가 아닌 사용자 지정 경로를 쓴다면 아래처럼 `cli/.env`에 설정할 수
-  있으며, 실행기는 더 이상 `where gemini`를 강제하지 않습니다.
-- Gemini 실행 파일이 PATH에 없다면 위의 두 번째 명령 대신 실제 경로로 확인합니다.
+- Node.js는 `v20` 이상이어야 합니다.
+- Claude Code는 `2.1.214` 이상이어야 합니다. 가능하면 회사가 승인한 최신 버전을
+  사용하세요.
+- 명령을 찾을 수 없으면 회사 소프트웨어 센터나 IT 담당자를 통해 설치해야 합니다.
+
+Claude 실행 파일이 PATH에 없고 실제 위치를 알고 있다면 다음처럼 확인할 수 있습니다.
 
 ```powershell
-& "C:\Program Files\Company Gemini\gemini.cmd" --version
+& "C:\Program Files\Company Claude\claude.exe" --version
 ```
 
-### 2. 저장소 받기
-
-이 PC에 `newletterintegration` 폴더가 없을 때만 실행합니다.
+### 3. 회사 계정 로그인 확인
 
 ```powershell
-git clone --branch agent/gemini-cli-html-only-v4 https://github.com/jinhsong/newletterintegration.git
-Set-Location .\newletterintegration
+claude auth status --text
 ```
 
-이미 폴더가 있다면 다시 복제하지 말고 해당 폴더로 이동합니다.
+로그인되지 않았다고 나오면 회사 정책이 허용하는 경우 다음 명령으로 SSO 로그인을
+시작합니다.
 
 ```powershell
-Set-Location "C:\기존-저장경로\newletterintegration"
+claude auth login --sso
+```
+
+회사에서 별도 로그인 방법이나 AWS·Google Cloud·Microsoft Foundry 연결을 배포했다면
+그 안내를 우선 따르세요. 이 프로그램은 현재 PowerShell에 이미 설정된 회사 인증,
+프록시, 사내 인증서 환경을 Claude 프로세스에 전달합니다.
+
+> `ANTHROPIC_API_KEY` 또는 `ANTHROPIC_AUTH_TOKEN`이 PowerShell에 이미 설정되어 있으면
+> Claude Code의 회사 구독 로그인보다 우선할 수 있습니다. 프로그램이 값을 만들거나
+> 저장하지는 않습니다. 회사에서 의도적으로 배포한 값인지 IT 담당자에게 확인하세요.
+
+### 4. 저장소 받기
+
+원하는 상위 폴더로 이동한 다음 아래 명령을 한 번만 실행합니다.
+
+```powershell
+git clone --branch agent/claude-cli-html-only-v1 https://github.com/jinhsong/newletterintegration.git
+cd .\newletterintegration
+```
+
+이미 저장소가 있다면 다시 clone하지 않습니다.
+
+```powershell
+cd C:\Users\jinh.song\newletterintegration
 git fetch origin
-git switch agent/gemini-cli-html-only-v4
+git switch agent/claude-cli-html-only-v1
 git pull --ff-only
 ```
 
-이후 문서의 모든 실행 명령은 `newletterintegration` 최상위 폴더에서 입력합니다.
+경로가 다르면 첫 번째 줄만 실제 저장 위치로 바꾸세요.
 
-### 3. 회사 Gemini CLI 로그인·웹 검색 확인
+## 모니터링 실행하기
 
-임의의 PowerShell 폴더에서 다음을 실행합니다.
-
-```powershell
-gemini
-```
-
-PATH에 없는 회사 전용 실행 파일이라면 대신 다음처럼 실행합니다.
+저장소 폴더에서 다음 한 줄만 입력하면 됩니다.
 
 ```powershell
-& "C:\Program Files\Company Gemini\gemini.cmd"
+.\run-monitoring.cmd
 ```
 
-처음 실행하면 `Sign in with Google`을 선택하고 회사 계정으로 로그인합니다. Gemini
-입력창 `>`에 다음을 넣어 사내 계정의 웹 검색 사용 가능 여부를 확인합니다.
+프로그램은 다음 순서로 동작합니다.
 
-```text
-Google 웹 검색을 사용해서 오늘 날짜를 출처 URL과 함께 알려줘
+1. Claude Code 버전을 확인합니다.
+2. 관세, 수출통제, 무역구제 영역을 순서대로 조사합니다.
+3. 결과를 `cli\output\monitoring.html`에 안전하게 교체 저장합니다.
+4. 저장된 HTML을 기본 브라우저로 엽니다.
+
+메일, 예약 작업, 외부 저장은 실행하지 않습니다. 다음 실행 때는 clone이나 로그인 명령을
+반복할 필요 없이 저장소 폴더에서 `.\run-monitoring.cmd`만 실행하면 됩니다.
+
+브라우저를 자동으로 열지 않으려면 다음을 사용합니다.
+
+```powershell
+node .\cli\run.mjs --no-open
 ```
 
-답변이 나오면 다음으로 종료합니다.
+최근 3일 또는 7일을 조사하려면 다음과 같이 실행합니다.
 
-```text
-/quit
+```powershell
+node .\cli\run.mjs --lookback 72 --open
+node .\cli\run.mjs --lookback 168 --open
 ```
 
-> 실제 모니터링은 매번 검색 전용 보안 설정만 둔 별도의 임시 폴더에서
-> `--skip-trust`로 실행되므로,
-> 저장소 폴더를 Gemini에 신뢰 승인할 필요가 없습니다. 임시 폴더는 실행 후 자동으로
-> 삭제됩니다.
+다른 위치에 저장하려면 전체 파일 경로를 지정합니다.
 
-회사 계정에서 Google Cloud 프로젝트를 요구하면 사내 Gemini 관리자에게 Gemini
-Code Assist에 연결된 **프로젝트 ID**를 문의하세요. 필요한 회사만 설정 파일을
-만듭니다.
+```powershell
+node .\cli\run.mjs --out "C:\Users\jinh.song\Documents\통상동향.html" --open
+```
+
+`--lookback`은 `24`, `72`, `168` 중 하나만 허용합니다. 월요일 기본 실행은 주말을
+포함해 72시간, 나머지 요일은 24시간입니다.
+
+## 실제 조사 전에 연결만 짧게 확인하기
+
+회사 PC에서 실제 인증과 WebSearch 사용 가능 여부는 이 저장소의 자동 테스트로 대신할
+수 없습니다. 처음 한 번만 아래 명령을 실행해 보세요.
+
+```powershell
+claude --safe-mode --no-chrome --disable-slash-commands --strict-mcp-config --disallowedTools "mcp__*" --tools "WebSearch" --allowedTools "WebSearch" --permission-mode dontAsk --no-session-persistence -p "WebSearch를 한 번 사용해 Claude Code 공식 문서의 제목과 공개 HTTPS URL 하나만 알려줘."
+```
+
+정상 답변과 URL이 나오면 연결이 준비된 것입니다. 오류가 나오면 아래 오류 안내를 먼저
+확인하세요. 회사 관리 정책이 WebSearch를 금지하면 이 프로그램이 우회하지 않습니다.
+
+## 테스트 데이터로 HTML만 확인하기
+
+Claude Code에 접속하지 않고 화면과 저장 기능만 확인할 수 있습니다.
+
+```powershell
+node .\cli\run.mjs --mock .\cli\test\fixtures\responses.json --open
+```
+
+결과는 `cli\output\mock-monitoring.html`에 저장되고, 문서 상단에 테스트 데이터라고
+표시됩니다. 실제 동향 자료로 사용하면 안 됩니다.
+
+## 선택 설정
+
+필요할 때만 `cli\.env.example`을 `cli\.env`로 복사해 수정합니다.
 
 ```powershell
 Copy-Item .\cli\.env.example .\cli\.env
 notepad .\cli\.env
 ```
 
-열린 파일에서 해당 줄의 `#`을 지우고 실제 값을 넣습니다.
+주요 설정은 다음과 같습니다.
 
-```text
-GOOGLE_CLOUD_PROJECT=실제-회사-프로젝트-ID
+```dotenv
+CLAUDE_CLI_BIN=claude
+CLAUDE_CLI_PREFLIGHT_TIMEOUT_MS=60000
+CLAUDE_CLI_TIMEOUT_MS=600000
+CLAUDE_CLI_RETRY_MAX=2
+CLAUDE_RUN_TIMEOUT_MS=2700000
+LOCAL_OUTPUT_FILE=
 ```
 
-Gemini 실행 파일이 PATH에 없을 때는 다음과 같이 절대경로를 설정합니다.
+회사 전용 실행 파일이 PATH에 없으면 절대경로를 적습니다.
 
-```text
-GEMINI_CLI_BIN=C:\Program Files\Company Gemini\gemini.cmd
+```dotenv
+CLAUDE_CLI_BIN=C:\Program Files\Company Claude\claude.exe
 ```
 
-## 매번 실행하는 방법
+특정 모델을 회사에서 지정하라고 안내받은 경우에만 다음 줄을 추가합니다.
 
-PowerShell을 열고 `newletterintegration` 최상위 폴더로 이동한 뒤 **한 줄만**
-실행합니다.
+```dotenv
+CLAUDE_CLI_MODEL=sonnet
+```
+
+인증 토큰, API 키, 프록시 비밀번호를 `cli\.env`에 넣지 마세요. 실행기는 허용된 로컬
+설정 이름 외의 줄을 무시합니다. 회사 인증과 네트워크 설정은 IT가 구성한 운영체제 환경을
+그대로 사용합니다.
+
+## 안전하게 제한하는 방식
+
+실제 조사 호출은 비어 있는 임시 폴더에서 다음 경계를 동시에 적용합니다.
+
+- `--safe-mode`: 사용자·프로젝트의 지침, skills, plugins, hooks, MCP, auto-memory를
+  로드하지 않습니다. 인증, 모델 선택, 회사 관리 정책은 유지됩니다.
+- `--tools WebSearch`: Claude에게 보이는 일반 도구를 WebSearch로 제한합니다.
+- `--allowedTools WebSearch`와 `--permission-mode dontAsk`: WebSearch만 자동 승인하고
+  다른 권한 요청은 허용하지 않습니다.
+- `--strict-mcp-config`와 `--disallowedTools "mcp__*"`: MCP 도구를 이중으로 차단합니다.
+- `--no-session-persistence`: 조사 대화와 prompt history를 저장하지 않습니다.
+- `--no-chrome`: Chrome 연동을 사용하지 않습니다.
+- `stream-json`: 실제 `WebSearch` 호출과 대응하는 성공 결과를 ID로 확인합니다.
+
+`Read`, `Write`, `Bash`, `PowerShell`, `WebFetch`, `Agent`, MCP 등 다른 도구가 실제
+출력에서 감지되면 결과를 저장하지 않습니다. 회사 정책으로 설치된 managed hook은
+Claude Code의 `--safe-mode`보다 우선할 수 있어 일반 사용자가 사전에 우회할 수 없습니다.
+hook 이벤트가 감지되면 프로그램은 결과를 폐기하며, 관리 hook 자체를 없애야 한다면 IT
+담당자의 정책 변경이 필요합니다.
+
+## HTML 결과 읽기
+
+모니터링 범위는 모두 18개 카테고리입니다.
+
+- 관세 9개 지역
+- 수출통제 6개 국가·다자 범위
+- 무역구제 3개 조치 유형
+
+HTML은 다음 상태를 구분합니다.
+
+- `검색 실행 · 0건`: 검색은 성공했지만 기간과 기준을 충족한 신규 동향이 없음
+- `확인 불가`: 조사 호출, 검색 또는 응답 검증 실패
+- `검색 상태 정보 없음`: 검색 성공 증거를 확인할 수 없음
+
+모든 항목은 AI 예비 조사입니다. 링크, 발표일, 적용 대상, 수치와 실제 시행 여부를 원문에서
+다시 확인한 뒤 업무에 사용하세요.
+
+## 오류 해결
+
+### `CLI_NOT_FOUND`
 
 ```powershell
-.\run-monitoring.cmd
+where.exe claude
+Get-Command claude -All
 ```
 
-파일 탐색기에서 `run-monitoring.cmd`를 더블클릭해도 됩니다. 수집이 끝나면
-`cli/output/monitoring.html`이 새로 저장되고 기본 브라우저로 열립니다. 실행 중에는
-PowerShell 창을 닫지 마세요. 회사 네트워크와 검색량에 따라 수분에서 수십 분이
-걸릴 수 있습니다. 연속 시간초과로 무한정 기다리지 않도록 실제 조사는 기본 45분에
-중단되며, 그때까지 완료된 영역이 있으면 나머지를 `확인 불가`로 표시한 부분 HTML을
-저장합니다.
-
-다음 실행이 완료되면 같은 HTML 파일을 최신 결과로 교체합니다. 세 영역이 모두
-실패하면 기존 HTML을 보존합니다.
-
-### 조사 기간 바꾸기
-
-기본은 평일 24시간이며, 월요일은 주말을 포함해 72시간입니다.
-
-```powershell
-.\run-monitoring.cmd --lookback 24
-.\run-monitoring.cmd --lookback 72
-.\run-monitoring.cmd --lookback 168
-```
-
-허용 값은 24, 72, 168시간입니다.
-
-### 저장 위치 바꾸기
-
-이번 실행에서만 변경합니다.
-
-```powershell
-.\run-monitoring.cmd --out "C:\회사자료\통상동향\monitoring.html"
-```
-
-항상 같은 위치를 사용하려면 `cli/.env`에 설정합니다.
-
-```text
-LOCAL_OUTPUT_FILE=C:\회사자료\통상동향\monitoring.html
-```
-
-### 저장만 하고 브라우저는 열지 않기
-
-```powershell
-.\run-monitoring.cmd --no-open
-```
-
-### 도움말과 목 응답 테스트
-
-Gemini를 호출하지 않고 실행 인자를 확인할 때:
-
-```powershell
-.\run-monitoring.cmd --help
-```
-
-내장된 테스트 응답으로 HTML 생성만 확인할 때:
-
-```powershell
-.\run-monitoring.cmd --mock .\cli\test\fixtures\responses.json --out .\cli\output\mock-monitoring.html --no-open
-```
-
-`--help`와 `--mock`는 Gemini CLI가 없어도 실행됩니다. `--mock`에서 `--out`을
-생략해도 실사용 파일이 아닌 `cli/output/mock-monitoring.html`에 저장되며, HTML
-상단에 **테스트 데이터**라고 표시됩니다.
-
-## 자동 사전 점검과 보안 제한
-
-실제 조사를 시작하기 전에 프로그램이 `gemini --version`으로 회사 Gemini CLI의 버전을
-확인합니다. 회사 PC의 보안 검사 지연을 고려해 기본 60초를 기다리며, 최소 0.40.0보다
-낮은 버전은 조사를 시작하지 않습니다. 첫 실제 조사 호출에는 필수 보안 플래그를
-모두 전달하며, CLI가 하나라도 거부하면 결과를 저장하지 않고 `CLI_VERSION`으로
-중단합니다. 보안 제한을 빼고 계속 실행하지 않습니다.
-
-실행기는 임시 작업 폴더의 설정에서 내장 도구를 `google_web_search` 하나로
-allowlist하고 hooks·skills·사용자 정의 도구를 끕니다. 여기에
-`cli/policies/research-only.toml` 정책을 함께 적용하고 확장과 MCP 서버도
-비활성화합니다. 도구 통계에 다른 도구가 나타나면 `SECURITY_POLICY`로 중단하고
-결과를 폐기합니다.
-
-회사 관리자가 배포한 시스템 설정과 Admin 정책은 Gemini CLI 설계상 로컬 설정보다
-우선합니다. 회사 정책이 추가 도구를 강제하는 환경에서는 이 실행기가 해당 정책을
-우회하지 않으며, 검색 전용 실행을 허용할지 사내 Gemini 관리자에게 확인해야 합니다.
-`cli/.env`에서는 이 실행기에 필요한 설정 이름만 허용하므로, 저장소 파일로 Gemini의
-시스템 설정 경로나 중앙 관리 정책을 바꿀 수 없습니다.
-
-보안 정책 파일은 수정하지 마세요. 정책 무결성 점검에 실패하면 조사를 시작하지
-않습니다.
-
-## HTML에 표시되는 상태
-
-- **검색 실행 완료**: 요청 카테고리 수 이상의 Google 웹 검색 성공 기록이 있는
-  결과입니다. 큰 단위에서 이 조건을 충족하지 못하면 카테고리별로 다시 조사합니다.
-- **검색 실행 · 0건**: 검색은 실행했지만 조사 기간과 포함 기준을 충족한
-  항목이 없었습니다.
-- **재조사 결과**: 큰 단위 조사가 실패해 해당 카테고리를 하나씩 다시 조사한
-  결과입니다.
-- **확인 불가**: 시간초과, 정책, 인증, JSON 형식 등의 문제로 조사하지 못했습니다.
-  `0건`을 의미하지 않습니다.
-- **상태 정보 없음**: 새 상태 필드가 없는 구버전 결과입니다. 검색 완료로 간주하지
-  않습니다.
-
-각 원문 링크에는 출처명과 실제 hostname을 함께 표시합니다. `HTTPS 형식 확인`은
-URL 문자열의 형식만 통과했다는 뜻이며 페이지 존재, 발표 기관, 내용의 정확성을 검증했다는
-뜻이 아닙니다. `검색 근거와 연결`이라고 표시되어도 업무 사용 전에 원문을 열어
-수동으로 확인하세요.
-
-## 오류 코드별 확인 방법
-
-### `CLI_STARTUP_TIMEOUT`
-
-Gemini CLI의 시작·버전 확인이 기본 60초 안에 끝나지 않았습니다. 이는 구버전이라는
-뜻이 아닙니다. 먼저 PowerShell에서 다음 명령이 끝나는지 확인하세요.
-
-```powershell
-gemini --version
-```
-
-회사 보안 검사가 특히 느린 PC에서는 이번 PowerShell 창에서만 시작 제한을 2분으로
-늘린 뒤 다시 실행할 수 있습니다.
-
-```powershell
-$env:GEMINI_CLI_PREFLIGHT_TIMEOUT_MS = "120000"
-.\run-monitoring.cmd
-```
-
-최대 5분까지 설정할 수 있습니다. 직접 `gemini --version`도 끝나지 않으면 `Ctrl+C`로
-중단하고 사내 Gemini 관리자에게 문의하세요.
+아무 경로도 나오지 않으면 회사 승인 경로로 Claude Code를 설치하세요. 경로가 있다면
+`CLAUDE_CLI_BIN`에 `.exe` 또는 `.cmd`의 절대경로를 지정할 수 있습니다. `.ps1`은 자동
+실행 대상으로 사용하지 않습니다.
 
 ### `CLI_VERSION`
 
-회사 Gemini CLI가 최소 0.40.0보다 낮거나 실제 조사에 필요한 보안 플래그를 지원하지
-않습니다. 회사 승인 소프트웨어 채널에서 Gemini CLI 업데이트를 요청하세요. 프로그램이
-보안 제한을 빼고 계속 실행하지는 않습니다. 단순 시작 지연은 이 코드가 아니라
-`CLI_STARTUP_TIMEOUT`으로 표시됩니다.
-
-### `SECURITY_POLICY`
-
-보안 정책 파일이 변경되었거나 금지된 도구 사용이 관찰됐습니다. 저장소의 임의
-정책 수정을 되돌리고 다시 실행하세요. 계속되면 화면의 상세 오류를 사내 Gemini
-관리자에게 전달하세요.
-
-### `TIMEOUT` 또는 `TURN_LIMIT`
-
-영역 또는 카테고리 재조사의 제한을 넘었습니다. 프로그램이 재조사를 시도한 후에도
-실패한 카테고리는 HTML에 `확인 불가`로 표시됩니다. 시간을 15분으로 늘려
-다시 실행하려면:
+Claude Code가 `2.1.214`보다 낮거나 필수 보안 인수를 지원하지 않습니다.
 
 ```powershell
-$env:GEMINI_CLI_TIMEOUT_MS = "900000"
-$env:GEMINI_RUN_TIMEOUT_MS = "3600000"
+claude --version
+```
+
+회사 승인 채널에서 업데이트를 요청하세요. `claude --help`에 모든 인수가 표시되는 것은
+아니므로 help 출력만으로 지원 여부를 판정하지 않습니다.
+
+### `CLI_STARTUP_TIMEOUT`
+
+버전 확인이 기본 60초 안에 끝나지 않았습니다. 직접 시간을 재봅니다.
+
+```powershell
+Measure-Command { claude --version | Out-Null }
+```
+
+회사 보안 검사가 느리지만 명령이 정상 종료된다면 임시로 120초까지 늘릴 수 있습니다.
+
+```powershell
+$env:CLAUDE_CLI_PREFLIGHT_TIMEOUT_MS = "120000"
 .\run-monitoring.cmd
 ```
 
-첫 줄은 Gemini 호출 1회 제한을 15분, 둘째 줄은 전체 실행 제한을 60분으로
-늘립니다. PowerShell 창을 닫으면 설정은 사라집니다.
-
-### `RUN_TIMEOUT`
-
-기본 전체 실행 제한 45분에 도달했습니다. 이미 완료된 영역이 있으면 부분 HTML을
-저장하고, 하나도 완료하지 못했다면 기존 HTML을 보존합니다. 회사 네트워크가 느린
-경우 위 예시처럼 `GEMINI_RUN_TIMEOUT_MS`를 늘릴 수 있습니다.
-
-### `PARTIAL_COVERAGE`
-
-큰 단위 조사와 카테고리별 재조사 후에도 일부 카테고리를 완료하지
-못했습니다. HTML에서 `확인 불가`로 표시된 카테고리와 사유를 확인하고, 네트워크
-상태가 좋을 때 재실행하세요. 나머지 카테고리 결과는 HTML에 보존됩니다.
+최대 5분까지 허용됩니다. 직접 실행도 끝나지 않으면 Claude Code 창과 남은 프로세스를
+정리한 뒤 IT 담당자에게 문의하세요.
 
 ### `AUTH`
 
 ```powershell
-gemini
+claude auth status --text
 ```
 
-PATH에 없는 전용 실행 파일은 최초 로그인 때와 동일하게
-`& "실제경로\gemini.cmd"`로 실행합니다.
+회사 SSO 로그인 만료, 회사 게이트웨이, 프록시 또는 클라우드 공급자 자격 증명을
+확인하세요. 저장소에 API 키를 추가하는 방식으로 우회하지 마세요.
 
-회사 계정으로 다시 로그인한 뒤 `/quit`으로 나와 `run-monitoring.cmd`를 재실행합니다.
+### `WEB_SEARCH_UNAVAILABLE`, `POLICY`, `SECURITY_POLICY`
 
-### `PROJECT`
+회사 관리 정책이나 사용 중인 공급자가 WebSearch를 제공하지 않거나 검색 전용 경계가
+지켜지지 않았습니다. Amazon Bedrock의 서버측 WebSearch와 Azure 호스팅 Foundry의
+WebSearch는 Claude Code 공식 지원 범위가 아닐 수 있으므로 IT 담당자에게 현재 공급자와
+정책을 확인하세요.
 
-프로젝트 이름이 아닌 프로젝트 **ID**를 `cli/.env`의 `GOOGLE_CLOUD_PROJECT`에 설정합니다.
+### `TIMEOUT` 또는 `TURN_LIMIT`
 
-### `POLICY` 또는 `TRUST`
-
-실행기는 검색 전용 보안 설정만 둔 임시 폴더와 `--skip-trust`를 사용하므로 저장소 신뢰 승인은 필요하지
-않습니다. 오류가 계속되면 회사 관리 정책이 Gemini CLI 웹 검색, 정책 파일,
-또는 필수 플래그를 차단하는지 사내 관리자에게 문의하세요.
-
-### `ALREADY_RUNNING` 또는 다른 모니터링이 실행 중이라고 나올 때
-
-PowerShell 창과 작업 관리자에서 이미 실행 중인 모니터링이 있는지 확인하고 먼저
-끝날 때까지 기다립니다. 강제로 잠금 파일을 지우지 마세요. 이전 프로세스가
-비정상 종료되면 Windows가 실제 실행 잠금을 자동으로 해제하며, 다음 실행이 남은
-진단 정보를 교체합니다. 계속 나오면 PowerShell에 표시된 시작 시각을 확인한 뒤
-해당 내용을 전달하세요.
-
-### 실행 중 취소하기
-
-PowerShell에서 `Ctrl+C`를 한 번 누릅니다. 재시도 대기 중이어도 즉시 취소하고,
-실행 중인 Gemini 하위 프로세스와 임시 작업 폴더를 정리한 뒤 종료합니다.
-회사 보안 정책이 Windows `taskkill`을 막으면 `프로세스 트리 종료 경고` 또는
-`액세스가 거부되었습니다`가 나타날 수 있습니다. 이때는 작업 관리자에서 남은
-Gemini 프로세스를 종료하고, 반복되면 사내 IT 관리자에게 `taskkill /T` 허용 여부를
-문의하세요.
-
-## 개발 테스트
-
-저장소 최상위 폴더에서:
+조사 호출 한 번은 기본 10분, 전체 실행은 기본 45분으로 제한됩니다. `TIMEOUT`은 같은
+카테고리를 반복 실행하지 않습니다. 회사 네트워크가 정상인데 응답만 느린 경우에 한해
+다음처럼 늘릴 수 있습니다.
 
 ```powershell
-npm --prefix .\cli test
+$env:CLAUDE_CLI_TIMEOUT_MS = "900000"
+$env:CLAUDE_RUN_TIMEOUT_MS = "3600000"
+.\run-monitoring.cmd
 ```
 
-실제 Gemini CLI를 호출하지 않고 mock으로 종료·HTML 안전성·출력 교체·실패 보호를
-검증합니다.
+### `PROCESS_CLEANUP`
+
+시간초과나 중단 뒤 Windows가 Claude 프로세스 트리 종료를 확인하지 못했습니다. 이 상태로
+새 조사 프로세스를 계속 만들지 않고 즉시 전체 실행을 중단합니다. 작업 관리자에서 이번
+실행과 연결된 Claude 프로세스가 남아 있는지 확인하고, 회사 정책이 `taskkill /T /F`를
+차단하는 경우 IT 담당자에게 문의하세요.
+
+### `ALREADY_RUNNING`
+
+같은 HTML 파일을 대상으로 이미 실행 중인 모니터링이 있습니다. 기존 PowerShell 창의
+실행이 끝나거나 중단 정리가 완료될 때까지 기다리세요. 잠금 파일을 수동 삭제하지 마세요.
+
+### `BAD_OUTPUT`, `SEARCH_NOT_RUN`, `SEARCH_INCOMPLETE`, `SEARCH_FAILED`
+
+Claude 응답 스트림이 손상됐거나 카테고리 수만큼 성공한 WebSearch 결과를 확인하지
+못했습니다. 불완전한 내용을 정상 결과로 저장하지 않기 위한 오류입니다. 회사 연결 확인
+명령을 다시 실행하고, 반복되면 오류 코드와 상세 메시지를 IT 담당자에게 전달하세요.
+
+## 개발자 테스트
+
+저장소 루트에서 실행합니다.
+
+```powershell
+node --check .\cli\run.mjs
+npm --prefix .\cli test
+node .\cli\run.mjs --mock .\cli\test\fixtures\responses.json --out .\cli\output\mock-monitoring.html --no-open
+```
+
+테스트는 Windows의 가짜 `claude.cmd`를 실제 자식 프로세스로 실행해 버전, 고정 보안
+인수, stdin, stream-json, WebSearch 증거, timeout·중단·프로세스 정리와 HTML 저장을
+검증합니다. 실제 회사 인증과 회사 WebSearch 연결은 회사 PC의 짧은 연결 확인을 별도로
+통과해야 합니다.

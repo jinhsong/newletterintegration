@@ -8,10 +8,10 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from './src/cli-args.mjs';
 import {
   prepareResearchWorkspace,
-  preflightGeminiCli,
-  stopAllGeminiProcesses,
+  preflightClaudeCli,
+  stopAllClaudeProcesses,
   totalTimeoutMs,
-} from './src/gemini-client.mjs';
+} from './src/claude-client.mjs';
 import { renderMonitoringHtml } from './src/html-renderer.mjs';
 import { collectMonitoring } from './src/pipeline.mjs';
 import { acquireRunLock } from './src/run-lock.mjs';
@@ -23,13 +23,12 @@ import {
 const cliDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.dirname(cliDir);
 const LOCAL_ENV_KEYS = new Set([
-  'GEMINI_CLI_BIN',
-  'GEMINI_CLI_MODEL',
-  'GEMINI_CLI_PREFLIGHT_TIMEOUT_MS',
-  'GEMINI_CLI_RETRY_MAX',
-  'GEMINI_CLI_TIMEOUT_MS',
-  'GEMINI_RUN_TIMEOUT_MS',
-  'GOOGLE_CLOUD_PROJECT',
+  'CLAUDE_CLI_BIN',
+  'CLAUDE_CLI_MODEL',
+  'CLAUDE_CLI_PREFLIGHT_TIMEOUT_MS',
+  'CLAUDE_CLI_RETRY_MAX',
+  'CLAUDE_CLI_TIMEOUT_MS',
+  'CLAUDE_RUN_TIMEOUT_MS',
   'LOCAL_OUTPUT_FILE',
 ]);
 
@@ -61,7 +60,7 @@ function help() {
   node run.mjs [--lookback 24|72|168] [--out FILE] [--open|--no-open]
   node run.mjs --mock test/fixtures/responses.json [--out FILE]
 
-회사 계정으로 로그인된 Gemini CLI를 사용해 통상 동향을 조사하고
+회사 계정으로 로그인된 Claude Code CLI를 사용해 통상 동향을 조사하고
 PC에 HTML 파일 하나만 저장합니다.
 
 기본 결과: cli/output/monitoring.html
@@ -70,7 +69,7 @@ PC에 HTML 파일 하나만 저장합니다.
 }
 
 async function createResearchWorkspace() {
-  const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'trade-monitor-gemini-'));
+  const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'trade-monitor-claude-'));
   try {
     await prepareResearchWorkspace(directory);
     return directory;
@@ -85,7 +84,7 @@ async function removeResearchWorkspace(directory) {
   const tempRoot = path.resolve(os.tmpdir());
   const resolved = path.resolve(directory);
   if (!resolved.startsWith(`${tempRoot}${path.sep}`)
-    || !path.basename(resolved).startsWith('trade-monitor-gemini-')) {
+    || !path.basename(resolved).startsWith('trade-monitor-claude-')) {
     throw new Error(`임시 작업 폴더 경로가 안전하지 않아 삭제하지 않았습니다: ${resolved}`);
   }
   await fsPromises.rm(resolved, { recursive: true, force: true });
@@ -144,7 +143,7 @@ async function main() {
   const onInterrupt = () => {
     if (interrupted) return;
     interrupted = true;
-    console.warn('\n중단 요청을 받았습니다. 실행 중인 Gemini 작업을 정리합니다...');
+    console.warn('\n중단 요청을 받았습니다. 실행 중인 Claude 작업을 정리합니다...');
     controller.abort();
   };
   process.on('SIGINT', onInterrupt);
@@ -154,9 +153,9 @@ async function main() {
     runLock = await acquireRunLock(outputFile);
     if (!options.mockPath) {
       researchWorkspace = await createResearchWorkspace();
-      console.log('Gemini CLI 버전과 실행기 보안 설정을 확인합니다...');
-      const preflight = await preflightGeminiCli({ cwd: researchWorkspace, signal: controller.signal });
-      console.log(`Gemini CLI ${preflight.version} 확인 완료.`);
+      console.log('Claude Code CLI 버전과 실행기 보안 설정을 확인합니다...');
+      const preflight = await preflightClaudeCli({ cwd: researchWorkspace, signal: controller.signal });
+      console.log(`Claude Code ${preflight.version} 확인 완료.`);
       const deadline = totalTimeoutMs();
       console.log(`전체 실행 제한: ${Math.round(deadline / 60000)}분`);
       deadlineTimer = setTimeout(() => {
@@ -198,7 +197,7 @@ async function main() {
     }
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
-    await stopAllGeminiProcesses();
+    await stopAllClaudeProcesses();
     const cleanup = await Promise.allSettled([
       removeResearchWorkspace(researchWorkspace),
       runLock?.release(),
@@ -220,7 +219,7 @@ main().catch((error) => {
     return;
   }
   if (error?.code === 'ABORTED') {
-    console.error('실행을 중단했습니다. Gemini 프로세스와 임시 실행 정보를 정리했습니다.');
+    console.error('실행을 중단했습니다. Claude 프로세스와 임시 실행 정보를 정리했습니다.');
     process.exitCode = 130;
     return;
   }

@@ -173,7 +173,7 @@ function domainState(domain, payload, result) {
     const detail = [
       `카테고리 ${completed}/${requested}`,
       searches === null ? '' : `웹 검색 ${searches}회 성공`,
-      warningCount > 0 ? `Gemini 경고 ${warningCount}건` : '',
+      warningCount > 0 ? `Claude 경고 ${warningCount}건` : '',
     ].filter(Boolean).join(' · ');
     return {
       label,
@@ -234,7 +234,7 @@ function failureBanner(payload) {
     );
   });
   if (failures.length === 0 && coverageGaps.length === 0) {
-    return '<div class="status status-ok"><b>결과 생성 완료</b><span>세 영역의 Gemini CLI 조사 결과를 정리했습니다. 검색 범위와 원문을 수동으로 확인하세요.</span></div>';
+    return '<div class="status status-ok"><b>결과 생성 완료</b><span>세 영역의 Claude Code 조사 결과를 정리했습니다. 검색 범위와 원문을 수동으로 확인하세요.</span></div>';
   }
   const failureItems = failures
     .map((failure) => `<li><b>${escapeHtml(failure.domainLabel)}</b> <code>${escapeHtml(failure.code)}</code> ${escapeHtml(failure.reason)}</li>`)
@@ -265,7 +265,7 @@ function failureBanner(payload) {
 
 function mockBanner(payload) {
   if (payload.collection?.mode !== 'mock') return '';
-  return '<div class="status status-mock" role="status"><b>테스트 데이터</b><span>Gemini 웹 검색을 실행하지 않은 내장 목 응답입니다. 실제 모니터링 결과로 사용하지 마세요.</span></div>';
+  return '<div class="status status-mock" role="status"><b>테스트 데이터</b><span>Claude Code WebSearch를 실행하지 않은 내장 목 응답입니다. 실제 모니터링 결과로 사용하지 마세요.</span></div>';
 }
 
 function researchNotice(payload) {

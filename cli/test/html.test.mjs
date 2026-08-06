@@ -111,7 +111,7 @@ test('웹 검색 성공 기록이 0이면 완료 배너로 과장하지 않는�
   assert.match(html, /검색 상태 확인 필요/);
   assert.match(html, /웹 검색 성공 기록 없음/);
   assert.match(html, /검색 상태 정보 없음/);
-  assert.doesNotMatch(html, /세 영역의 Gemini CLI 조사 결과를 정리했습니다/);
+  assert.doesNotMatch(html, /세 영역의 Claude Code 조사 결과를 정리했습니다/);
 });
 
 test('부분 실패, 확인 불가, 검색 후 0건을 영역과 카테고리에서 구분한다', async () => {
@@ -139,7 +139,7 @@ test('부분 실패, 확인 불가, 검색 후 0건을 영역과 카테고리에
   const html = renderMonitoringHtml(payload);
   assert.match(html, /일부 범위 조사 실패/);
   assert.match(html, /부분 결과/);
-  assert.match(html, /카테고리 2\/3 · 웹 검색 2회 성공 · Gemini 경고 1건/);
+  assert.match(html, /카테고리 2\/3 · 웹 검색 2회 성공 · Claude 경고 1건/);
   assert.match(html, /수집 실패로 확인할 수 없습니다/);
   assert.match(html, /사유: &lt;정책 차단&gt;/);
   assert.match(html, /웹 검색을 마쳤으며, 조사 기간과 포함 기준을 충족한 신규 동향은 0건입니다/);
@@ -156,7 +156,7 @@ test('구버전 payload의 빈 카테고리를 검색 완료로 과장하지 않
   assert.match(html, /검색 상태 확인 필요/);
   assert.match(html, /상태 정보 없음/);
   assert.match(html, /검색 상태 정보가 없어 신규 동향 유무를 판단할 수 없습니다/);
-  assert.doesNotMatch(html, /세 영역의 Gemini CLI 조사 결과를 정리했습니다/);
+  assert.doesNotMatch(html, /세 영역의 Claude Code 조사 결과를 정리했습니다/);
 });
 
 test('Executive Watch는 영역 균형을 보존하고 선정된 6건을 발표일 최신순으로 표시한다', async () => {
