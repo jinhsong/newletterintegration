@@ -7,6 +7,7 @@ import { parseArgs } from '../src/cli-args.mjs';
 import {
   recoverInterruptedOutput,
   recoveryFileFor,
+  resolveMonitoringOutputFile,
   saveHtmlOutput,
 } from '../src/output-store.mjs';
 import {
@@ -23,17 +24,61 @@ async function withTempDir(worker) {
   }
 }
 
-test('CLI 인자는 허용된 lookback과 값이 있는 경로만 받는다', () => {
+test('CLI 인자는 lookback·단일 카테고리·값이 있는 경로만 받는다', () => {
   const cwd = path.resolve('example-root');
-  const parsed = parseArgs(['--lookback', '72', '--out', 'result.html', '--open'], cwd);
+  const parsed = parseArgs([
+    '--lookback', '72',
+    '--category', 'customs:북미',
+    '--out', 'result.html',
+    '--open',
+  ], cwd);
   assert.equal(parsed.lookbackHours, 72);
+  assert.equal(parsed.category, 'customs:북미');
   assert.equal(parsed.outputFile, path.resolve(cwd, 'result.html'));
   assert.equal(parsed.open, true);
 
+  assert.equal(parseArgs(['--category', 'UN 및 다자체제'], cwd).category, 'UN 및 다자체제');
+  assert.equal(parseArgs(['--list-categories', '--open'], cwd).listCategories, true);
   assert.throws(() => parseArgs(['--lookback', 'abc'], cwd), /24, 72, 168/);
   assert.throws(() => parseArgs(['--lookback'], cwd), /값을 입력/);
+  assert.throws(() => parseArgs(['--category'], cwd), /값을 입력/);
+  assert.throws(() => parseArgs(['--category', '   '], cwd), /값을 입력/);
+  assert.throws(
+    () => parseArgs(['--category', '북미', '--category', '미국'], cwd),
+    /한 번만/,
+  );
+  assert.throws(
+    () => parseArgs(['--list-categories', '--lookback', '24'], cwd),
+    /다른 실행 옵션/,
+  );
   assert.throws(() => parseArgs(['--out', '--open'], cwd), /값을 입력/);
   assert.throws(() => parseArgs(['--unknown'], cwd), /알 수 없는 인자/);
+});
+
+test('전체·목·단일 카테고리 기본 결과 경로를 분리하고 명시한 --out을 우선한다', () => {
+  const cliDir = path.resolve('example-cli');
+  const configured = '.\\company\\full.html';
+  const explicit = path.resolve('chosen.html');
+
+  assert.equal(
+    resolveMonitoringOutputFile(cliDir, {}, configured),
+    path.resolve(cliDir, configured),
+  );
+  assert.equal(
+    resolveMonitoringOutputFile(cliDir, { mockPath: 'fixture.json' }, configured),
+    path.join(cliDir, 'output', 'mock-monitoring.html'),
+  );
+  assert.equal(
+    resolveMonitoringOutputFile(cliDir, { categorySelection: { id: 'customs:북미' } }, configured),
+    path.join(cliDir, 'output', 'monitoring-category.html'),
+  );
+  assert.equal(
+    resolveMonitoringOutputFile(cliDir, {
+      categorySelection: { id: 'customs:북미' },
+      outputFile: explicit,
+    }, configured),
+    explicit,
+  );
 });
 
 test('같은 결과 파일의 동시 실행을 막고 정상 종료 시 잠금을 제거한다', async () => {

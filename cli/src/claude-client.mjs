@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import process from 'node:process';
+import { isTrustedOfficialDomain } from './config.mjs';
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_JSONL_LINE_BYTES = 2 * 1024 * 1024;
@@ -805,10 +806,14 @@ function validateInitEvent(event) {
       `감지된 도구: ${forbidden.join(', ')}`,
     );
   }
-  if (event.permissionMode !== 'dontAsk') {
+  // Some enterprise hardening forces a requested dontAsk session back to
+  // default. --allowedTools still pre-approves WebSearch in default mode; the
+  // exact init.tools check above and per-event checks below keep every other
+  // tool unavailable and reject permission denials.
+  if (!['dontAsk', 'default'].includes(event.permissionMode)) {
     throw streamError(
       'SECURITY_POLICY',
-      'Claude CLI가 요청한 비대화형 권한 모드로 시작되지 않았습니다.',
+      'Claude CLI가 허용된 권한 모드로 시작되지 않았습니다.',
       `감지된 권한 모드: ${String(event.permissionMode || '(없음)')}`,
     );
   }
@@ -853,6 +858,84 @@ function resultErrorDetails(event, block) {
     }
   }
   return '세부 오류 없음';
+}
+
+function normalizeSearchQuery(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('en-US')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+function webSearchDomains(input, key) {
+  if (input?.[key] === undefined) return [];
+  if (!Array.isArray(input[key])) {
+    throw streamError('BAD_OUTPUT', `Claude WebSearch ${key} 형식이 배열이 아닙니다.`);
+  }
+  const domains = [];
+  for (const raw of input[key]) {
+    const hostname = String(raw || '').trim().toLowerCase().replace(/\.$/, '');
+    const labels = hostname.split('.');
+    if (
+      !hostname
+      || hostname.length > 253
+      || !hostname.includes('.')
+      || !/^[a-z0-9.-]+$/i.test(hostname)
+      || labels.some((label) => (
+        !label
+        || label.length > 63
+        || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label)
+      ))
+      || hostname === 'localhost'
+      || hostname.endsWith('.localhost')
+      || hostname.endsWith('.local')
+      || hostname.endsWith('.internal')
+      || hostname.endsWith('.lan')
+      || isIP(hostname)
+    ) {
+      throw streamError('BAD_OUTPUT', `Claude WebSearch ${key}에 공개 hostname이 아닌 값이 있습니다.`, hostname);
+    }
+    if (!domains.includes(hostname)) domains.push(hostname);
+  }
+  return domains;
+}
+
+function webSearchRequest(block, officialDomainAllowlist = []) {
+  const input = block?.input;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw streamError('BAD_OUTPUT', 'Claude WebSearch 입력 형식이 올바르지 않습니다.');
+  }
+  const query = typeof input.query === 'string' ? input.query.trim() : '';
+  const normalizedQuery = normalizeSearchQuery(query);
+  if (!normalizedQuery) {
+    throw streamError('BAD_OUTPUT', 'Claude WebSearch 입력에 query가 없습니다.');
+  }
+  const allowedDomains = webSearchDomains(input, 'allowed_domains');
+  const blockedDomains = webSearchDomains(input, 'blocked_domains');
+  if (allowedDomains.length > 0 && blockedDomains.length > 0) {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude WebSearch는 allowed_domains와 blocked_domains를 함께 사용할 수 없습니다.',
+    );
+  }
+  const untrustedDomains = allowedDomains.filter(
+    (hostname) => !isTrustedOfficialDomain(hostname, officialDomainAllowlist),
+  );
+  if (officialDomainAllowlist.length > 0 && untrustedDomains.length > 0) {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude WebSearch 공식기관 검색에 신뢰 목록 밖 도메인이 포함되었습니다.',
+      untrustedDomains.join(', '),
+    );
+  }
+  return {
+    query,
+    normalizedQuery,
+    allowedDomains,
+    blockedDomains,
+    mode: allowedDomains.length > 0 ? 'official' : 'broad',
+  };
 }
 
 function webSearchResultError(event, block) {
@@ -924,6 +1007,15 @@ export function mergeClaudeStreamError(error, result = {}) {
 }
 
 export function parseClaudeStream(output, options = {}) {
+  const officialDomainAllowlist = options.officialDomainAllowlist === undefined
+    ? []
+    : webSearchDomains(
+      { allowed_domains: options.officialDomainAllowlist },
+      'allowed_domains',
+    );
+  if (options.requireOfficialAndBroadSearch === true && officialDomainAllowlist.length === 0) {
+    throw streamError('CONFIG', '공식기관 검색의 신뢰 도메인 목록이 비어 있습니다.');
+  }
   const text = String(output || '');
   const rawLines = text.split(/\r?\n/);
   const lines = rawLines.filter((line) => line.trim().length > 0);
@@ -1032,7 +1124,10 @@ export function parseClaudeStream(output, options = {}) {
         if (!id || searches.has(id)) {
           throw streamError('BAD_OUTPUT', 'Claude WebSearch tool_use ID가 없거나 중복되었습니다.');
         }
-        searches.set(id, { status: 'pending' });
+        searches.set(id, {
+          status: 'pending',
+          ...webSearchRequest(block, officialDomainAllowlist),
+        });
       }
       continue;
     }
@@ -1057,6 +1152,17 @@ export function parseClaudeStream(output, options = {}) {
         }
         if (search.status !== 'pending') {
           throw streamError('BAD_OUTPUT', '동일한 WebSearch tool_result가 중복되었습니다.', id);
+        }
+        const resultQuery = event?.tool_use_result?.query;
+        if (
+          typeof resultQuery === 'string'
+          && normalizeSearchQuery(resultQuery) !== search.normalizedQuery
+        ) {
+          throw streamError(
+            'BAD_OUTPUT',
+            'Claude WebSearch 요청과 결과의 query가 일치하지 않습니다.',
+            `요청: ${search.query}\n결과: ${resultQuery}`,
+          );
         }
         const searchError = webSearchResultError(event, block);
         if (searchError) {
@@ -1107,7 +1213,8 @@ export function parseClaudeStream(output, options = {}) {
     );
   }
 
-  const success = [...searches.values()].filter((value) => value.status === 'success').length;
+  const successfulSearches = [...searches.values()].filter((value) => value.status === 'success');
+  const success = successfulSearches.length;
   const fail = [...searches.values()].filter((value) => value.status === 'failed').length;
   const minimum = positiveInt(options.minimumWebSearchSuccesses, 1, 200);
   if (success < minimum) {
@@ -1118,6 +1225,20 @@ export function parseClaudeStream(output, options = {}) {
       [`성공 ${success}회, 실패 ${fail}회`, ...warnings].join('\n'),
     );
   }
+  const distinctQueries = new Set(successfulSearches.map((value) => value.normalizedQuery));
+  const official = successfulSearches.filter((value) => value.mode === 'official').length;
+  const broad = successfulSearches.filter((value) => value.mode === 'broad').length;
+  if (options.requireOfficialAndBroadSearch === true && (
+    distinctQueries.size < 2
+    || official < 1
+    || broad < 1
+  )) {
+    throw streamError(
+      'SEARCH_INCOMPLETE',
+      '공식기관 검색과 일반 동향 검색을 각각 확인하지 못했습니다.',
+      `서로 다른 query ${distinctQueries.size}개, 공식기관 검색 ${official}회, 일반 동향 검색 ${broad}회`,
+    );
+  }
 
   const toolEvidence = {
     available: true,
@@ -1125,7 +1246,18 @@ export function parseClaudeStream(output, options = {}) {
     totalSuccess: success,
     totalFail: fail,
     byName: {
-      WebSearch: { count: searches.size, success, fail },
+      WebSearch: {
+        count: searches.size,
+        success,
+        fail,
+        official,
+        broad,
+        queries: successfulSearches.map((value) => ({
+          query: value.query,
+          mode: value.mode,
+          allowedDomains: value.allowedDomains,
+        })),
+      },
     },
   };
   return {

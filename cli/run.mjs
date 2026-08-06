@@ -7,6 +7,10 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from './src/cli-args.mjs';
 import {
+  categoryCatalog,
+  resolveCategorySelector,
+} from './src/config.mjs';
+import {
   prepareResearchWorkspace,
   preflightClaudeCli,
   stopAllClaudeProcesses,
@@ -16,7 +20,7 @@ import { renderMonitoringHtml } from './src/html-renderer.mjs';
 import { collectMonitoring } from './src/pipeline.mjs';
 import { acquireRunLock } from './src/run-lock.mjs';
 import {
-  resolveOutputFile,
+  resolveMonitoringOutputFile,
   saveHtmlOutput,
 } from './src/output-store.mjs';
 
@@ -57,15 +61,26 @@ loadEnvFile(path.join(cliDir, '.env'));
 function help() {
   console.log(`
 사용법:
-  node run.mjs [--lookback 24|72|168] [--out FILE] [--open|--no-open]
+  node run.mjs [--lookback 24|72|168] [--category CATEGORY] [--out FILE] [--open|--no-open]
+  node run.mjs --list-categories
   node run.mjs --mock test/fixtures/responses.json [--out FILE]
 
 회사 계정으로 로그인된 Claude Code CLI를 사용해 통상 동향을 조사하고
 PC에 HTML 파일 하나만 저장합니다.
 
 기본 결과: cli/output/monitoring.html
+단일 카테고리 기본 결과: cli/output/monitoring-category.html
 목 테스트 기본 결과: cli/output/mock-monitoring.html
 `);
+}
+
+function listCategories() {
+  console.log('사용 가능한 카테고리(--category 값):');
+  for (const entry of categoryCatalog) {
+    console.log(`  ${entry.id}  (${entry.domainLabel} · ${entry.description})`);
+  }
+  console.log('');
+  console.log('예: .\\run-monitoring.cmd --category "customs:북미"');
 }
 
 async function createResearchWorkspace() {
@@ -123,18 +138,23 @@ async function main() {
     throw new Error(`Node.js 20 이상이 필요합니다. 현재 버전: ${process.versions.node}`);
   }
   const options = parseArgs(process.argv.slice(2));
+  if (options.listCategories) {
+    listCategories();
+    return;
+  }
   if (options.help) {
     help();
     return;
   }
+  const categorySelection = options.category
+    ? resolveCategorySelector(options.category)
+    : null;
 
-  const outputFile = options.mockPath && !options.outputFile
-    ? path.join(cliDir, 'output', 'mock-monitoring.html')
-    : resolveOutputFile(
-      cliDir,
-      process.env.LOCAL_OUTPUT_FILE,
-      options.outputFile,
-    );
+  const outputFile = resolveMonitoringOutputFile(
+    cliDir,
+    { ...options, categorySelection },
+    process.env.LOCAL_OUTPUT_FILE,
+  );
   const controller = new AbortController();
   let interrupted = false;
   let runLock;
@@ -170,12 +190,16 @@ async function main() {
     const payload = await collectMonitoring({
       cwd: researchWorkspace || repoRoot,
       lookbackHours: options.lookbackHours,
+      categorySelection,
       mockPath: options.mockPath,
       signal: controller.signal,
     });
     throwIfAborted(controller.signal);
     if (payload.collection.completedDomains === 0) {
-      const error = new Error('세 영역이 모두 실패하여 기존 HTML을 덮어쓰지 않았습니다. 위 오류 코드를 확인하세요.');
+      const scope = categorySelection
+        ? `선택한 ${categorySelection.domainLabel} / ${categorySelection.unitLabel} 카테고리`
+        : '전체 조사 범위';
+      const error = new Error(`${scope}가 실패하여 기존 HTML을 덮어쓰지 않았습니다. 위 오류 코드를 확인하세요.`);
       if (payload.failures.some((failure) => failure.code === 'RUN_TIMEOUT')) error.code = 'RUN_TIMEOUT';
       throw error;
     }
@@ -188,7 +212,7 @@ async function main() {
     console.log(`HTML 저장 완료: ${outputFile}`);
     console.log(`수집 결과: 총 ${payload.stats.total}건 / 중요도 상 ${payload.stats.high}건`);
     if (payload.failures.length > 0) {
-      console.warn(`주의: ${payload.failures.length}개 영역 실패가 HTML 상단에 표시되었습니다.`);
+      console.warn(`주의: ${payload.failures.length}개 카테고리 실패가 HTML 상단에 표시되었습니다.`);
     }
     console.log('메일 발송, 예약 실행, 외부 저장은 수행하지 않았습니다.');
     if (options.open) {

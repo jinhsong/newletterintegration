@@ -1,6 +1,16 @@
 import net from 'node:net';
 import { domains } from './config.mjs';
 
+function visibleDomains(payload) {
+  const requested = payload?.collection?.requestedCategoryIds;
+  if (!Array.isArray(requested)) return domains;
+  const ids = new Set(requested.map(String));
+  return domains.map((domain) => ({
+    ...domain,
+    units: domain.units.filter((unit) => ids.has(`${domain.key}:${unit.key}`)),
+  })).filter((domain) => domain.units.length > 0);
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -133,9 +143,12 @@ function categoryState(result, unitKey, domainFailure) {
 
 function categoryStateLabel(state, itemCount) {
   if (state.status === 'failure') return '확인 불가';
-  if (state.coverage === 'fallback') return itemCount > 0 ? '재조사 결과' : '재조사 · 0건';
-  if (state.status === 'empty') return '검색 실행 · 0건';
-  if (state.status === 'success') return '검색 실행';
+  const searchLabel = Number.isInteger(state.webSearchSuccesses) && state.webSearchSuccesses > 0
+    ? `검색 ${state.webSearchSuccesses}회`
+    : '검색 실행';
+  if (state.coverage === 'fallback') return itemCount > 0 ? `재조사 결과 · ${searchLabel}` : `재조사 · ${searchLabel} · 0건`;
+  if (state.status === 'empty') return `${searchLabel} · 0건`;
+  if (state.status === 'success') return searchLabel;
   return '상태 정보 없음';
 }
 
@@ -193,12 +206,14 @@ function domainSection(domain, payload) {
   const categorySections = domain.units.map((unit) => {
     const items = result.categories?.[unit.key] || [];
     const category = categoryState(result, unit.key, failure);
+    const categoryInsight = result.categoryInsights?.[unit.key] || '';
     return `
       <section class="category">
         <div class="category-heading">
           <h3>${escapeHtml(unit.label)}</h3>
           <div class="category-meta"><span>${items.length}건</span><span class="state-chip state-${escapeHtml(category.status)}">${categoryStateLabel(category, items.length)}</span></div>
         </div>
+        ${categoryInsight ? `<div class="category-insight"><b>카테고리 요약</b><p>${escapeHtml(categoryInsight)}</p></div>` : ''}
         ${items.length > 0
     ? `<div class="items">${items.map((item) => itemCard(item)).join('')}</div>`
     : emptyCategoryMessage(category)}
@@ -223,8 +238,9 @@ function domainSection(domain, payload) {
 }
 
 function failureBanner(payload) {
+  const requestedDomains = visibleDomains(payload);
   const failures = payload.failures || [];
-  const coverageGaps = domains.filter((domain) => {
+  const coverageGaps = requestedDomains.filter((domain) => {
     const coverage = payload.results?.[domain.key]?.coverage;
     return !coverage || (
       coverage.failedCategories > 0
@@ -234,10 +250,14 @@ function failureBanner(payload) {
     );
   });
   if (failures.length === 0 && coverageGaps.length === 0) {
-    return '<div class="status status-ok"><b>결과 생성 완료</b><span>세 영역의 Claude Code 조사 결과를 정리했습니다. 검색 범위와 원문을 수동으로 확인하세요.</span></div>';
+    const total = payload.collection?.totalCategories ?? requestedDomains.reduce(
+      (sum, domain) => sum + domain.units.length,
+      0,
+    );
+    return `<div class="status status-ok"><b>결과 생성 완료</b><span>요청한 ${escapeHtml(total)}개 카테고리의 Claude Code 이중 검색 결과를 정리했습니다. 검색 범위와 원문을 수동으로 확인하세요.</span></div>`;
   }
   const failureItems = failures
-    .map((failure) => `<li><b>${escapeHtml(failure.domainLabel)}</b> <code>${escapeHtml(failure.code)}</code> ${escapeHtml(failure.reason)}</li>`)
+    .map((failure) => `<li><b>${escapeHtml(failure.domainLabel)}${failure.categoryLabel ? ` / ${escapeHtml(failure.categoryLabel)}` : ''}</b> <code>${escapeHtml(failure.code)}</code> ${escapeHtml(failure.reason)}</li>`)
     .join('');
   const failedKeys = new Set(failures.map((failure) => failure.domainKey));
   const hasUnavailableRange = failures.length > 0 || coverageGaps.some((domain) => (
@@ -258,7 +278,7 @@ function failureBanner(payload) {
   return `
     <div class="status status-warn" role="status">
       <b>${hasUnavailableRange ? '일부 범위 조사 실패' : '검색 상태 확인 필요'}</b>
-      <span>${payload.collection?.completedDomains ?? 0}/${payload.collection?.totalDomains ?? domains.length}개 영역에 표시 가능한 결과가 있습니다. '신규 동향 0건', '확인 불가', '검색 기록 없음'을 구분해서 보세요.</span>
+      <span>${payload.collection?.completedDomains ?? 0}/${payload.collection?.totalDomains ?? requestedDomains.length}개 영역에 표시 가능한 결과가 있습니다. '신규 동향 0건', '확인 불가', '검색 기록 없음'을 구분해서 보세요.</span>
       <ul>${failureItems}${coverageItems}</ul>
     </div>`;
 }
@@ -288,11 +308,11 @@ function comparePriority(a, b) {
     || a.itemIndex - b.itemIndex;
 }
 
-function selectPriorityItems(items, maximum = 6) {
+function selectPriorityItems(items, requestedDomains, maximum = 6) {
   const sorted = [...items].sort(comparePriority);
   const selected = [];
   const selectedItems = new Set();
-  for (const domain of domains) {
+  for (const domain of requestedDomains) {
     const candidate = sorted.find(({ domain: itemDomain }) => itemDomain.key === domain.key);
     if (candidate && selected.length < maximum) {
       selected.push(candidate);
@@ -307,8 +327,9 @@ function selectPriorityItems(items, maximum = 6) {
 }
 
 function highPriority(payload) {
+  const requestedDomains = visibleDomains(payload);
   const items = [];
-  for (const [domainIndex, domain] of domains.entries()) {
+  for (const [domainIndex, domain] of requestedDomains.entries()) {
     for (const [unitIndex, unit] of domain.units.entries()) {
       for (const [itemIndex, item] of (payload.results?.[domain.key]?.categories?.[unit.key] || []).entries()) {
         if (item.importance === '상') items.push({ domain, unit, item, domainIndex, unitIndex, itemIndex });
@@ -316,7 +337,7 @@ function highPriority(payload) {
     }
   }
   if (items.length === 0) return '';
-  const selected = selectPriorityItems(items);
+  const selected = selectPriorityItems(items, requestedDomains);
   return `
     <section class="priority">
       <div class="section-title">
@@ -334,9 +355,14 @@ function highPriority(payload) {
 }
 
 export function renderMonitoringHtml(payload) {
-  const nav = domains.map((domain) => (
+  const requestedDomains = visibleDomains(payload);
+  const nav = requestedDomains.map((domain) => (
     `<a href="#domain-${escapeHtml(domain.key)}" style="--domain:${domain.color}">${escapeHtml(domain.label)} <b>${payload.stats?.byDomain?.[domain.key]?.total ?? 0}</b></a>`
   )).join('');
+  const selection = payload.collection?.selection;
+  const heroSubtitle = selection
+    ? `선택 조사 · ${selection.domainLabel} / ${selection.unitLabel}`
+    : '관세 · 수출통제 · 무역구제 신규 동향';
 
   return `<!DOCTYPE html>
 <html lang="ko">
@@ -354,7 +380,7 @@ export function renderMonitoringHtml(payload) {
     .quick-nav{display:flex;gap:9px;flex-wrap:wrap;margin:18px 0 26px}.quick-nav a{text-decoration:none;background:#fff;border:1px solid var(--line);border-top:3px solid var(--domain);border-radius:10px;padding:9px 14px;font-size:13px}.quick-nav b{margin-left:5px}
     .priority,.domain{background:var(--paper);border:1px solid var(--line);border-radius:20px;padding:26px;margin-top:22px;box-shadow:0 7px 22px rgba(15,35,63,.05)}.section-title,.domain-heading,.category-heading,.item-heading{display:flex;justify-content:space-between;gap:16px;align-items:center}.section-title h2,.domain-heading h2{margin:0;letter-spacing:-.04em}.section-title>span{background:#fdecec;color:var(--high);font-weight:800;padding:5px 10px;border-radius:999px}.section-help{margin:4px 0 0;color:var(--muted);font-size:12px}
     .priority-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:18px}.priority-wrap{border-top:3px solid var(--domain);border-radius:13px;background:#fafbfd;padding:13px}.priority-label{margin:0 0 8px;color:var(--domain);font-size:12px;font-weight:800}.priority-wrap .item-card{border:0;padding:0;background:transparent}
-    .domain{border-top:6px solid var(--domain)}.domain .eyebrow{color:var(--domain)}.domain-state{display:flex;gap:8px;align-items:center;margin:7px 0 0;font-size:12px}.domain-state b{padding:2px 7px;border-radius:999px}.domain-state span{color:var(--muted)}.domain-state.state-ok b{background:#e7f6ec;color:#24623a}.domain-state.state-warn b{background:#fff0cf;color:#7b5200}.domain-state.state-unknown b{background:#eef1f5;color:#526073}.domain-count{display:flex;align-items:baseline;gap:4px;color:var(--domain)}.domain-count strong{font-size:32px}.domain-count span{font-size:13px}.insight{margin:18px 0 24px;padding:17px 19px;border-left:4px solid var(--domain);background:var(--domain-soft);border-radius:0 12px 12px 0}.insight b{color:var(--domain)}.insight p{margin:4px 0 0}
+    .domain{border-top:6px solid var(--domain)}.domain .eyebrow{color:var(--domain)}.domain-state{display:flex;gap:8px;align-items:center;margin:7px 0 0;font-size:12px}.domain-state b{padding:2px 7px;border-radius:999px}.domain-state span{color:var(--muted)}.domain-state.state-ok b{background:#e7f6ec;color:#24623a}.domain-state.state-warn b{background:#fff0cf;color:#7b5200}.domain-state.state-unknown b{background:#eef1f5;color:#526073}.domain-count{display:flex;align-items:baseline;gap:4px;color:var(--domain)}.domain-count strong{font-size:32px}.domain-count span{font-size:13px}.insight,.category-insight{margin:18px 0 24px;padding:17px 19px;border-left:4px solid var(--domain);background:var(--domain-soft);border-radius:0 12px 12px 0}.insight b,.category-insight b{color:var(--domain)}.insight p,.category-insight p{margin:4px 0 0}.category-insight{margin:12px 0 0;padding:12px 15px;font-size:13px}
     .category{margin-top:27px}.category-heading{padding-bottom:9px;border-bottom:2px solid var(--domain-soft)}.category-heading h3{margin:0;font-size:17px}.category-meta{display:flex;gap:7px;align-items:center}.category-heading span{color:var(--muted);font-size:12px}.category-heading .state-chip{padding:2px 7px;border-radius:999px;background:#eef1f5}.category-heading .state-success,.category-heading .state-empty{background:#e7f6ec;color:#24623a}.category-heading .state-failure{background:#fff0cf;color:#7b5200}.items{display:grid;gap:12px;margin-top:12px}.item-card{border:1px solid var(--line);border-radius:14px;padding:18px;background:#fff}.item-heading{justify-content:flex-start;align-items:flex-start}.item-heading h3,.item-heading h4{margin:0;font-size:17px;letter-spacing:-.025em}.importance{flex:0 0 auto;display:inline-grid;place-items:center;width:28px;height:25px;border-radius:7px;font-size:12px;font-weight:900;color:#fff}.importance-상{background:var(--high)}.importance-중{background:var(--mid)}.importance-하{background:var(--low)}
     .title-en{margin:4px 0 0 40px;color:var(--muted);font-size:12px}.meta{display:flex;flex-wrap:wrap;gap:5px 15px;margin:11px 0 0;padding:9px 11px;border-radius:9px;background:#f6f8fb;color:#5b687b;font-size:12px}.meta b{color:#344258;margin-right:3px}.summary{margin:12px 0 0}.impact,.reason,.notes{margin:10px 0 0;padding:10px 12px;border-radius:9px;font-size:13px}.impact{background:#fff8e8;color:#5e4a1f}.reason{background:#fdf2f2;color:#6c3434}.notes{background:#f6f8fb;color:#536074}.impact b,.reason b,.notes b{margin-right:7px}.source-row{margin-top:12px}.source-block{display:flex;gap:7px 12px;align-items:center;flex-wrap:wrap}.source{display:inline-flex;gap:7px;align-items:center;flex-wrap:wrap;font-size:12px;font-weight:700;color:#1d5fa7;text-decoration:none}.source:hover .source-action{text-decoration:underline}.source-host{padding:1px 6px;border-radius:5px;background:#edf2f7;color:#526073;font-weight:500}.source-verification{padding:2px 7px;border-radius:999px;background:#fff4da;color:#735200;font-size:11px}.verification-grounded{background:#e7f6ec;color:#24623a}.verification-missing{background:#fdecec;color:#8e2f2f}.verification-unknown{background:#eef1f5;color:#526073}.source-muted{color:var(--muted);font-weight:400}.empty-category{margin:11px 0 0;padding:13px;background:#f8fafc;border-radius:10px;color:var(--muted);font-size:13px}.empty-failed{background:#fff7e6;color:#785700}.empty-failed b{margin-right:5px}.empty-unknown{background:#f1f3f6;color:#526073}
     .footer{text-align:center;margin-top:28px;color:var(--muted);font-size:12px}.footer b{color:#384860}
@@ -369,14 +395,14 @@ export function renderMonitoringHtml(payload) {
         <div>
           <p class="eyebrow">GLOBAL TRADE INTELLIGENCE</p>
           <h1>글로벌 통상 모니터링</h1>
-          <p class="hero-sub">관세 · 수출통제 · 무역구제 신규 동향</p>
+          <p class="hero-sub">${escapeHtml(heroSubtitle)}</p>
         </div>
         <div class="period"><span>조사 기간</span><b>${escapeHtml(payload.context.fromStr)} ~ ${escapeHtml(payload.context.toStr)} KST</b>${payload.context.dateCoverageNote ? `<small>${escapeHtml(payload.context.dateCoverageNote)}</small>` : ''}</div>
       </div>
       <div class="metrics">
         <div class="metric"><strong>${payload.stats?.total ?? 0}</strong><span>HTML에 정리된 항목</span></div>
         <div class="metric"><strong>${payload.stats?.high ?? 0}</strong><span>중요도 '상' 분류</span></div>
-        <div class="metric"><strong>${payload.collection?.completedDomains ?? 0}/${payload.collection?.totalDomains ?? domains.length}</strong><span>표시 가능한 영역</span></div>
+        <div class="metric"><strong>${payload.collection?.completedDomains ?? 0}/${payload.collection?.totalDomains ?? requestedDomains.length}</strong><span>표시 가능한 영역</span></div>
       </div>
     </header>
     ${mockBanner(payload)}
@@ -384,7 +410,7 @@ export function renderMonitoringHtml(payload) {
     ${researchNotice(payload)}
     <nav class="quick-nav" aria-label="영역 바로가기">${nav}</nav>
     ${highPriority(payload)}
-    ${domains.map((domain) => domainSection(domain, payload)).join('')}
+    ${requestedDomains.map((domain) => domainSection(domain, payload)).join('')}
     <footer class="footer"><b>AI 예비 조사 · 원문 수동 확인 필수</b> · PC 로컬 HTML · 생성 ${escapeHtml(generatedLabel(payload.createdAt))} KST · 외부 저장 및 메일 발송 없음</footer>
   </main>
 </body>

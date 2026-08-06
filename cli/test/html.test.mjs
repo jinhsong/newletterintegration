@@ -48,6 +48,27 @@ test('HTML은 자체 포함 CSS와 세 영역을 가지며 외부 리소스와 �
   assert.doesNotMatch(html, /정상적으로 완료/);
 });
 
+test('단일 카테고리 HTML은 선택 범위만 표시하고 미선택 17개를 숨긴다', async () => {
+  const payload = await collectMonitoring({
+    mockPath: fixture,
+    category: 'export:미국',
+    now: new Date('2026-07-29T00:00:00Z'),
+    lookbackHours: 24,
+  });
+  payload.collection.mode = 'live';
+  payload.results.export.coverage.webSearchSuccesses = 2;
+  payload.results.export.categoryStatus.미국.webSearchSuccesses = 2;
+  const html = renderMonitoringHtml(payload);
+  assert.match(html, /선택 조사 · 수출통제 \/ 미국/);
+  assert.match(html, /요청한 1개 카테고리의 Claude Code 이중 검색 결과/);
+  assert.match(html, /카테고리 1\/1 · 웹 검색 2회 성공/);
+  assert.match(html, />미국</);
+  assert.doesNotMatch(html, />한국</);
+  assert.doesNotMatch(html, />북미</);
+  assert.doesNotMatch(html, />반덤핑</);
+  assert.doesNotMatch(html, /17개 카테고리/);
+});
+
 test('조사 기간 근처에 발표일의 시각·날짜 정밀도 한계를 표시한다', async () => {
   const payload = await mockPayload();
   const html = renderMonitoringHtml(payload);
@@ -143,7 +164,7 @@ test('부분 실패, 확인 불가, 검색 후 0건을 영역과 카테고리에
   assert.match(html, /수집 실패로 확인할 수 없습니다/);
   assert.match(html, /사유: &lt;정책 차단&gt;/);
   assert.match(html, /웹 검색을 마쳤으며, 조사 기간과 포함 기준을 충족한 신규 동향은 0건입니다/);
-  assert.match(html, /재조사 · 0건/);
+  assert.match(html, /재조사 · 검색 실행 · 0건/);
 });
 
 test('구버전 payload의 빈 카테고리를 검색 완료로 과장하지 않는다', async () => {
@@ -212,7 +233,7 @@ test('run.mjs mock 실행은 HTML 한 파일만 만든다', async () => {
   });
 });
 
-test('세 영역이 모두 실패하면 기존 HTML을 보존한다', async () => {
+test('전체 요청 카테고리가 모두 실패하면 기존 HTML을 보존한다', async () => {
   await withTempDir(async (directory) => {
     const output = path.join(directory, 'monitoring.html');
     const failedFixture = path.join(directory, 'failed.json');
@@ -233,5 +254,34 @@ test('세 영역이 모두 실패하면 기존 HTML을 보존한다', async () =
     assert.equal(result.status, 1);
     assert.equal(await fs.readFile(output, 'utf8'), 'previous-good-result');
     assert.deepEqual((await fs.readdir(directory)).sort(), ['failed.json', 'monitoring.html']);
+  });
+});
+
+test('선택한 단일 카테고리가 실패하면 기존 단일 HTML을 보존한다', async () => {
+  await withTempDir(async (directory) => {
+    const output = path.join(directory, 'monitoring-category.html');
+    const failedFixture = path.join(directory, 'failed-category.json');
+    await fs.writeFile(output, 'previous-single-result', 'utf8');
+    await fs.writeFile(failedFixture, JSON.stringify({
+      domains: {
+        customs: { __error: { code: 'TIMEOUT', message: '선택 조사 시간 초과' } },
+      },
+    }), 'utf8');
+
+    const result = spawnSync(process.execPath, [
+      path.join(cliDir, 'run.mjs'),
+      '--mock', failedFixture,
+      '--category', 'customs:북미',
+      '--out', output,
+      '--lookback', '24',
+    ], { cwd: cliDir, encoding: 'utf8' });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /선택한 관세 \/ 북미 카테고리가 실패/);
+    assert.equal(await fs.readFile(output, 'utf8'), 'previous-single-result');
+    assert.deepEqual(
+      (await fs.readdir(directory)).sort(),
+      ['failed-category.json', 'monitoring-category.html'],
+    );
   });
 });

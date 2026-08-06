@@ -3,8 +3,13 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  buildCategoryPrompt,
   buildDomainPrompt,
+  categoryCatalog,
   domains,
+  isTrustedOfficialDomain,
+  resolveCategorySelector,
+  scopedDomains,
   unitCount,
 } from '../src/config.mjs';
 import { ClaudeCliError } from '../src/claude-client.mjs';
@@ -60,11 +65,34 @@ function searchedEnvelope(response, overrides = {}) {
   const categoryCount = response && typeof response === 'object' && response.categories
     ? Object.keys(response.categories).length
     : 1;
-  const searchCount = overrides.expectedSearches ?? categoryCount;
+  const responseCategory = response && typeof response === 'object' && response.categories
+    ? Object.keys(response.categories)[0]
+    : '';
+  const configuredCategory = categoryCatalog.find((entry) => (
+    entry.domainKey === response?.domain && entry.unitKey === responseCategory
+  ));
+  const officialDomain = configuredCategory?.officialDomains?.[0] || 'agency.gov';
+  const searchCount = overrides.expectedSearches ?? Math.max(2, categoryCount * 2);
+  const queries = overrides.queries || Array.from({ length: searchCount }, (_, index) => (
+    index === 0
+      ? {
+        query: `official source query ${index + 1}`,
+        mode: 'official',
+        allowedDomains: [officialDomain],
+      }
+      : {
+        query: `broad trend query ${index + 1}`,
+        mode: 'broad',
+        allowedDomains: [],
+      }
+  ));
   const search = {
     count: searchCount,
     success: searchCount,
     fail: 0,
+    official: queries.filter((entry) => entry.mode === 'official').length,
+    broad: queries.filter((entry) => entry.mode === 'broad').length,
+    queries,
     ...overrides.search,
   };
   return {
@@ -96,21 +124,39 @@ test('순수 Node 설정에 글로벌 3개 영역과 18개 카테고리가 있�
     ['미국', '한국', 'EU/일본', '중국/베트남', '영국/캐나다/호주/인도', 'UN 및 다자체제'],
     ['반덤핑', '세이프가드', '보조금/상계관세'],
   ]);
+  assert.equal(categoryCatalog.length, 18);
+  assert.equal(new Set(categoryCatalog.map((entry) => entry.id)).size, 18);
+  assert.ok(categoryCatalog.every((entry) => entry.officialDomains.length > 0));
+  assert.equal(isTrustedOfficialDomain('www.bis.gov', ['bis.gov']), true);
+  assert.equal(isTrustedOfficialDomain('reuters.com', ['bis.gov']), false);
+  assert.equal(isTrustedOfficialDomain('..bis.gov', ['bis.gov']), false);
+  assert.equal(resolveCategorySelector('customs:북미').id, 'customs:북미');
+  assert.ok(resolveCategorySelector('export:한국').officialDomains.includes('motir.go.kr'));
+  assert.equal(resolveCategorySelector('관세:북미').id, 'customs:북미');
+  assert.equal(resolveCategorySelector('북미').id, 'customs:북미');
+  assert.deepEqual(scopedDomains(resolveCategorySelector('trade:반덤핑'))[0].units.map((unit) => unit.key), ['반덤핑']);
+  assert.throws(() => resolveCategorySelector('없는범위'), /--list-categories/);
 });
 
-test('영역 프롬프트는 전체 또는 선택 카테고리와 발표시각 규칙을 포함한다', () => {
+test('카테고리 프롬프트는 한 범위와 공식기관·일반 동향 이중 검색을 요구한다', () => {
   const context = createContext(now, 24);
   for (const domain of domains) {
-    const prompt = buildDomainPrompt(domain, context);
-    for (const unit of domain.units) assert.ok(prompt.includes(unit.key));
-    assert.match(prompt, /WebSearch/);
-    assert.match(prompt, /파일을 읽거나 수정하지 말고/);
-    assert.match(prompt, /announcedAt/);
+    for (const unit of domain.units) {
+      const prompt = buildCategoryPrompt(domain, unit, context);
+      assert.match(prompt, new RegExp(`"${unit.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}": \\[`));
+      assert.match(prompt, /공식기관 원문 검색/);
+      assert.match(prompt, /allowed_domains/);
+      assert.match(prompt, new RegExp(unit.officialDomains[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.match(prompt, /일반 동향 검색/);
+      assert.match(prompt, /서로 다른 query/);
+      assert.match(prompt, /파일을 읽거나 수정하지 말고/);
+      assert.match(prompt, /announcedAt/);
+      for (const other of domain.units.filter((candidate) => candidate.key !== unit.key)) {
+        assert.doesNotMatch(prompt, new RegExp(`"${other.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}": \\[`));
+      }
+    }
   }
-
-  const subset = buildDomainPrompt(domains[0], context, [domains[0].units[0]]);
-  assert.match(subset, /"북미": \[/);
-  assert.doesNotMatch(subset, /"중남미": \[/);
+  assert.throws(() => buildDomainPrompt(domains[0], context), /카테고리 하나/);
 });
 
 test('KST 월요일은 기본 72시간, 화요일은 24시간을 사용한다', () => {
@@ -141,12 +187,95 @@ test('공개 HTTPS 링크와 실제 달력 날짜만 허용한다', () => {
 
 test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', () => {
   const good = validateResearchEnvelope(searchedEnvelope('{}', { warnings: ['일반 업데이트 안내'] }));
-  assert.equal(good.webSearchSuccesses, 1);
+  assert.equal(good.webSearchSuccesses, 2);
   assert.equal(good.warnings.length, 1);
 
+  const deep = validateResearchEnvelope(
+    searchedEnvelope('{}'),
+    '카테고리 조사',
+    2,
+    {
+      requireOfficialAndBroadSearch: true,
+      officialDomainAllowlist: ['agency.gov'],
+    },
+  );
+  assert.equal(deep.officialSearches, 1);
+  assert.equal(deep.broadSearches, 1);
+
   assert.throws(
-    () => validateResearchEnvelope(searchedEnvelope('{}'), '다중 카테고리 조사', 2),
+    () => validateResearchEnvelope(searchedEnvelope('{}', { expectedSearches: 1 }), '카테고리 조사', 2),
     (error) => error.code === 'SEARCH_INCOMPLETE',
+  );
+  assert.throws(
+    () => validateResearchEnvelope(
+      searchedEnvelope('{}', {
+        queries: [
+          { query: 'first broad', mode: 'broad', allowedDomains: [] },
+          { query: 'second broad', mode: 'broad', allowedDomains: [] },
+        ],
+      }),
+      '카테고리 조사',
+      2,
+      {
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['agency.gov'],
+      },
+    ),
+    (error) => error.code === 'SEARCH_INCOMPLETE' && /공식기관 검색 0회/.test(error.details),
+  );
+  assert.throws(
+    () => validateResearchEnvelope(
+      searchedEnvelope('{}', {
+        expectedSearches: 3,
+        queries: [
+          { query: 'trusted official', mode: 'official', allowedDomains: ['agency.gov'] },
+          { query: 'broad news', mode: 'broad', allowedDomains: [] },
+          { query: 'untrusted restricted', mode: 'official', allowedDomains: ['reuters.com'] },
+        ],
+      }),
+      '카테고리 조사',
+      2,
+      {
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['agency.gov'],
+      },
+    ),
+    (error) => error.code === 'SEARCH_INCOMPLETE' && /신뢰 목록 밖/.test(error.message),
+  );
+  assert.throws(
+    () => validateResearchEnvelope(
+      searchedEnvelope('{}', {
+        queries: [{
+          query: 'trusted official',
+          mode: 'official',
+          allowedDomains: ['agency.gov'],
+        }],
+      }),
+      '카테고리 조사',
+      2,
+      {
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['agency.gov'],
+      },
+    ),
+    (error) => error.code === 'SEARCH_INCOMPLETE' && /증거가 완전하지/.test(error.message),
+  );
+  assert.throws(
+    () => validateResearchEnvelope(
+      searchedEnvelope('{}', {
+        queries: [
+          { query: 'claimed official', mode: 'official', allowedDomains: [] },
+          { query: 'second broad', mode: 'broad', allowedDomains: [] },
+        ],
+      }),
+      '카테고리 조사',
+      2,
+      {
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['agency.gov'],
+      },
+    ),
+    (error) => error.code === 'SEARCH_INCOMPLETE' && /공식기관 검색 0회/.test(error.details),
   );
 
   assert.throws(
@@ -291,6 +420,14 @@ test('잘못된 domain 또는 categories 형식은 BAD_JSON으로 거부한다',
     () => parseDomainResponse(domains[0], { domain: 'customs', categories: [] }, context),
     (error) => error.code === 'BAD_JSON',
   );
+  assert.throws(
+    () => parseDomainResponse(domains[0], {
+      domain: 'customs',
+      insight: '',
+      categories: { 북미: [], 중남미: [] },
+    }, context, { units: [domains[0].units[0]] }),
+    (error) => error.code === 'BAD_JSON' && /요청하지 않은 카테고리/.test(error.message),
+  );
 });
 
 test('제목 유사도는 단순 문장 변형을 감지한다', () => {
@@ -307,7 +444,7 @@ test('mock 수집은 Claude 호출 없이 상태를 포함한 공통 payload를 
     now,
     lookbackHours: 24,
   });
-  assert.equal(payload.version, 3);
+  assert.equal(payload.version, 4);
   assert.equal(payload.collection.mode, 'mock');
   assert.equal(payload.collection.completedDomains, 3);
   assert.equal(payload.collection.fullyCompletedDomains, 3);
@@ -320,7 +457,65 @@ test('mock 수집은 Claude 호출 없이 상태를 포함한 공통 payload를 
   assert.equal(payload.results.trade.categoryStatus.반덤핑.status, 'empty');
 });
 
-test('영역 시간초과 시 해당 영역은 재호출하지 않고 다음 영역을 계속한다', async () => {
+test('전체 조사는 18개 카테고리를 각각 한 번 호출하고 호출마다 이중 검색을 요구한다', async () => {
+  const requested = [];
+  let active = 0;
+  let maxActive = 0;
+  const callClaude = async (prompt, options) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+      const { domain, units } = promptDomainAndUnits(prompt);
+      assert.equal(units.length, 1);
+      assert.equal(options.minimumWebSearchSuccesses, 2);
+      assert.equal(options.requireOfficialAndBroadSearch, true);
+      assert.deepEqual(options.officialDomainAllowlist, units[0].officialDomains);
+    requested.push(`${domain.key}:${units[0].key}`);
+    await Promise.resolve();
+    active -= 1;
+    return searchedEnvelope(responseFor(domain, units));
+  };
+
+  const payload = await collectMonitoring({ callClaude, now, lookbackHours: 24 });
+  assert.deepEqual(requested, categoryCatalog.map((entry) => entry.id));
+  assert.equal(maxActive, 1);
+  assert.equal(payload.collection.totalCategories, 18);
+  assert.equal(payload.collection.completedCategories, 18);
+  assert.equal(payload.collection.scope, 'all');
+  assert.equal(payload.results.customs.coverage.webSearchSuccesses, 18);
+  assert.equal(payload.results.export.coverage.webSearchSuccesses, 12);
+  assert.equal(payload.results.trade.coverage.webSearchSuccesses, 6);
+});
+
+test('단일 카테고리 선택은 해당 범위만 한 번 호출하고 1/1 결과를 만든다', async () => {
+  let calls = 0;
+  const callClaude = async (prompt) => {
+    calls += 1;
+    const { domain, units } = promptDomainAndUnits(prompt);
+    assert.equal(domain.key, 'customs');
+    assert.deepEqual(units.map((unit) => unit.key), ['북미']);
+    return searchedEnvelope(responseFor(domain, units, {
+      북미: [item({ title: '선택 범위 결과' })],
+    }));
+  };
+  const payload = await collectMonitoring({
+    callClaude,
+    category: '관세:북미',
+    now,
+    lookbackHours: 24,
+  });
+  assert.equal(calls, 1);
+  assert.equal(payload.collection.scope, 'category');
+  assert.equal(payload.collection.selection.id, 'customs:북미');
+  assert.equal(payload.collection.totalDomains, 1);
+  assert.equal(payload.collection.completedDomains, 1);
+  assert.equal(payload.collection.totalCategories, 1);
+  assert.equal(payload.collection.completedCategories, 1);
+  assert.deepEqual(Object.keys(payload.results), ['customs']);
+  assert.deepEqual(Object.keys(payload.results.customs.categories), ['북미']);
+  assert.equal(payload.stats.total, 1);
+});
+
+test('한 카테고리 시간초과 시 해당 카테고리는 재호출하지 않고 나머지 범위를 계속한다', async () => {
   let calls = 0;
   const requestedUnitCounts = [];
   const callClaude = async (prompt) => {
@@ -332,14 +527,15 @@ test('영역 시간초과 시 해당 영역은 재호출하지 않고 다음 영
   };
 
   const payload = await collectMonitoring({ callClaude, now, lookbackHours: 24 });
-  assert.equal(calls, 3);
-  assert.deepEqual(requestedUnitCounts, [9, 6, 3]);
+  assert.equal(calls, 18);
+  assert.deepEqual(requestedUnitCounts, Array(18).fill(1));
   assert.equal(payload.collection.fullyCompletedDomains, 2);
   assert.equal(payload.failures.length, 1);
   assert.equal(payload.failures[0].code, 'TIMEOUT');
+  assert.equal(payload.failures[0].categoryKey, '북미');
   assert.equal(Boolean(payload.results.customs.coverage.recoveryUsed), false);
   assert.equal(payload.results.customs.categoryStatus.북미.coverage, 'none');
-  assert.equal(payload.results.customs.categoryStatus.동아시아.status, 'failure');
+  assert.equal(payload.results.customs.categoryStatus.동아시아.status, 'empty');
 });
 
 test('프로세스 트리 정리 실패는 즉시 전체 조사를 중단하고 후속 호출을 막는다', async () => {
@@ -360,53 +556,68 @@ test('프로세스 트리 정리 실패는 즉시 전체 조사를 중단하고 
   assert.equal(calls, 1);
 });
 
+test('전역 권한 정책 오류는 후속 카테고리를 호출하지 않고 즉시 중단한다', async () => {
+  let calls = 0;
+  const callClaude = async () => {
+    calls += 1;
+    throw new ClaudeCliError(
+      'POLICY',
+      'WebSearch 권한이 회사 정책으로 거부되었습니다.',
+      'permission mode forced to default',
+    );
+  };
+
+  await assert.rejects(
+    () => collectMonitoring({ callClaude, now, lookbackHours: 24 }),
+    (error) => error.code === 'POLICY' && /permission mode/.test(error.details),
+  );
+  assert.equal(calls, 1);
+});
+
 test('누락 카테고리만 재조사하고 정상 카테고리 결과를 보존한다', async () => {
-  let customsCalls = 0;
+  let eastAsiaCalls = 0;
   const callClaude = async (prompt) => {
     const { domain, units } = promptDomainAndUnits(prompt);
-    if (domain.key === 'customs') {
-      customsCalls += 1;
-      if (customsCalls === 1) {
-        const present = units.filter((unit) => unit.key !== '동아시아');
-        const response = responseFor(domain, present, {
-          북미: [item({ title: '보존할 북미 결과', sourceUrl: 'https://example.com/preserved' })],
-        });
-        return searchedEnvelope(response, { expectedSearches: units.length });
-      }
+    if (domain.key === 'customs' && units[0].key === '동아시아') {
+      eastAsiaCalls += 1;
+      if (eastAsiaCalls === 1) return searchedEnvelope(responseFor(domain, []));
     }
-    return searchedEnvelope(responseFor(domain, units));
+    const categoryItems = units[0].key === '북미'
+      ? { 북미: [item({ title: '보존할 북미 결과', sourceUrl: 'https://example.com/preserved' })] }
+      : {};
+    return searchedEnvelope(responseFor(domain, units, categoryItems));
   };
 
   const payload = await collectMonitoring({ callClaude, now, lookbackHours: 24 });
-  assert.equal(customsCalls, 2);
+  assert.equal(eastAsiaCalls, 2);
   assert.equal(payload.results.customs.categories.북미[0].title, '보존할 북미 결과');
   assert.equal(payload.results.customs.categoryStatus.북미.coverage, 'full');
   assert.equal(payload.results.customs.categoryStatus.동아시아.coverage, 'fallback');
   assert.equal(payload.results.customs.coverage.complete, true);
 });
 
-test('카테고리별 재조사도 실패하면 정상 결과를 보존하고 PARTIAL_COVERAGE를 기록한다', async () => {
-  let customsCalls = 0;
+test('카테고리별 재조사도 실패하면 정상 결과를 보존하고 해당 카테고리 오류를 기록한다', async () => {
+  let eastAsiaCalls = 0;
   const callClaude = async (prompt) => {
     const { domain, units } = promptDomainAndUnits(prompt);
-    if (domain.key === 'customs') {
-      customsCalls += 1;
-      if (customsCalls === 1) {
-        const present = units.filter((unit) => unit.key !== '동아시아');
-        return searchedEnvelope(responseFor(domain, present, {
-          북미: [item({ title: '유지되는 부분 결과', sourceUrl: 'https://example.com/partial' })],
-        }), { expectedSearches: units.length });
-      }
-      throw new ClaudeCliError('POLICY', '사내 검색 정책으로 재조사 차단');
+    if (domain.key === 'customs' && units[0].key === '동아시아') {
+      eastAsiaCalls += 1;
+      if (eastAsiaCalls === 1) return searchedEnvelope(responseFor(domain, []));
+      throw new ClaudeCliError('BAD_JSON', '재조사 응답 손상');
     }
-    return searchedEnvelope(responseFor(domain, units));
+    const categoryItems = units[0].key === '북미'
+      ? { 북미: [item({ title: '유지되는 부분 결과', sourceUrl: 'https://example.com/partial' })] }
+      : {};
+    return searchedEnvelope(responseFor(domain, units, categoryItems));
   };
 
   const payload = await collectMonitoring({ callClaude, now, lookbackHours: 24 });
+  assert.equal(eastAsiaCalls, 2);
   assert.equal(payload.results.customs.categories.북미[0].title, '유지되는 부분 결과');
   assert.equal(payload.results.customs.categoryStatus.동아시아.status, 'failure');
   assert.equal(payload.results.customs.coverage.complete, false);
-  assert.equal(payload.failures[0].code, 'PARTIAL_COVERAGE');
+  assert.equal(payload.failures[0].code, 'BAD_JSON');
+  assert.equal(payload.failures[0].categoryKey, '동아시아');
   assert.equal(payload.collection.completedDomains, 3);
   assert.equal(payload.collection.fullyCompletedDomains, 2);
 });
@@ -537,9 +748,8 @@ test('전체 실행 제한 신호는 남은 영역을 RUN_TIMEOUT으로 표시�
 
   const payload = await collectMonitoring({ signal: controller.signal, now, lookbackHours: 24 });
   assert.equal(payload.collection.completedDomains, 0);
-  assert.deepEqual(payload.failures.map((failure) => failure.code), [
-    'RUN_TIMEOUT', 'RUN_TIMEOUT', 'RUN_TIMEOUT',
-  ]);
+  assert.equal(payload.failures.length, 18);
+  assert.ok(payload.failures.every((failure) => failure.code === 'RUN_TIMEOUT'));
 });
 
 test('조사 호출 중 도달한 전체 실행 제한도 RUN_TIMEOUT 부분 결과로 정리한다', async () => {
@@ -563,7 +773,6 @@ test('조사 호출 중 도달한 전체 실행 제한도 RUN_TIMEOUT 부분 결
 
   const payload = await collection;
   assert.equal(payload.collection.completedDomains, 0);
-  assert.deepEqual(payload.failures.map((failure) => failure.code), [
-    'RUN_TIMEOUT', 'RUN_TIMEOUT', 'RUN_TIMEOUT',
-  ]);
+  assert.equal(payload.failures.length, 18);
+  assert.ok(payload.failures.every((failure) => failure.code === 'RUN_TIMEOUT'));
 });

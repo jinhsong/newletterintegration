@@ -16,6 +16,16 @@ export function resolveOutputFile(cliDir, configuredFile, optionFile) {
   return resolved;
 }
 
+export function resolveMonitoringOutputFile(cliDir, options = {}, configuredFile = '') {
+  if (options.mockPath && !options.outputFile) {
+    return resolveOutputFile(cliDir, '', path.join(cliDir, 'output', 'mock-monitoring.html'));
+  }
+  if (options.categorySelection && !options.outputFile) {
+    return resolveOutputFile(cliDir, '', path.join(cliDir, 'output', 'monitoring-category.html'));
+  }
+  return resolveOutputFile(cliDir, configuredFile, options.outputFile);
+}
+
 export function recoveryFileFor(outputFile) {
   return path.join(path.dirname(outputFile), `.${path.basename(outputFile)}.recovery-backup`);
 }

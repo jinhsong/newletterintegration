@@ -90,7 +90,7 @@ function userToolResult(id, options = {}) {
   };
   if (options.structuredResult !== null) {
     event.tool_use_result = options.structuredResult ?? {
-      query: '수출통제 동향',
+      query: options.query ?? '수출통제 동향',
       results: [{
         tool_use_id: id,
         content: [{ title: '공식 결과', url: 'https://agency.gov/rule' }],
@@ -308,7 +308,16 @@ test('Windows stream-json 성공 응답에서 검색 증거와 근거 URL을 보
       totalCalls: 1,
       totalSuccess: 1,
       totalFail: 0,
-      byName: { WebSearch: { count: 1, success: 1, fail: 0 } },
+      byName: {
+        WebSearch: {
+          count: 1,
+          success: 1,
+          fail: 0,
+          official: 0,
+          broad: 1,
+          queries: [{ query: '수출통제 동향', mode: 'broad', allowedDomains: [] }],
+        },
+      },
     });
     assert.deepEqual(result.groundingUrls, ['https://agency.gov/rule']);
   });
@@ -366,11 +375,217 @@ test('WebSearch 병렬 호출은 tool_use_id로 결과를 짝지어 계산한다
   ];
   await withFakeClaude({ events }, async ({ directory }) => {
     const result = await callClaudeCli('시험', { cwd: directory, timeoutMs: 5000 });
-    assert.deepEqual(result.toolEvidence.byName.WebSearch, { count: 2, success: 2, fail: 0 });
+    assert.deepEqual(result.toolEvidence.byName.WebSearch, {
+      count: 2,
+      success: 2,
+      fail: 0,
+      official: 0,
+      broad: 2,
+      queries: [
+        { query: '수출통제 동향', mode: 'broad', allowedDomains: [] },
+        { query: '관세 동향', mode: 'broad', allowedDomains: [] },
+      ],
+    });
     assert.deepEqual(result.groundingUrls.sort(), [
       'https://a.gov/rule',
       'https://b.gov/rule',
     ]);
+  });
+});
+
+test('카테고리 조사는 서로 다른 공식기관 검색과 일반 동향 검색을 모두 증명한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const events = [
+    initEvent(),
+    assistantToolUse('toolu-official', 'WebSearch', {
+      query: 'BIS official export control announcement July 2026',
+      allowed_domains: ['www.bis.gov'],
+    }),
+    userToolResult('toolu-official', {
+      query: 'BIS official export control announcement July 2026',
+      content: 'https://bis.gov/rule',
+      structuredResult: {
+        query: 'BIS official export control announcement July 2026',
+        results: [{
+          tool_use_id: 'toolu-official',
+          content: [{ title: 'BIS rule', url: 'https://bis.gov/rule' }],
+        }],
+        searchCount: 1,
+      },
+    }),
+    assistantToolUse('toolu-broad', 'WebSearch', {
+      query: 'latest semiconductor export control news July 2026',
+    }),
+    userToolResult('toolu-broad', {
+      query: 'latest semiconductor export control news July 2026',
+      content: 'https://news.example.com/export',
+      structuredResult: {
+        query: 'latest semiconductor export control news July 2026',
+        results: [{
+          tool_use_id: 'toolu-broad',
+          content: [{ title: 'Industry news', url: 'https://news.example.com/export' }],
+        }],
+        searchCount: 1,
+      },
+    }),
+    successResult(),
+  ];
+  await withFakeClaude({ events }, async ({ directory }) => {
+    const result = await callClaudeCli('시험', {
+      cwd: directory,
+      timeoutMs: 5000,
+      minimumWebSearchSuccesses: 2,
+      requireOfficialAndBroadSearch: true,
+      officialDomainAllowlist: ['bis.gov'],
+    });
+    assert.equal(result.toolEvidence.byName.WebSearch.official, 1);
+    assert.equal(result.toolEvidence.byName.WebSearch.broad, 1);
+    assert.deepEqual(
+      result.toolEvidence.byName.WebSearch.queries.map((entry) => entry.mode),
+      ['official', 'broad'],
+    );
+  });
+});
+
+test('동일 query 반복, 공식검색 누락, query 불일치와 잘못된 공식 도메인을 거부한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const resultEvent = (id, query) => userToolResult(id, {
+    content: 'https://example.com/result',
+    structuredResult: {
+      query,
+      results: [{
+        tool_use_id: id,
+        content: [{ title: '검색 결과', url: 'https://example.com/result' }],
+      }],
+      searchCount: 1,
+    },
+  });
+
+  await withFakeClaude({
+    events: [
+      initEvent(),
+      assistantToolUse('official', 'WebSearch', { query: 'Same Query', allowed_domains: ['agency.gov'] }),
+      resultEvent('official', 'Same Query'),
+      assistantToolUse('broad', 'WebSearch', { query: '  same---query!!!  ' }),
+      resultEvent('broad', '  same---query!!!  '),
+      successResult(),
+    ],
+  }, async ({ directory }) => {
+    await assert.rejects(
+      () => callClaudeCli('시험', {
+        cwd: directory,
+        timeoutMs: 5000,
+        minimumWebSearchSuccesses: 2,
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['agency.gov'],
+      }),
+      (error) => error.code === 'SEARCH_INCOMPLETE' && /서로 다른 query 1개/.test(error.details),
+    );
+  });
+
+  await withFakeClaude({
+    events: [
+      initEvent(),
+      assistantToolUse('broad-1', 'WebSearch', { query: 'broad query one' }),
+      resultEvent('broad-1', 'broad query one'),
+      assistantToolUse('broad-2', 'WebSearch', { query: 'broad query two' }),
+      resultEvent('broad-2', 'broad query two'),
+      successResult(),
+    ],
+  }, async ({ directory }) => {
+    await assert.rejects(
+      () => callClaudeCli('시험', {
+        cwd: directory,
+        timeoutMs: 5000,
+        minimumWebSearchSuccesses: 2,
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['agency.gov'],
+      }),
+      (error) => error.code === 'SEARCH_INCOMPLETE' && /공식기관 검색 0회/.test(error.details),
+    );
+  });
+
+  await withFakeClaude({
+    events: [
+      initEvent(),
+      assistantToolUse('mismatch', 'WebSearch', { query: 'requested query' }),
+      resultEvent('mismatch', 'different query'),
+      successResult(),
+    ],
+  }, async ({ directory }) => {
+    await assert.rejects(
+      () => callClaudeCli('시험', { cwd: directory, timeoutMs: 5000 }),
+      (error) => error.code === 'BAD_OUTPUT' && /query가 일치하지/.test(error.message),
+    );
+  });
+
+  await withFakeClaude({
+    events: [
+      initEvent(),
+      assistantToolUse('bad-domain', 'WebSearch', {
+        query: 'official query',
+        allowed_domains: ['https://agency.gov/path'],
+      }),
+      successResult(),
+    ],
+  }, async ({ directory }) => {
+    await assert.rejects(
+      () => callClaudeCli('시험', { cwd: directory, timeoutMs: 5000 }),
+      (error) => error.code === 'BAD_OUTPUT' && /공개 hostname/.test(error.message),
+    );
+  });
+
+  await withFakeClaude({
+    events: [
+      initEvent(),
+      assistantToolUse('untrusted-official', 'WebSearch', {
+        query: 'official query',
+        allowed_domains: ['reuters.com'],
+      }),
+      successResult(),
+    ],
+  }, async ({ directory }) => {
+    await assert.rejects(
+      () => callClaudeCli('시험', {
+        cwd: directory,
+        timeoutMs: 5000,
+        minimumWebSearchSuccesses: 2,
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['bis.gov'],
+      }),
+      (error) => error.code === 'BAD_OUTPUT' && /신뢰 목록 밖/.test(error.message),
+    );
+  });
+
+  await withFakeClaude({
+    events: [
+      initEvent(),
+      assistantToolUse('missing-query', 'WebSearch', { allowed_domains: ['agency.gov'] }),
+      successResult(),
+    ],
+  }, async ({ directory }) => {
+    await assert.rejects(
+      () => callClaudeCli('시험', { cwd: directory, timeoutMs: 5000 }),
+      (error) => error.code === 'BAD_OUTPUT' && /query가 없습니다/.test(error.message),
+    );
+  });
+
+  await withFakeClaude({
+    events: [
+      initEvent(),
+      assistantToolUse('bad-label', 'WebSearch', {
+        query: 'official query',
+        allowed_domains: ['-agency.gov'],
+      }),
+      successResult(),
+    ],
+  }, async ({ directory }) => {
+    await assert.rejects(
+      () => callClaudeCli('시험', { cwd: directory, timeoutMs: 5000 }),
+      (error) => error.code === 'BAD_OUTPUT' && /공개 hostname/.test(error.message),
+    );
   });
 });
 
@@ -447,12 +662,12 @@ for (const forbiddenTool of ['Read', 'Write', 'Bash', 'PowerShell', 'WebFetch', 
   });
 }
 
-test('init 메타데이터가 검색 전용 도구·dontAsk·비실행 경계를 벗어나면 거부한다', {
+test('init 메타데이터가 검색 전용 도구·허용 권한 모드·비실행 경계를 벗어나면 거부한다', {
   skip: process.platform !== 'win32',
 }, async () => {
   const unsafeInitializations = [
     initEvent({ tools: ['WebSearch', 'Read'] }),
-    initEvent({ permissionMode: 'default' }),
+    initEvent({ permissionMode: 'plan' }),
     initEvent({ mcp_servers: [{ name: 'corp', status: 'connected' }] }),
     initEvent({ skills: ['skill-a'] }),
     initEvent({ slash_commands: ['/custom'] }),
@@ -475,6 +690,19 @@ test('init 메타데이터가 검색 전용 도구·dontAsk·비실행 경계를
       );
     });
   }
+});
+
+test('회사 정책이 dontAsk를 default로 낮춰도 WebSearch 전용 경계이면 허용한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const events = successfulSearchEvents({
+    init: { permissionMode: 'default' },
+  });
+  await withFakeClaude({ events }, async ({ directory }) => {
+    const result = await callClaudeCli('시험', { cwd: directory, timeoutMs: 5000 });
+    assert.equal(result.response, DOMAIN_JSON);
+    assert.equal(result.toolEvidence.byName.WebSearch.success, 1);
+  });
 });
 
 test('safe-mode가 노출하는 설치 플러그인과 기본 에이전트 메타데이터는 실행으로 오인하지 않는다', {

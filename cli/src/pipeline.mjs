@@ -1,8 +1,11 @@
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import {
-  buildDomainPrompt,
+  buildCategoryPrompt,
   domains,
+  isTrustedOfficialDomain,
+  resolveCategorySelector,
+  scopedDomains,
 } from './config.mjs';
 import {
   callClaudeCli,
@@ -14,7 +17,6 @@ import { parseJsonObject } from './json-utils.mjs';
 
 const KST = 'Asia/Seoul';
 const IMPORTANCE_ORDER = { 상: 0, 중: 1, 하: 2 };
-const FALLBACK_BATCH_SIZE = 1;
 const FALLBACK_ERROR_CODES = new Set([
   'BAD_JSON',
   'BAD_OUTPUT',
@@ -24,7 +26,20 @@ const FALLBACK_ERROR_CODES = new Set([
   'SEARCH_FAILED',
   'SEARCH_WARNING',
 ]);
-const FATAL_ERROR_CODES = new Set(['ABORTED', 'PROCESS_CLEANUP']);
+const FATAL_ERROR_CODES = new Set([
+  'ABORTED',
+  'AUTH',
+  'AUTH_ORG',
+  'BUDGET_LIMIT',
+  'CLI_EXIT',
+  'CLI_NOT_FOUND',
+  'CLI_VERSION',
+  'CONFIG',
+  'POLICY',
+  'PROCESS_CLEANUP',
+  'SECURITY_POLICY',
+  'WEB_SEARCH_UNAVAILABLE',
+]);
 
 function formatKst(date, withTime = false) {
   const options = {
@@ -238,17 +253,18 @@ function categoryFailure(reason = '조사되지 않음') {
   };
 }
 
-function emptyDomainResult(domain) {
+function emptyDomainResult(domain, requestedUnits = domain.units) {
   return {
     insight: '',
-    categories: Object.fromEntries(domain.units.map((unit) => [unit.key, []])),
+    categoryInsights: Object.fromEntries(requestedUnits.map((unit) => [unit.key, ''])),
+    categories: Object.fromEntries(requestedUnits.map((unit) => [unit.key, []])),
     categoryStatus: Object.fromEntries(
-      domain.units.map((unit) => [unit.key, categoryFailure()]),
+      requestedUnits.map((unit) => [unit.key, categoryFailure()]),
     ),
     coverage: {
-      requestedCategories: domain.units.length,
+      requestedCategories: requestedUnits.length,
       completedCategories: 0,
-      failedCategories: domain.units.length,
+      failedCategories: requestedUnits.length,
       webSearchSuccesses: 0,
       warningCount: 0,
       complete: false,
@@ -291,8 +307,18 @@ export function parseDomainResponse(domain, response, context, options = {}) {
   }
 
   const requestedUnits = options.units || domain.units;
+  const requestedKeys = new Set(requestedUnits.map((unit) => unit.key));
+  const unexpectedKeys = Object.keys(parsed.categories)
+    .filter((key) => !requestedKeys.has(key));
+  if (unexpectedKeys.length > 0) {
+    throw new ClaudeCliError(
+      'BAD_JSON',
+      `${domain.label} 응답에 요청하지 않은 카테고리가 포함되어 있습니다.`,
+      unexpectedKeys.join(', '),
+    );
+  }
   const coverage = options.coverage === 'fallback' ? 'fallback' : 'full';
-  const result = emptyDomainResult(domain);
+  const result = emptyDomainResult(domain, requestedUnits);
   result.coverage.webSearchSuccesses = Number(options.webSearchSuccesses) || 0;
   result.coverage.warningCount = Number(options.warningCount) || 0;
 
@@ -338,6 +364,7 @@ export function parseDomainResponse(domain, response, context, options = {}) {
       coverage,
       itemCount: result.categories[unit.key].length,
       rejectedCount,
+      webSearchSuccesses: Number(options.webSearchSuccesses) || 0,
       reason: rejectedCount > 0 ? `${rejectedCount}건 검증 제외` : '',
     };
   }
@@ -347,6 +374,11 @@ export function parseDomainResponse(domain, response, context, options = {}) {
     0,
   );
   result.insight = itemCount > 0 ? text(parsed.insight, 1000) : '';
+  for (const unit of requestedUnits) {
+    result.categoryInsights[unit.key] = result.categories[unit.key].length > 0
+      ? result.insight
+      : '';
+  }
   return refreshCoverage(result);
 }
 
@@ -358,7 +390,42 @@ function warningStrings(value) {
   return value.map((warning) => text(warning, 1000)).filter(Boolean);
 }
 
-export function validateResearchEnvelope(envelope, label = '조사', expectedSearches = 1) {
+function normalizedEvidenceQueries(search, officialDomainAllowlist = []) {
+  if (!Array.isArray(search?.queries)) return [];
+  return search.queries.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const query = text(entry.query, 1000);
+    if (!query) return null;
+    const normalized = query
+      .normalize('NFKC')
+      .toLocaleLowerCase('en-US')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim();
+    if (!normalized) return null;
+    if (!Array.isArray(entry.allowedDomains)) return null;
+    const allowedDomains = entry.allowedDomains
+      .map((value) => text(value, 253))
+      .filter(Boolean);
+    if (allowedDomains.length !== entry.allowedDomains.length) return null;
+    const trustedOfficial = allowedDomains.length > 0
+      && allowedDomains.every(
+        (hostname) => isTrustedOfficialDomain(hostname, officialDomainAllowlist),
+      );
+    const mode = trustedOfficial ? 'official' : (allowedDomains.length > 0 ? 'untrusted' : 'broad');
+    return {
+      query,
+      normalized,
+      mode,
+    };
+  }).filter(Boolean);
+}
+
+export function validateResearchEnvelope(
+  envelope,
+  label = '조사',
+  expectedSearches = 1,
+  options = {},
+) {
   if (!envelope || typeof envelope !== 'object') {
     throw new ClaudeCliError('BAD_OUTPUT', `${label} 응답 봉투가 올바르지 않습니다.`);
   }
@@ -392,7 +459,42 @@ export function validateResearchEnvelope(envelope, label = '조사', expectedSea
       warnings.join('\n'),
     );
   }
-
+  const officialDomainAllowlist = Array.isArray(options.officialDomainAllowlist)
+    ? options.officialDomainAllowlist
+    : [];
+  if (options.requireOfficialAndBroadSearch === true && officialDomainAllowlist.length === 0) {
+    throw new ClaudeCliError('CONFIG', `${label}의 공식기관 신뢰 도메인 목록이 비어 있습니다.`);
+  }
+  const queries = normalizedEvidenceQueries(search, officialDomainAllowlist);
+  if (options.requireOfficialAndBroadSearch === true && queries.length !== success) {
+    throw new ClaudeCliError(
+      'SEARCH_INCOMPLETE',
+      `${label}의 성공 검색별 query·도메인 증거가 완전하지 않습니다.`,
+      `성공 ${success}회, 검증 가능한 검색 증거 ${queries.length}개`,
+    );
+  }
+  const distinctQueries = new Set(queries.map((entry) => entry.normalized));
+  const officialSearches = queries.filter((entry) => entry.mode === 'official').length;
+  const broadSearches = queries.filter((entry) => entry.mode === 'broad').length;
+  const untrustedSearches = queries.filter((entry) => entry.mode === 'untrusted').length;
+  if (options.requireOfficialAndBroadSearch === true && untrustedSearches > 0) {
+    throw new ClaudeCliError(
+      'SEARCH_INCOMPLETE',
+      `${label}의 공식기관 검색에 신뢰 목록 밖 도메인이 포함되었습니다.`,
+      `신뢰 목록 밖 도메인 제한 검색 ${untrustedSearches}회`,
+    );
+  }
+  if (options.requireOfficialAndBroadSearch === true && (
+    distinctQueries.size < 2
+    || officialSearches < 1
+    || broadSearches < 1
+  )) {
+    throw new ClaudeCliError(
+      'SEARCH_INCOMPLETE',
+      `${label}에서 공식기관 검색과 일반 동향 검색을 각각 확인하지 못했습니다.`,
+      `서로 다른 query ${distinctQueries.size}개, 공식기관 검색 ${officialSearches}회, 일반 동향 검색 ${broadSearches}회`,
+    );
+  }
   const blockingWarnings = warnings.filter((warning) => (
     /\b(?:error|failed|failure|denied|forbidden|blocked|disabled|unavailable)\b|오류|실패|거부|차단|비활성|사용할 수 없/i.test(warning)
   ));
@@ -406,7 +508,13 @@ export function validateResearchEnvelope(envelope, label = '조사', expectedSea
   const groundingUrls = Array.isArray(envelope.groundingUrls)
     ? [...new Set(envelope.groundingUrls.map(safeSourceUrl).filter(Boolean))]
     : [];
-  return { webSearchSuccesses: success, warnings, groundingUrls };
+  return {
+    webSearchSuccesses: success,
+    officialSearches,
+    broadSearches,
+    warnings,
+    groundingUrls,
+  };
 }
 
 function normalizedWords(value) {
@@ -515,6 +623,7 @@ function syncCategoryStatuses(result, domain) {
   for (const unit of domain.units) {
     const items = result.categories[unit.key].sort(compareItems).slice(0, 5);
     result.categories[unit.key] = items;
+    if (items.length === 0 && result.categoryInsights) result.categoryInsights[unit.key] = '';
     const status = result.categoryStatus[unit.key];
     if (status.status !== 'failure') {
       status.status = items.length > 0 ? 'success' : 'empty';
@@ -529,28 +638,29 @@ function syncCategoryStatuses(result, domain) {
   refreshCoverage(result);
 }
 
-function dedupeAndSort(results) {
-  for (const domain of domains) dedupeDomain(results[domain.key], domain);
+function dedupeAndSort(results, requestedDomains = domains) {
+  for (const domain of requestedDomains) dedupeDomain(results[domain.key], domain);
 
   const specializedItems = [];
-  for (const domainKey of ['export', 'trade']) {
-    const domain = domains.find((item) => item.key === domainKey);
+  for (const domain of requestedDomains.filter((item) => ['export', 'trade'].includes(item.key))) {
     for (const unit of domain.units) {
-      specializedItems.push(...results[domainKey].categories[unit.key]);
+      specializedItems.push(...results[domain.key].categories[unit.key]);
     }
   }
-  const customs = domains.find((item) => item.key === 'customs');
-  for (const unit of customs.units) {
-    results.customs.categories[unit.key] = results.customs.categories[unit.key]
-      .filter((item) => !specializedItems.some((specialized) => sameEvent(item, specialized)));
+  const customs = requestedDomains.find((item) => item.key === 'customs');
+  if (customs) {
+    for (const unit of customs.units) {
+      results.customs.categories[unit.key] = results.customs.categories[unit.key]
+        .filter((item) => !specializedItems.some((specialized) => sameEvent(item, specialized)));
+    }
   }
 
-  for (const domain of domains) syncCategoryStatuses(results[domain.key], domain);
+  for (const domain of requestedDomains) syncCategoryStatuses(results[domain.key], domain);
 }
 
-function calculateStats(results) {
+function calculateStats(results, requestedDomains = domains) {
   const stats = { total: 0, high: 0, byDomain: {} };
-  for (const domain of domains) {
+  for (const domain of requestedDomains) {
     const domainStats = { total: 0, high: 0 };
     for (const unit of domain.units) {
       for (const item of results[domain.key].categories[unit.key]) {
@@ -604,6 +714,10 @@ function abortableDelay(delay, signal) {
 }
 
 async function collectUnits(domain, units, context, options, mock, coverage) {
+  if (!Array.isArray(units) || units.length !== 1) {
+    throw new ClaudeCliError('CONFIG', 'Claude 조사 호출은 카테고리 하나만 포함해야 합니다.');
+  }
+  const [unit] = units;
   if (mock) {
     const value = mock.domains?.[domain.key] || { insight: '', categories: {} };
     if (value.__error) {
@@ -612,12 +726,29 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
         text(value.__error.message, 500) || `${domain.label} mock 실패`,
       );
     }
-    const serialized = JSON.stringify(value)
+    const scopedValue = value.categories
+      && typeof value.categories === 'object'
+      && !Array.isArray(value.categories)
+      ? {
+        ...value,
+        categories: Object.fromEntries(
+          units
+            .filter((requested) => Object.hasOwn(value.categories, requested.key))
+            .map((requested) => [requested.key, value.categories[requested.key]]),
+        ),
+      }
+      : value;
+    const serialized = JSON.stringify(scopedValue)
       .replaceAll('__TODAY__', context.toISO)
       .replaceAll('__FROM__', context.fromISO);
     return {
       result: parseDomainResponse(domain, serialized, context, { units, coverage }),
-      audit: { webSearchSuccesses: 0, warnings: [] },
+      audit: {
+        webSearchSuccesses: 0,
+        officialSearches: 0,
+        broadSearches: 0,
+        warnings: [],
+      },
     };
   }
 
@@ -626,11 +757,22 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       const caller = options.callClaude || callClaudeCli;
-      const envelope = await caller(buildDomainPrompt(domain, context, units), {
+      const envelope = await caller(buildCategoryPrompt(domain, unit, context), {
         cwd: options.cwd,
         signal: options.signal,
+        minimumWebSearchSuccesses: 2,
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: unit.officialDomains,
       });
-      const audit = validateResearchEnvelope(envelope, `${domain.label} 조사`, units.length);
+      const audit = validateResearchEnvelope(
+        envelope,
+        `${domain.label} / ${unit.label} 조사`,
+        2,
+        {
+          requireOfficialAndBroadSearch: true,
+          officialDomainAllowlist: unit.officialDomains,
+        },
+      );
       return {
         result: parseDomainResponse(domain, envelope.response, context, {
           units,
@@ -654,116 +796,93 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
   throw lastError;
 }
 
-function chunks(values, size) {
-  const result = [];
-  for (let index = 0; index < values.length; index += size) {
-    result.push(values.slice(index, index + size));
-  }
-  return result;
-}
-
-function mergeRecoveredUnits(target, recovered, units) {
-  for (const unit of units) {
-    const status = recovered.categoryStatus[unit.key];
-    if (status.status === 'failure') continue;
-    target.categories[unit.key] = recovered.categories[unit.key];
-    target.categoryStatus[unit.key] = status;
-  }
-}
-
 function markUnitsFailed(result, units, error) {
   const reason = text(error?.message || error, 500);
   for (const unit of units) {
-    if (result.categoryStatus[unit.key].status !== 'failure') continue;
     result.categoryStatus[unit.key] = categoryFailure(reason);
   }
 }
 
-async function recoverBatch(domain, batch, context, options, mock, target, auditTotals) {
-  try {
-    const recovered = await collectUnits(domain, batch, context, options, mock, 'fallback');
-    auditTotals.webSearchSuccesses += recovered.audit.webSearchSuccesses;
-    auditTotals.warningCount += recovered.audit.warnings.length;
-    mergeRecoveredUnits(target, recovered.result, batch);
-
-    const stillMissing = batch.filter(
-      (unit) => recovered.result.categoryStatus[unit.key].status === 'failure',
-    );
-    if (stillMissing.length > 0 && stillMissing.length < batch.length && !mock) {
-      const second = await collectUnits(domain, stillMissing, context, options, mock, 'fallback');
-      auditTotals.webSearchSuccesses += second.audit.webSearchSuccesses;
-      auditTotals.warningCount += second.audit.warnings.length;
-      mergeRecoveredUnits(target, second.result, stillMissing);
-    }
-  } catch (error) {
-    if (error?.code === 'ABORTED') throw error;
-    const claudeError = asClaudeError(error);
-    if (FATAL_ERROR_CODES.has(claudeError.code)) throw claudeError;
-    markUnitsFailed(target, batch, claudeError);
-  }
-}
-
-async function collectDomain(domain, context, options, mock) {
-  let result = emptyDomainResult(domain);
-  let initialError = null;
-  const auditTotals = { webSearchSuccesses: 0, warningCount: 0 };
-
-  try {
-    const primary = await collectUnits(domain, domain.units, context, options, mock, 'full');
-    result = primary.result;
-    auditTotals.webSearchSuccesses += primary.audit.webSearchSuccesses;
-    auditTotals.warningCount += primary.audit.warnings.length;
-  } catch (error) {
-    initialError = asClaudeError(error);
-    if (FATAL_ERROR_CODES.has(initialError.code)) throw initialError;
-    if (!FALLBACK_ERROR_CODES.has(initialError.code) || mock) throw initialError;
-    markUnitsFailed(result, domain.units, initialError);
-  }
-
-  let unresolved = domain.units.filter(
-    (unit) => result.categoryStatus[unit.key].status === 'failure',
+function requireCompletedCategory(collected, domain, unit) {
+  const status = collected?.result?.categoryStatus?.[unit.key];
+  if (status?.status !== 'failure') return collected;
+  throw new ClaudeCliError(
+    'BAD_JSON',
+    `${domain.label} / ${unit.label} 응답이 필수 필드 또는 조사 기간 검증을 통과하지 못했습니다.`,
+    status?.reason || '카테고리 결과 없음',
   );
-  if (unresolved.length > 0 && !mock) {
-    console.warn(`  ${domain.label}: ${unresolved.length}개 카테고리를 하나씩 다시 조사합니다.`);
-    for (const batch of chunks(unresolved, FALLBACK_BATCH_SIZE)) {
-      await recoverBatch(domain, batch, context, options, mock, result, auditTotals);
-    }
-    unresolved = domain.units.filter(
-      (unit) => result.categoryStatus[unit.key].status === 'failure',
-    );
-  }
-
-  result.coverage.webSearchSuccesses = auditTotals.webSearchSuccesses;
-  result.coverage.warningCount = auditTotals.warningCount;
-  if (initialError) {
-    result.coverage.recoveryUsed = true;
-    result.coverage.recoveryReason = initialError.code;
-  } else {
-    result.coverage.recoveryUsed = domain.units.some(
-      (unit) => result.categoryStatus[unit.key].coverage === 'fallback',
-    );
-    result.coverage.recoveryReason = result.coverage.recoveryUsed ? 'MISSING_CATEGORY' : '';
-  }
-  refreshCoverage(result);
-
-  if (unresolved.length === 0) return { result, failure: null };
-  const details = unresolved
-    .map((unit) => `${unit.key}: ${result.categoryStatus[unit.key].reason}`)
-    .join('\n');
-  return {
-    result,
-    failure: new ClaudeCliError(
-      'PARTIAL_COVERAGE',
-      `${domain.label} ${unresolved.length}개 카테고리의 조사를 완료하지 못했습니다.`,
-      details,
-    ),
-  };
 }
 
-function failureRecord(domain, error) {
+async function collectCategory(domain, unit, context, options, mock) {
+  let primaryError = null;
+  try {
+    return {
+      ...requireCompletedCategory(
+        await collectUnits(domain, [unit], context, options, mock, 'full'),
+        domain,
+        unit,
+      ),
+      recoveryUsed: false,
+      recoveryReason: '',
+    };
+  } catch (error) {
+    primaryError = asClaudeError(error);
+    if (
+      FATAL_ERROR_CODES.has(primaryError.code)
+      || primaryError.code === 'RUN_TIMEOUT'
+      || mock
+      || !FALLBACK_ERROR_CODES.has(primaryError.code)
+    ) throw primaryError;
+  }
+
+  console.warn(`  ${domain.label} / ${unit.label}: 응답 검증 실패로 한 번 더 조사합니다.`);
+  try {
+    return {
+      ...requireCompletedCategory(
+        await collectUnits(domain, [unit], context, options, mock, 'fallback'),
+        domain,
+        unit,
+      ),
+      recoveryUsed: true,
+      recoveryReason: primaryError.code,
+    };
+  } catch (error) {
+    const recoveryError = asClaudeError(error);
+    if (FATAL_ERROR_CODES.has(recoveryError.code)) throw recoveryError;
+    recoveryError.details = [
+      `첫 조사 (${primaryError.code}): ${primaryError.message}`,
+      primaryError.details || '',
+      `재조사 (${recoveryError.code}): ${recoveryError.message}`,
+      recoveryError.details || '',
+    ].filter(Boolean).join('\n').slice(0, 3000);
+    throw recoveryError;
+  }
+}
+
+function mergeCategoryResult(target, collected, unit) {
+  target.categories[unit.key] = collected.result.categories[unit.key];
+  target.categoryStatus[unit.key] = collected.result.categoryStatus[unit.key];
+  target.categoryInsights[unit.key] = collected.result.categoryInsights?.[unit.key] || '';
+  const insight = target.categoryInsights[unit.key];
+  if (insight) {
+    target.insight = text(
+      [target.insight, `${unit.label}: ${insight}`].filter(Boolean).join(' '),
+      1000,
+    );
+  }
+  target.coverage.webSearchSuccesses += collected.audit.webSearchSuccesses;
+  target.coverage.warningCount += collected.audit.warnings.length;
+  target.coverage.recoveryUsed = Boolean(target.coverage.recoveryUsed || collected.recoveryUsed);
+  if (collected.recoveryUsed) target.coverage.recoveryReason = collected.recoveryReason;
+  refreshCoverage(target);
+}
+
+function failureRecord(domain, error, unit = null) {
   return {
     domainKey: domain.key,
     domainLabel: domain.label,
+    categoryKey: unit?.key || '',
+    categoryLabel: unit?.label || '',
     code: error?.code || 'UNKNOWN',
     reason: error?.message || String(error),
     details: text(error?.details, 1000),
@@ -773,69 +892,88 @@ function failureRecord(domain, error) {
 export async function collectMonitoring(options = {}) {
   const context = createContext(options.now || new Date(), options.lookbackHours);
   const mock = await loadMock(options.mockPath);
-  const results = Object.fromEntries(domains.map((domain) => [domain.key, emptyDomainResult(domain)]));
+  const selectionValue = options.categorySelection
+    ? `${options.categorySelection.domainKey}:${options.categorySelection.unitKey}`
+    : options.category;
+  const categorySelection = selectionValue ? resolveCategorySelector(selectionValue) : null;
+  const requestedDomains = scopedDomains(categorySelection);
+  const targets = requestedDomains.flatMap((domain) => (
+    domain.units.map((unit) => ({ domain, unit }))
+  ));
+  const results = Object.fromEntries(
+    requestedDomains.map((domain) => [domain.key, emptyDomainResult(domain, domain.units)]),
+  );
   const failures = [];
 
   console.log(`조사 기간: ${context.fromStr} ~ ${context.toStr} KST`);
-  console.log('Claude 호출: 3개 영역을 순차 조사하고 실패한 카테고리만 하나씩 다시 조사합니다.');
+  console.log(
+    `Claude 호출: ${targets.length}개 카테고리를 각각 조사하며, `
+    + '카테고리마다 공식기관 검색과 일반 동향 검색을 별도로 실행합니다.',
+  );
 
-  for (let index = 0; index < domains.length; index += 1) {
-    const domain = domains[index];
+  for (let index = 0; index < targets.length; index += 1) {
+    const { domain, unit } = targets[index];
     if (options.signal?.aborted) {
       const reason = options.signal.reason;
       if (reason?.code !== 'RUN_TIMEOUT') {
         throw new ClaudeCliError('ABORTED', '사용자가 실행을 중단했습니다.');
       }
-      for (const pendingDomain of domains.slice(index)) {
+      for (const pending of targets.slice(index)) {
         const deadlineError = new ClaudeCliError(
           'RUN_TIMEOUT',
           reason.message || '전체 실행 제한 시간을 초과했습니다.',
         );
-        markUnitsFailed(results[pendingDomain.key], pendingDomain.units, deadlineError);
-        refreshCoverage(results[pendingDomain.key]);
-        failures.push(failureRecord(pendingDomain, deadlineError));
-        console.error(`${pendingDomain.label} 미실행 (RUN_TIMEOUT): ${deadlineError.message}`);
+        markUnitsFailed(results[pending.domain.key], [pending.unit], deadlineError);
+        refreshCoverage(results[pending.domain.key]);
+        failures.push(failureRecord(pending.domain, deadlineError, pending.unit));
+        console.error(`${pending.domain.label} / ${pending.unit.label} 미실행 (RUN_TIMEOUT): ${deadlineError.message}`);
       }
       break;
     }
-    console.log(`[${index + 1}/${domains.length}] ${domain.label} 조사 시작`);
+    console.log(`[${index + 1}/${targets.length}] ${domain.label} / ${unit.label} 조사 시작`);
     try {
-      const collected = await collectDomain(domain, context, options, mock);
-      results[domain.key] = collected.result;
-      if (collected.failure) failures.push(failureRecord(domain, collected.failure));
-      const count = domain.units.reduce(
-        (sum, unit) => sum + collected.result.categories[unit.key].length,
-        0,
-      );
-      const suffix = collected.result.coverage.complete ? '' : ' (부분 결과)';
-      console.log(`[${index + 1}/${domains.length}] ${domain.label} 완료: ${count}건${suffix}`);
+      const collected = await collectCategory(domain, unit, context, options, mock);
+      mergeCategoryResult(results[domain.key], collected, unit);
+      const count = collected.result.categories[unit.key].length;
+      const suffix = collected.recoveryUsed ? ' (재조사 결과)' : '';
+      console.log(`[${index + 1}/${targets.length}] ${domain.label} / ${unit.label} 완료: ${count}건${suffix}`);
     } catch (error) {
       if (error?.code === 'ABORTED') throw error;
       const claudeError = asClaudeError(error);
       if (FATAL_ERROR_CODES.has(claudeError.code)) throw claudeError;
-      markUnitsFailed(results[domain.key], domain.units, claudeError);
+      markUnitsFailed(results[domain.key], [unit], claudeError);
       refreshCoverage(results[domain.key]);
-      const failure = failureRecord(domain, claudeError);
+      const failure = failureRecord(domain, claudeError, unit);
       failures.push(failure);
-      console.error(`[${index + 1}/${domains.length}] ${domain.label} 실패 (${failure.code}): ${failure.reason}`);
+      console.error(`[${index + 1}/${targets.length}] ${domain.label} / ${unit.label} 실패 (${failure.code}): ${failure.reason}`);
       if (failure.details) console.error(`  상세: ${failure.details}`);
+      if (claudeError.code === 'RUN_TIMEOUT') {
+        for (const pending of targets.slice(index + 1)) {
+          const deadlineError = new ClaudeCliError('RUN_TIMEOUT', claudeError.message, claudeError.details);
+          markUnitsFailed(results[pending.domain.key], [pending.unit], deadlineError);
+          refreshCoverage(results[pending.domain.key]);
+          failures.push(failureRecord(pending.domain, deadlineError, pending.unit));
+          console.error(`${pending.domain.label} / ${pending.unit.label} 미실행 (RUN_TIMEOUT): ${deadlineError.message}`);
+        }
+        break;
+      }
     }
   }
 
-  dedupeAndSort(results);
-  const usableDomains = domains.filter(
+  dedupeAndSort(results, requestedDomains);
+  const usableDomains = requestedDomains.filter(
     (domain) => results[domain.key].coverage.completedCategories > 0,
   ).length;
-  const fullyCompletedDomains = domains.filter(
+  const fullyCompletedDomains = requestedDomains.filter(
     (domain) => results[domain.key].coverage.complete,
   ).length;
-  const completedCategories = domains.reduce(
+  const completedCategories = requestedDomains.reduce(
     (sum, domain) => sum + results[domain.key].coverage.completedCategories,
     0,
   );
 
   return {
-    version: 3,
+    version: 4,
     createdAt: new Date().toISOString(),
     context: {
       fromISO: context.fromISO,
@@ -849,12 +987,21 @@ export async function collectMonitoring(options = {}) {
     failures,
     collection: {
       mode: mock ? 'mock' : 'live',
-      totalDomains: domains.length,
+      scope: categorySelection ? 'category' : 'all',
+      selection: categorySelection ? {
+        id: categorySelection.id,
+        domainKey: categorySelection.domainKey,
+        domainLabel: categorySelection.domainLabel,
+        unitKey: categorySelection.unitKey,
+        unitLabel: categorySelection.unitLabel,
+      } : null,
+      requestedCategoryIds: targets.map(({ domain, unit }) => `${domain.key}:${unit.key}`),
+      totalDomains: requestedDomains.length,
       completedDomains: usableDomains,
       fullyCompletedDomains,
-      totalCategories: domains.reduce((sum, domain) => sum + domain.units.length, 0),
+      totalCategories: targets.length,
       completedCategories,
     },
-    stats: calculateStats(results),
+    stats: calculateStats(results, requestedDomains),
   };
 }

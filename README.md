@@ -59,7 +59,7 @@ claude auth login --sso
 원하는 상위 폴더로 이동한 다음 아래 명령을 한 번만 실행합니다.
 
 ```powershell
-git clone --branch agent/claude-cli-html-only-v1 https://github.com/jinhsong/newletterintegration.git
+git clone --branch agent/claude-cli-category-deep-scan https://github.com/jinhsong/newletterintegration.git
 cd .\newletterintegration
 ```
 
@@ -68,8 +68,8 @@ cd .\newletterintegration
 ```powershell
 cd C:\Users\jinh.song\newletterintegration
 git fetch origin
-git switch agent/claude-cli-html-only-v1
-git pull --ff-only
+git switch agent/claude-cli-category-deep-scan
+git pull --ff-only origin agent/claude-cli-category-deep-scan
 ```
 
 경로가 다르면 첫 번째 줄만 실제 저장 위치로 바꾸세요.
@@ -85,12 +85,56 @@ git pull --ff-only
 프로그램은 다음 순서로 동작합니다.
 
 1. Claude Code 버전을 확인합니다.
-2. 관세, 수출통제, 무역구제 영역을 순서대로 조사합니다.
-3. 결과를 `cli\output\monitoring.html`에 안전하게 교체 저장합니다.
-4. 저장된 HTML을 기본 브라우저로 엽니다.
+2. 18개 카테고리를 하나씩 순서대로 조사합니다.
+3. 각 카테고리에서 코드에 지정된 신뢰 공식기관 도메인 검색과 일반 동향 검색을 서로
+   다른 검색어로 최소 한 번씩 실행합니다.
+4. 결과를 `cli\output\monitoring.html`에 안전하게 교체 저장합니다.
+5. 저장된 HTML을 기본 브라우저로 엽니다.
 
 메일, 예약 작업, 외부 저장은 실행하지 않습니다. 다음 실행 때는 clone이나 로그인 명령을
 반복할 필요 없이 저장소 폴더에서 `.\run-monitoring.cmd`만 실행하면 됩니다.
+
+정상 실행 기준으로 Claude 조사 호출은 18회이고, 성공한 WebSearch는 최소 36회입니다.
+회사 네트워크와 Claude 응답 속도에 따라 시간이 걸릴 수 있으므로 실행 중에는 같은 결과를
+대상으로 다른 모니터링을 시작하지 마세요.
+
+### 카테고리 하나만 조사하기
+
+먼저 선택할 수 있는 18개 카테고리 이름을 확인합니다. 이 명령은 Claude에 접속하지
+않습니다.
+
+```powershell
+.\run-monitoring.cmd --list-categories
+```
+
+목록에 표시된 ID 하나를 복사해 실행합니다. 예를 들어 관세의 북미만 조사하려면 다음과
+같이 입력합니다.
+
+```powershell
+.\run-monitoring.cmd --category "customs:북미"
+```
+
+다른 예시는 다음과 같습니다.
+
+```powershell
+.\run-monitoring.cmd --category "export:미국"
+.\run-monitoring.cmd --category "trade:반덤핑"
+```
+
+단일 실행은 사전 버전 확인을 제외하고 선택한 카테고리에 대해서만 Claude 조사 호출을
+1회 수행하며, 공식기관 검색 1회와 일반 동향 검색 1회를 모두 확인합니다. 결과는 기본적으로
+`cli\output\monitoring-category.html`에 저장되므로 전체 결과인 `monitoring.html`을
+덮어쓰지 않습니다. 조사 기간을 함께 지정할 수도 있습니다.
+
+```powershell
+.\run-monitoring.cmd --category "customs:북미" --lookback 72
+```
+
+단일 결과를 원하는 위치에 저장하려면 `--out`을 사용합니다.
+
+```powershell
+.\run-monitoring.cmd --category "customs:북미" --out "C:\Users\jinh.song\Documents\북미관세.html"
+```
 
 브라우저를 자동으로 열지 않으려면 다음을 사용합니다.
 
@@ -180,12 +224,21 @@ CLAUDE_CLI_MODEL=sonnet
 - `--safe-mode`: 사용자·프로젝트의 지침, skills, plugins, hooks, MCP, auto-memory를
   로드하지 않습니다. 인증, 모델 선택, 회사 관리 정책은 유지됩니다.
 - `--tools WebSearch`: Claude에게 보이는 일반 도구를 WebSearch로 제한합니다.
-- `--allowedTools WebSearch`와 `--permission-mode dontAsk`: WebSearch만 자동 승인하고
-  다른 권한 요청은 허용하지 않습니다.
+- `--allowedTools WebSearch`와 `--permission-mode dontAsk`: WebSearch만 자동 승인합니다.
+  회사 보안 정책이 권한 모드를 `default`로 강제해도 실제 노출 도구가 WebSearch뿐이고
+  권한 거부가 없는 경우에는 같은 검색 전용 경계로 실행합니다.
 - `--strict-mcp-config`와 `--disallowedTools "mcp__*"`: MCP 도구를 이중으로 차단합니다.
 - `--no-session-persistence`: 조사 대화와 prompt history를 저장하지 않습니다.
 - `--no-chrome`: Chrome 연동을 사용하지 않습니다.
-- `stream-json`: 실제 `WebSearch` 호출과 대응하는 성공 결과를 ID로 확인합니다.
+- `stream-json`: 실제 `WebSearch` 호출과 대응하는 성공 결과를 ID와 검색어로 확인합니다.
+- 카테고리마다 서로 다른 검색어 2개, 해당 카테고리의 신뢰 목록 안에서만
+  `allowed_domains`를 사용한 공식기관 검색 1회, 도메인 제한이 없는 일반 동향 검색 1회를
+  확인한 결과만 채택합니다. 목록 밖 도메인을 공식 검색으로 사용하면 결과를 폐기합니다.
+
+`--allowedTools`가 지정 도구를 사전 승인하고 권한 규칙이 권한 모드 위에 함께 적용되는
+방식은 [Claude Code 공식 권한 문서](https://code.claude.com/docs/en/permissions)에서
+확인할 수 있습니다. `allowed_domains` 입력 형식은
+[WebSearch 도구 문서](https://code.claude.com/docs/en/tools-reference)를 따릅니다.
 
 `Read`, `Write`, `Bash`, `PowerShell`, `WebFetch`, `Agent`, MCP 등 다른 도구가 실제
 출력에서 감지되면 결과를 저장하지 않습니다. 회사 정책으로 설치된 managed hook은
@@ -195,7 +248,8 @@ hook 이벤트가 감지되면 프로그램은 결과를 폐기하며, 관리 ho
 
 ## HTML 결과 읽기
 
-모니터링 범위는 모두 18개 카테고리입니다.
+전체 실행의 모니터링 범위는 18개 카테고리입니다. `--category` 실행의 HTML에는 선택한
+카테고리 하나만 표시됩니다.
 
 - 관세 9개 지역
 - 수출통제 6개 국가·다자 범위
@@ -203,7 +257,8 @@ hook 이벤트가 감지되면 프로그램은 결과를 폐기하며, 관리 ho
 
 HTML은 다음 상태를 구분합니다.
 
-- `검색 실행 · 0건`: 검색은 성공했지만 기간과 기준을 충족한 신규 동향이 없음
+- `검색 2회 · 0건`: 공식기관·일반 동향 검색은 성공했지만 기간과 기준을 충족한 신규
+  동향이 없음
 - `확인 불가`: 조사 호출, 검색 또는 응답 검증 실패
 - `검색 상태 정보 없음`: 검색 성공 증거를 확인할 수 없음
 
@@ -279,9 +334,10 @@ Get-ChildItem Env:CLAUDE_CODE_SUBPROCESS_ENV_SCRUB -ErrorAction SilentlyContinue
 ```
 
 업데이트 후에도 두 번째 명령이 `1`을 표시한다면 회사 정책에서 설정한 값입니다.
-`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0`으로 우회하지 말고, IT 담당자에게 명시적인
-`WebSearch` 허용 목록과 비대화형 `dontAsk` 모드를 함께 사용할 수 있는지 문의하세요.
-실행기는 권한 모드가 `default`로 낮아지면 결과를 저장하지 않고 중단합니다.
+`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0`으로 우회하지 마세요. 최신 실행기는 권한 모드가
+`default`로 낮아져도 `--allowedTools WebSearch`, 실제 노출 도구, 권한 거부, 도구 이벤트를
+모두 확인해 검색 전용 경계가 유지되면 실행합니다. 여전히 실패하면 상세 메시지에 표시된
+도구, hook, MCP 또는 권한 거부 내용을 IT 담당자에게 전달하세요.
 
 ### `TIMEOUT` 또는 `TURN_LIMIT`
 
@@ -291,9 +347,12 @@ Get-ChildItem Env:CLAUDE_CODE_SUBPROCESS_ENV_SCRUB -ErrorAction SilentlyContinue
 
 ```powershell
 $env:CLAUDE_CLI_TIMEOUT_MS = "900000"
-$env:CLAUDE_RUN_TIMEOUT_MS = "3600000"
+$env:CLAUDE_RUN_TIMEOUT_MS = "5400000"
 .\run-monitoring.cmd
 ```
+
+한 카테고리만 확인하려면 전체 제한 시간을 늘리기 전에 `--category` 실행으로 연결과 검색
+성능을 먼저 확인하는 편이 좋습니다.
 
 ### `PROCESS_CLEANUP`
 
@@ -309,9 +368,11 @@ $env:CLAUDE_RUN_TIMEOUT_MS = "3600000"
 
 ### `BAD_OUTPUT`, `SEARCH_NOT_RUN`, `SEARCH_INCOMPLETE`, `SEARCH_FAILED`
 
-Claude 응답 스트림이 손상됐거나 카테고리 수만큼 성공한 WebSearch 결과를 확인하지
-못했습니다. 불완전한 내용을 정상 결과로 저장하지 않기 위한 오류입니다. 회사 연결 확인
-명령을 다시 실행하고, 반복되면 오류 코드와 상세 메시지를 IT 담당자에게 전달하세요.
+Claude 응답 스트림이 손상됐거나 해당 카테고리의 신뢰 공식 도메인 검색과 일반 동향
+검색을 서로 다른 검색어로 모두 확인하지 못했습니다. 신뢰 목록 밖 도메인, 잘못된 hostname,
+검색 실패도 거부합니다. 불완전한 내용을 정상 결과로 저장하지 않기 위한 오류입니다. 회사
+연결 확인 명령을 다시 실행하고, 반복되면 오류 코드와 상세 메시지를 IT 담당자에게
+전달하세요.
 
 ## 개발자 테스트
 
@@ -324,6 +385,6 @@ node .\cli\run.mjs --mock .\cli\test\fixtures\responses.json --out .\cli\output\
 ```
 
 테스트는 Windows의 가짜 `claude.cmd`를 실제 자식 프로세스로 실행해 버전, 고정 보안
-인수, stdin, stream-json, WebSearch 증거, timeout·중단·프로세스 정리와 HTML 저장을
-검증합니다. 실제 회사 인증과 회사 WebSearch 연결은 회사 PC의 짧은 연결 확인을 별도로
-통과해야 합니다.
+인수, stdin, stream-json, 카테고리별 이중 WebSearch 증거, 18개 순차 조사, 단일 카테고리
+조사, timeout·중단·프로세스 정리와 HTML 저장을 검증합니다. 실제 회사 인증과 회사
+WebSearch 연결은 회사 PC의 짧은 연결 확인을 별도로 통과해야 합니다.

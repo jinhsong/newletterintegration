@@ -52,8 +52,23 @@ if (!specification) {
   process.stderr.write('Unknown E2E research prompt');
   process.exit(2);
 }
+const selectedCategories = specification.categories.filter((category) => (
+  stdin.includes('"' + category + '": [')
+));
+if (selectedCategories.length !== 1) {
+  process.stderr.write('Expected exactly one category in E2E research prompt');
+  process.exit(2);
+}
+const category = selectedCategories[0];
+const categoryIndex = specification.categories.indexOf(category);
+const officialDomainMatch = stdin.match(/신뢰 목록의 hostname 또는 그 하위 도메인만 1개 이상 넣는다: ([^\\r\\n]+)/);
+if (!officialDomainMatch) {
+  process.stderr.write('Expected trusted official-domain list in E2E research prompt');
+  process.exit(2);
+}
+const officialDomain = officialDomainMatch[1].split(',')[0].trim();
 
-const sessionId = 'e2e-' + specification.domain;
+const sessionId = 'e2e-' + specification.domain + '-' + categoryIndex;
 const events = [{
   type: 'system',
   subtype: 'init',
@@ -71,8 +86,18 @@ const events = [{
   hooks: [],
 }];
 
-for (const [index, category] of specification.categories.entries()) {
-  const id = 'toolu-' + specification.domain + '-' + index;
+const searches = [
+  {
+    id: 'toolu-' + specification.domain + '-' + categoryIndex + '-official',
+    query: category + ' official government trade measure',
+    allowed_domains: [officialDomain],
+  },
+  {
+    id: 'toolu-' + specification.domain + '-' + categoryIndex + '-broad',
+    query: category + ' latest trade policy news',
+  },
+];
+for (const search of searches) {
   events.push({
     type: 'assistant',
     session_id: sessionId,
@@ -81,9 +106,12 @@ for (const [index, category] of specification.categories.entries()) {
       role: 'assistant',
       content: [{
         type: 'tool_use',
-        id,
+        id: search.id,
         name: 'WebSearch',
-        input: { query: category + ' 통상 동향' },
+        input: {
+          query: search.query,
+          ...(search.allowed_domains ? { allowed_domains: search.allowed_domains } : {}),
+        },
       }],
     },
   });
@@ -92,12 +120,12 @@ for (const [index, category] of specification.categories.entries()) {
     session_id: sessionId,
     parent_tool_use_id: null,
     tool_use_result: {
-      query: category + ' 통상 동향',
+      query: search.query,
       results: [{
-        tool_use_id: id,
+        tool_use_id: search.id,
         content: [{
           title: category + ' 공식 검색 결과',
-          url: 'https://example.com/' + specification.domain + '/' + index,
+          url: 'https://example.com/' + specification.domain + '/' + categoryIndex,
         }],
       }],
       durationSeconds: 0.1,
@@ -107,8 +135,8 @@ for (const [index, category] of specification.categories.entries()) {
       role: 'user',
       content: [{
         type: 'tool_result',
-        tool_use_id: id,
-        content: '공식 검색 결과 https://example.com/' + specification.domain + '/' + index,
+        tool_use_id: search.id,
+        content: '검색 결과 https://example.com/' + specification.domain + '/' + categoryIndex,
       }],
     },
   });
@@ -121,7 +149,7 @@ events.push({
   result: JSON.stringify({
     domain: specification.domain,
     insight: '',
-    categories: Object.fromEntries(specification.categories.map((category) => [category, []])),
+    categories: { [category]: [] },
   }),
   session_id: sessionId,
   duration_ms: 10,
@@ -164,7 +192,25 @@ async function readInvocations(file) {
   return text.trim().split(/\r?\n/).map((line) => JSON.parse(line));
 }
 
-test('run.mjs 라이브 경로는 Claude 사전 점검과 세 영역 조사 후 HTML 하나를 저장한다', {
+test('--list-categories는 Claude 사전 점검 없이 복사 가능한 18개 ID를 출력한다', () => {
+  const execution = spawnSync(process.execPath, [runFile, '--list-categories'], {
+    cwd: cliDir,
+    env: { ...process.env, CLAUDE_CLI_BIN: 'definitely-missing-claude' },
+    encoding: 'utf8',
+    timeout: 5000,
+    windowsHide: true,
+  });
+  assert.equal(execution.error, undefined, execution.error?.message);
+  assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+  const ids = execution.stdout.match(/^  (?:customs|export|trade):.+?(?=  \()/gm) || [];
+  assert.equal(ids.length, 18);
+  assert.match(execution.stdout, /customs:북미/);
+  assert.match(execution.stdout, /export:UN 및 다자체제/);
+  assert.match(execution.stdout, /trade:보조금\/상계관세/);
+  assert.doesNotMatch(execution.stdout, /Claude Code .*확인/);
+});
+
+test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 이중 검색 후 HTML 하나를 저장한다', {
   skip: process.platform !== 'win32',
 }, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'trade-monitor-live-e2e-'));
@@ -201,15 +247,14 @@ test('run.mjs 라이브 경로는 Claude 사전 점검과 세 영역 조사 후 
     assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
     assert.equal(execution.signal, null);
     assert.match(execution.stdout, /Claude Code 2\.1\.214 확인 완료/);
-    assert.match(execution.stdout, /\[1\/3\] 관세 조사 시작/);
-    assert.match(execution.stdout, /\[2\/3\] 수출통제 조사 시작/);
-    assert.match(execution.stdout, /\[3\/3\] 무역구제 조사 시작/);
+    assert.match(execution.stdout, /\[1\/18\] 관세 \/ 북미 조사 시작/);
+    assert.match(execution.stdout, /\[18\/18\] 무역구제 \/ 보조금\/상계관세 조사 시작/);
     assert.match(execution.stdout, /HTML 저장 완료/);
     assert.match(execution.stdout, /메일 발송, 예약 실행, 외부 저장은 수행하지 않았습니다/);
     assert.equal(execution.stderr, '');
 
     const invocations = await readInvocations(fake.invocationFile);
-    assert.equal(invocations.length, 4);
+    assert.equal(invocations.length, 19);
     assert.deepEqual(invocations[0].args, ['--version']);
     assert.equal(invocations[0].stdin, '');
     const researchInvocations = invocations.slice(1);
@@ -227,22 +272,22 @@ test('run.mjs 라이브 경로는 Claude 사전 점검과 세 영역 조사 후 
         categories: ['반덤핑', '세이프가드', '보조금/상계관세'],
       },
     ];
-    assert.deepEqual(
-      researchInvocations.map((invocation) => (
-        expectedResearch.map(({ label }) => label).find((label) => (
-          invocation.stdin.includes(`[조사 영역] ${label}`)
-        ))
-      )),
-      ['관세', '수출통제', '무역구제'],
-    );
+    const expectedTargets = expectedResearch.flatMap(({ label, categories }) => (
+      categories.map((category) => ({ label, category }))
+    ));
+    assert.equal(researchInvocations.length, expectedTargets.length);
     for (const [index, invocation] of researchInvocations.entries()) {
+      const target = expectedTargets[index];
       assert.ok(invocation.args.includes('--safe-mode'));
       assert.ok(invocation.args.includes('WebSearch'));
       assert.ok(invocation.args.includes('stream-json'));
       assert.equal(invocation.args.includes('--dangerously-skip-permissions'), false);
       assert.equal(invocation.args.includes('--add-dir'), false);
-      for (const category of expectedResearch[index].categories) {
-        assert.ok(invocation.stdin.includes(`"${category}": [`));
+      assert.ok(invocation.stdin.includes(`[조사 영역] ${target.label}`));
+      assert.ok(invocation.stdin.includes(`"${target.category}": [`));
+      const allCategories = expectedResearch.flatMap((entry) => entry.categories);
+      for (const category of allCategories.filter((candidate) => candidate !== target.category)) {
+        assert.equal(invocation.stdin.includes(`"${category}": [`), false);
       }
     }
     assert.equal(new Set(invocations.map((invocation) => path.resolve(invocation.cwd))).size, 1);
@@ -253,19 +298,72 @@ test('run.mjs 라이브 경로는 Claude 사전 점검과 세 영역 조사 후 
     const html = await fs.readFile(outputFile, 'utf8');
     assert.match(html, /^<!DOCTYPE html>/i);
     assert.match(html, /결과 생성 완료/);
-    assert.match(html, /세 영역의 Claude Code 조사 결과/);
+    assert.match(html, /요청한 18개 카테고리의 Claude Code 이중 검색 결과/);
     assert.match(html, /카테고리 9\/9/);
-    assert.match(html, /웹 검색 9회 성공/);
+    assert.match(html, /웹 검색 18회 성공/);
     assert.match(html, /카테고리 6\/6/);
-    assert.match(html, /웹 검색 6회 성공/);
+    assert.match(html, /웹 검색 12회 성공/);
     assert.match(html, /카테고리 3\/3/);
-    assert.match(html, /웹 검색 3회 성공/);
+    assert.match(html, /웹 검색 6회 성공/);
     assert.doesNotMatch(html, /테스트 데이터/);
     assert.doesNotMatch(html, /<script\b/i);
     assert.doesNotMatch(html, /<link\b/i);
     assert.doesNotMatch(html, /<img\b/i);
     assert.match(html, /<\/html>\s*$/i);
     assert.deepEqual(await fs.readdir(outputDirectory), ['monitoring.html']);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('run.mjs 단일 카테고리 모드는 선택 범위만 한 번 조사해 별도 HTML을 만든다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'trade-monitor-live-single-'));
+  try {
+    const fake = await installFakeClaude(directory);
+    const outputFile = path.join(directory, 'single-category.html');
+    const execution = spawnSync(process.execPath, [
+      runFile,
+      '--category', 'customs:북미',
+      '--out', outputFile,
+      '--lookback', '24',
+      '--no-open',
+    ], {
+      cwd: cliDir,
+      env: {
+        ...process.env,
+        CLAUDE_CLI_BIN: fake.command,
+        CLAUDE_CLI_PREFLIGHT_TIMEOUT_MS: '5000',
+        CLAUDE_CLI_RETRY_MAX: '1',
+        CLAUDE_CLI_TIMEOUT_MS: '5000',
+        CLAUDE_RUN_TIMEOUT_MS: '60000',
+        CLAUDE_CLI_MODEL: '',
+        LOCAL_OUTPUT_FILE: '',
+        NO_COLOR: '1',
+      },
+      encoding: 'utf8',
+      timeout: 30000,
+      windowsHide: true,
+    });
+
+    assert.equal(execution.error, undefined, execution.error?.message);
+    assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+    assert.match(execution.stdout, /\[1\/1\] 관세 \/ 북미 조사 시작/);
+    const invocations = await readInvocations(fake.invocationFile);
+    assert.equal(invocations.length, 2);
+    assert.deepEqual(invocations[0].args, ['--version']);
+    assert.match(invocations[1].stdin, /"북미": \[/);
+    assert.doesNotMatch(invocations[1].stdin, /"중남미": \[/);
+
+    const html = await fs.readFile(outputFile, 'utf8');
+    assert.match(html, /선택 조사 · 관세 \/ 북미/);
+    assert.match(html, /요청한 1개 카테고리의 Claude Code 이중 검색 결과/);
+    assert.match(html, /카테고리 1\/1 · 웹 검색 2회 성공/);
+    assert.match(html, />북미</);
+    assert.doesNotMatch(html, />중남미</);
+    assert.doesNotMatch(html, />수출통제</);
+    assert.doesNotMatch(html, />무역구제</);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

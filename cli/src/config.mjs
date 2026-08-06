@@ -64,8 +64,52 @@ const tradeUnits = [
   ['보조금/상계관세', 'Subsidies 및 Countervailing Duties 조사·판정·재심'],
 ];
 
-function units(rows) {
-  return rows.map(([key, description]) => ({ key, label: key, description }));
+const tradeRemedyOfficialDomains = [
+  'wto.org', 'trade.gov', 'usitc.gov', 'federalregister.gov', 'europa.eu',
+  'gov.uk', 'canada.ca', 'gc.ca', 'gov.in', 'gov.cn', 'go.kr', 'go.jp',
+  'gov.au', 'govt.nz', 'gov.br', 'gob.mx', 'gov.za',
+];
+
+const officialDomainCatalog = {
+  customs: {
+    북미: ['cbp.gov', 'ustr.gov', 'canada.ca', 'gc.ca'],
+    중남미: ['gob.mx', 'gov.br', 'gov.co', 'gob.pe', 'gob.ar', 'gob.cl', 'aduana.cl', 'gob.pa'],
+    인도: ['gov.in', 'nic.in'],
+    유럽: ['europa.eu', 'gov.uk', 'gouv.fr', 'bund.de', 'gob.es', 'overheid.nl'],
+    중동: ['gov.sa', 'gov.ae', 'gov.eg', 'gov.ma', 'gov.tn', 'gov.jo', 'gov.dz', 'gov.tr', 'gov.pk', 'gov.il', 'gov.iq'],
+    '동남아/오세아니아': ['go.id', 'gov.my', 'go.th', 'gov.vn', 'gov.ph', 'gov.sg', 'gov.au', 'govt.nz'],
+    아프리카: ['gov.za', 'gov.ng', 'go.ke'],
+    CIS: ['gov.ru', 'gov.kz', 'gov.uz'],
+    동아시아: ['gov.cn', 'go.kr', 'go.jp', 'gov.tw', 'gov.hk'],
+  },
+  export: {
+    미국: ['bis.gov', 'treasury.gov', 'state.gov', 'whitehouse.gov', 'justice.gov', 'federalregister.gov'],
+    한국: ['motir.go.kr', 'motie.go.kr', 'mofa.go.kr', 'customs.go.kr', 'kosti.or.kr', 'kita.net'],
+    'EU/일본': ['europa.eu', 'consilium.europa.eu', 'go.jp'],
+    '중국/베트남': ['gov.cn', 'mofcom.gov.cn', 'miit.gov.cn', 'customs.gov.cn', 'gov.vn'],
+    '영국/캐나다/호주/인도': ['gov.uk', 'canada.ca', 'gc.ca', 'gov.au', 'gov.in', 'nic.in'],
+    'UN 및 다자체제': ['un.org', 'wassenaar.org', 'nuclearsuppliersgroup.org', 'mtcr.info', 'australiagroup.net'],
+  },
+  trade: {
+    반덤핑: tradeRemedyOfficialDomains,
+    세이프가드: tradeRemedyOfficialDomains,
+    '보조금/상계관세': tradeRemedyOfficialDomains,
+  },
+};
+
+function units(rows, domainKey) {
+  return rows.map(([key, description]) => {
+    const officialDomains = officialDomainCatalog[domainKey]?.[key];
+    if (!Array.isArray(officialDomains) || officialDomains.length === 0) {
+      throw new Error(`${domainKey}:${key}의 공식 도메인 목록이 비어 있습니다.`);
+    }
+    return {
+      key,
+      label: key,
+      description,
+      officialDomains: Object.freeze([...officialDomains]),
+    };
+  });
 }
 
 export const domains = [
@@ -74,7 +118,7 @@ export const domains = [
     label: '관세',
     color: '#2563eb',
     softColor: '#eff6ff',
-    units: units(customsUnits),
+    units: units(customsUnits, 'customs'),
     scope: `
 [관세 영역]
 - 포함: 일반 관세율, HS 분류, FTA·원산지, 과세가격, 통관절차, 일반 수입 인허가·기술인증·검역.
@@ -87,7 +131,7 @@ export const domains = [
     label: '수출통제',
     color: '#dc2626',
     softColor: '#fef2f2',
-    units: units(exportUnits),
+    units: units(exportUnits, 'export'),
     scope: `
 [수출통제 영역]
 - 포함: 전략물자·이중용도 통제, 경제제재, Entity List·SDN, EAR·ITAR, 수출허가·캐치올, 다자 수출통제체제.
@@ -101,7 +145,7 @@ export const domains = [
     label: '무역구제',
     color: '#15803d',
     softColor: '#f0fdf4',
-    units: units(tradeUnits),
+    units: units(tradeUnits, 'trade'),
     scope: `
 [무역구제 영역]
 - 포함: 반덤핑(AD), 세이프가드(SG), 보조금·상계관세(CVD)의 조사 개시, 예비·최종 판정, 관세 부과, 재심, 연장·종료.
@@ -113,19 +157,80 @@ export const domains = [
 
 export const unitCount = domains.reduce((sum, domain) => sum + domain.units.length, 0);
 
-export function buildDomainPrompt(domain, context, requestedUnits = domain.units) {
-  const selectedUnits = requestedUnits.filter((requested) => (
-    domain.units.some((unit) => unit.key === requested.key)
-  ));
-  if (selectedUnits.length === 0) {
-    throw new Error(`${domain.label} 조사 카테고리가 비어 있습니다.`);
+export const categoryCatalog = Object.freeze(domains.flatMap((domain) => (
+  domain.units.map((unit) => Object.freeze({
+    id: `${domain.key}:${unit.key}`,
+    domainKey: domain.key,
+    domainLabel: domain.label,
+    unitKey: unit.key,
+    unitLabel: unit.label,
+    description: unit.description,
+    officialDomains: unit.officialDomains,
+  }))
+)));
+
+export function isTrustedOfficialDomain(value, allowedDomains) {
+  const hostname = String(value || '').trim().toLowerCase().replace(/\.$/, '');
+  const labels = hostname.split('.');
+  if (
+    !hostname
+    || hostname.length > 253
+    || !hostname.includes('.')
+    || !/^[a-z0-9.-]+$/i.test(hostname)
+    || labels.some((label) => (
+      !label
+      || label.length > 63
+      || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label)
+    ))
+    || !Array.isArray(allowedDomains)
+  ) return false;
+  return allowedDomains.some((allowed) => {
+    const suffix = String(allowed || '').trim().toLowerCase().replace(/\.$/, '');
+    return suffix && (hostname === suffix || hostname.endsWith(`.${suffix}`));
+  });
+}
+
+export function resolveCategorySelector(value) {
+  const selector = String(value || '').trim();
+  if (!selector) throw new Error('--category 뒤에 카테고리를 입력해야 합니다.');
+  const normalized = selector.toLocaleLowerCase('ko-KR');
+  const matches = categoryCatalog.filter((entry) => {
+    const aliases = [
+      entry.id,
+      `${entry.domainLabel}:${entry.unitKey}`,
+      `${entry.domainKey}/${entry.unitKey}`,
+      `${entry.domainLabel}/${entry.unitKey}`,
+      entry.unitKey,
+    ];
+    return aliases.some((alias) => alias.toLocaleLowerCase('ko-KR') === normalized);
+  });
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new Error(
+      `카테고리 이름이 여러 영역에 있어 하나를 고를 수 없습니다: ${selector}. `
+      + `다음 중 하나를 사용하세요: ${matches.map((entry) => entry.id).join(', ')}`,
+    );
   }
-  const categoryTemplate = selectedUnits
-    .map((unit) => `    "${unit.key}": [${ITEM_SCHEMA}]`)
-    .join(',\n');
-  const categoryScope = selectedUnits
-    .map((unit) => `- ${unit.key}: ${unit.description}`)
-    .join('\n');
+  throw new Error(`알 수 없는 카테고리: ${selector}. --list-categories로 목록을 확인하세요.`);
+}
+
+export function scopedDomains(categorySelection = null) {
+  if (!categorySelection) return domains;
+  const selectedDomain = domains.find((domain) => domain.key === categorySelection.domainKey);
+  const selectedUnit = selectedDomain?.units.find((unit) => unit.key === categorySelection.unitKey);
+  if (!selectedDomain || !selectedUnit) {
+    throw new Error('선택한 카테고리가 현재 설정에 없습니다. --list-categories로 목록을 확인하세요.');
+  }
+  return [{ ...selectedDomain, units: [selectedUnit] }];
+}
+
+export function buildCategoryPrompt(domain, unit, context) {
+  if (!domain?.units?.some((candidate) => candidate.key === unit?.key)) {
+    throw new Error(`${domain?.label || '선택 영역'}의 조사 카테고리가 올바르지 않습니다.`);
+  }
+  const categoryTemplate = `    "${unit.key}": [${ITEM_SCHEMA}]`;
+  const categoryScope = `- ${unit.key}: ${unit.description}`;
+  const officialDomainScope = unit.officialDomains.join(', ');
 
   return [
     '당신은 기업용 글로벌 통상 리서치 애널리스트다.',
@@ -142,14 +247,18 @@ export function buildDomainPrompt(domain, context, requestedUnits = domain.units
     '- 포함하는 항목은 importance, importanceReason, measureType, title, summary, announcedDate, issuingCountry, agency, sourceName, sourceUrl을 모두 채운다.',
     '- sourceUrl은 실제로 검색에서 확인한 공개 HTTPS 원문이어야 한다. URL이 없거나 중요도가 상·중·하 중 하나가 아니면 항목을 제외한다.',
     '',
-    '[수집 수량]',
-    '- 각 카테고리마다 그 범위를 명시한 Claude WebSearch를 최소 1회 별도로 실행한다. 하나의 광범위한 검색으로 여러 카테고리를 검색했다고 간주하지 않는다.',
-    '- 각 카테고리별 최대 5건. 해당 기간에 검증된 신규 동향이 없으면 빈 배열을 둔다.',
-    '- 모든 카테고리 키를 반드시 한 번씩 포함한다.',
+    '[필수 이중 검색 절차]',
+    '- 이 카테고리만 조사하며, 아래 두 종류의 Claude WebSearch를 서로 다른 query로 각각 최소 1회 실행한다.',
+    `- 공식기관 원문 검색: WebSearch의 allowed_domains에는 다음 신뢰 목록의 hostname 또는 그 하위 도메인만 1개 이상 넣는다: ${officialDomainScope}`,
+    '- URL이나 경로는 넣지 않고 blocked_domains와 함께 사용하지 않는다. 목록 밖 언론·민간 도메인은 이 검색에 넣지 않는다.',
+    '- 일반 동향 검색: allowed_domains를 넣지 않고 주요 언론·통상 전문매체까지 넓게 검색한다. 공식기관 검색과 동일한 query를 반복하지 않는다.',
+    '- 두 검색 모두 조사 기간, 대상 국가·기관, 조치 유형을 반영한다. 검색 하나가 실패하면 결과를 완성된 것으로 간주하지 않는다.',
+    '- 최대 5건. 해당 기간에 검증된 신규 동향이 없으면 빈 배열을 둔다.',
+    `- categories에는 "${unit.key}" 키를 정확히 한 번 포함한다.`,
     '',
     '[출력 형식]',
     '- 설명, 마크다운, 코드 펜스 없이 아래 형태의 JSON 객체 하나만 출력한다.',
-    '- insight는 전체 영역의 핵심 흐름과 기업 대응 포인트를 한국어 2~3문장으로 작성한다. 항목이 모두 없으면 빈 문자열이다.',
+    '- insight는 선택한 카테고리의 핵심 흐름과 기업 대응 포인트를 한국어 2~3문장으로 작성한다. 항목이 모두 없으면 빈 문자열이다.',
     '{',
     `  "domain": "${domain.key}",`,
     '  "insight": "영역 종합 인사이트",',
@@ -158,6 +267,15 @@ export function buildDomainPrompt(domain, context, requestedUnits = domain.units
     '  }',
     '}',
   ].join('\n');
+}
+
+// 이전 import 사용처가 명확한 오류로 마이그레이션될 수 있도록 이름은 유지하되,
+// 여러 카테고리를 한 요청으로 묶는 호출은 거부한다.
+export function buildDomainPrompt(domain, context, requestedUnits = domain.units) {
+  if (!Array.isArray(requestedUnits) || requestedUnits.length !== 1) {
+    throw new Error('Claude 조사 프롬프트는 카테고리 하나만 포함해야 합니다.');
+  }
+  return buildCategoryPrompt(domain, requestedUnits[0], context);
 }
 
 export function domainByKey(key) {
