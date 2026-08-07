@@ -86,17 +86,23 @@ const events = [{
   hooks: [],
 }];
 
-const searches = [
-  {
-    id: 'toolu-' + specification.domain + '-' + categoryIndex + '-official',
-    query: category + ' official government trade measure',
-    allowed_domains: [officialDomain],
-  },
-  {
-    id: 'toolu-' + specification.domain + '-' + categoryIndex + '-broad',
-    query: category + ' latest trade policy news',
-  },
+const searchPerspectives = [
+  'official law gazette',
+  'official implementation guidance',
+  'official electronics product HS measure',
+  'major media policy news',
+  'local language industry news',
+  'Korean company supply chain impact',
 ];
+const searches = Array.from({ length: 6 }, (_, index) => {
+  const official = index < 3;
+  return {
+    id: 'toolu-' + specification.domain + '-' + categoryIndex + '-'
+      + (official ? 'official-' : 'broad-') + (index + 1),
+    query: category + ' ' + searchPerspectives[index],
+    ...(official ? { allowed_domains: [officialDomain] } : {}),
+  };
+});
 for (const search of searches) {
   events.push({
     type: 'assistant',
@@ -210,7 +216,7 @@ test('--list-categories는 Claude 사전 점검 없이 복사 가능한 18개 ID
   assert.doesNotMatch(execution.stdout, /Claude Code .*확인/);
 });
 
-test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 이중 검색 후 HTML 하나를 저장한다', {
+test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 6회 심층 검색 후 HTML 하나를 저장한다', {
   skip: process.platform !== 'win32',
 }, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'trade-monitor-live-e2e-'));
@@ -298,13 +304,13 @@ test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 이중 
     const html = await fs.readFile(outputFile, 'utf8');
     assert.match(html, /^<!DOCTYPE html>/i);
     assert.match(html, /결과 생성 완료/);
-    assert.match(html, /요청한 18개 카테고리의 Claude Code 이중 검색 결과/);
+    assert.match(html, /요청한 18개 카테고리의 Claude Code 다각도 심층 검색 결과/);
     assert.match(html, /카테고리 9\/9/);
-    assert.match(html, /웹 검색 18회 성공/);
+    assert.match(html, /웹 검색 54회 성공/);
     assert.match(html, /카테고리 6\/6/);
-    assert.match(html, /웹 검색 12회 성공/);
+    assert.match(html, /웹 검색 36회 성공/);
     assert.match(html, /카테고리 3\/3/);
-    assert.match(html, /웹 검색 6회 성공/);
+    assert.match(html, /웹 검색 18회 성공/);
     assert.doesNotMatch(html, /테스트 데이터/);
     assert.doesNotMatch(html, /<script\b/i);
     assert.doesNotMatch(html, /<link\b/i);
@@ -358,8 +364,8 @@ test('run.mjs 단일 카테고리 모드는 선택 범위만 한 번 조사해 �
 
     const html = await fs.readFile(outputFile, 'utf8');
     assert.match(html, /선택 조사 · 관세 \/ 북미/);
-    assert.match(html, /요청한 1개 카테고리의 Claude Code 이중 검색 결과/);
-    assert.match(html, /카테고리 1\/1 · 웹 검색 2회 성공/);
+    assert.match(html, /요청한 1개 카테고리의 Claude Code 다각도 심층 검색 결과/);
+    assert.match(html, /카테고리 1\/1 · 웹 검색 6회 성공/);
     assert.match(html, />북미</);
     assert.doesNotMatch(html, />중남미</);
     assert.doesNotMatch(html, />수출통제</);

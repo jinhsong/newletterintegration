@@ -5,6 +5,16 @@ const PRODUCT_SCOPE = [
   '철강, 알루미늄, 플라스틱 등 전자·가전 관련 자재',
 ].join(', ');
 
+const MINIMUM_OFFICIAL_SEARCHES = 3;
+const MINIMUM_BROAD_SEARCHES = 3;
+
+export const CATEGORY_RESEARCH_POLICY = Object.freeze({
+  minimumOfficialSearches: MINIMUM_OFFICIAL_SEARCHES,
+  minimumBroadSearches: MINIMUM_BROAD_SEARCHES,
+  minimumSearchesPerCategory: MINIMUM_OFFICIAL_SEARCHES + MINIMUM_BROAD_SEARCHES,
+  maximumItemsPerCategory: 10,
+});
+
 const COMMON_RULES = `
 [공통 정확성 규칙]
 - 반드시 Claude Code의 내장 WebSearch를 사용해 최신 정보를 확인한다.
@@ -72,7 +82,11 @@ const tradeRemedyOfficialDomains = [
 
 const officialDomainCatalog = {
   customs: {
-    북미: ['cbp.gov', 'ustr.gov', 'canada.ca', 'gc.ca'],
+    북미: [
+      'cbp.gov', 'ustr.gov', 'whitehouse.gov', 'usitc.gov', 'federalregister.gov',
+      'commerce.gov', 'trade.gov', 'regulations.gov', 'govinfo.gov', 'congress.gov',
+      'treasury.gov', 'canada.ca', 'gc.ca',
+    ],
     중남미: ['gob.mx', 'gov.br', 'gov.co', 'gob.pe', 'gob.ar', 'gob.cl', 'aduana.cl', 'gob.pa'],
     인도: ['gov.in', 'nic.in'],
     유럽: ['europa.eu', 'gov.uk', 'gouv.fr', 'bund.de', 'gob.es', 'overheid.nl'],
@@ -231,6 +245,12 @@ export function buildCategoryPrompt(domain, unit, context) {
   const categoryTemplate = `    "${unit.key}": [${ITEM_SCHEMA}]`;
   const categoryScope = `- ${unit.key}: ${unit.description}`;
   const officialDomainScope = unit.officialDomains.join(', ');
+  const {
+    minimumOfficialSearches,
+    minimumBroadSearches,
+    minimumSearchesPerCategory,
+    maximumItemsPerCategory,
+  } = CATEGORY_RESEARCH_POLICY;
 
   return [
     '당신은 기업용 글로벌 통상 리서치 애널리스트다.',
@@ -247,13 +267,15 @@ export function buildCategoryPrompt(domain, unit, context) {
     '- 포함하는 항목은 importance, importanceReason, measureType, title, summary, announcedDate, issuingCountry, agency, sourceName, sourceUrl을 모두 채운다.',
     '- sourceUrl은 실제로 검색에서 확인한 공개 HTTPS 원문이어야 한다. URL이 없거나 중요도가 상·중·하 중 하나가 아니면 항목을 제외한다.',
     '',
-    '[필수 이중 검색 절차]',
-    '- 이 카테고리만 조사하며, 아래 두 종류의 Claude WebSearch를 서로 다른 query로 각각 최소 1회 실행한다.',
-    `- 공식기관 원문 검색: WebSearch의 allowed_domains에는 다음 신뢰 목록의 hostname 또는 그 하위 도메인만 1개 이상 넣는다: ${officialDomainScope}`,
+    `[필수 ${minimumSearchesPerCategory}회 다각도 심층 검색 절차]`,
+    `- 이 카테고리만 조사하며 Claude WebSearch를 총 최소 ${minimumSearchesPerCategory}회 성공시킨다. 모든 query는 의미상 서로 달라야 하며 단어 순서만 바꾼 반복 검색은 금지한다.`,
+    `- 공식기관 원문 검색은 서로 다른 query로 최소 ${minimumOfficialSearches}회 실행한다. WebSearch의 allowed_domains에는 다음 신뢰 목록의 hostname 또는 그 하위 도메인만 1개 이상 넣는다: ${officialDomainScope}`,
+    '- 공식 검색 1: 최신 법령·관보·행정명령·보도자료, 공식 검색 2: 집행기관의 이행지침·통관/허가/판정, 공식 검색 3: 전자·가전·부품·반도체·AI·철강·HS 품목별 조치를 각각 탐색한다.',
     '- URL이나 경로는 넣지 않고 blocked_domains와 함께 사용하지 않는다. 목록 밖 언론·민간 도메인은 이 검색에 넣지 않는다.',
-    '- 일반 동향 검색: allowed_domains를 넣지 않고 주요 언론·통상 전문매체까지 넓게 검색한다. 공식기관 검색과 동일한 query를 반복하지 않는다.',
-    '- 두 검색 모두 조사 기간, 대상 국가·기관, 조치 유형을 반영한다. 검색 하나가 실패하면 결과를 완성된 것으로 간주하지 않는다.',
-    '- 최대 5건. 해당 기간에 검증된 신규 동향이 없으면 빈 배열을 둔다.',
+    `- 일반 동향 검색은 서로 다른 query로 최소 ${minimumBroadSearches}회 실행하며 allowed_domains를 넣지 않는다. 일반 검색 1: 주요 국제·현지 언론, 일반 검색 2: 현지어 기사·통상 전문매체·산업협회, 일반 검색 3: 한국 기업·공급망·제품 영향을 각각 넓게 탐색한다.`,
+    '- 복수 국가·기관 카테고리는 검색어마다 대상 묶음을 나누어 전체 범위를 고르게 확인하고, 한 국가나 기관만 반복 검색하지 않는다.',
+    '- 모든 검색은 조사 기간, 대상 국가·기관, 조치 유형을 반영한다. 실패한 검색은 성공 횟수에 포함하지 말고 새로운 query로 보완한다.',
+    `- 중복을 제외하고 최대 ${maximumItemsPerCategory}건. 해당 기간에 검증된 신규 동향이 없으면 빈 배열을 둔다.`,
     `- categories에는 "${unit.key}" 키를 정확히 한 번 포함한다.`,
     '',
     '[출력 형식]',

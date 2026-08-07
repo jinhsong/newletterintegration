@@ -86,15 +86,16 @@ git pull --ff-only origin agent/claude-cli-category-deep-scan
 
 1. Claude Code 버전을 확인합니다.
 2. 18개 카테고리를 하나씩 순서대로 조사합니다.
-3. 각 카테고리에서 코드에 지정된 신뢰 공식기관 도메인 검색과 일반 동향 검색을 서로
-   다른 검색어로 최소 한 번씩 실행합니다.
+3. 각 카테고리에서 서로 다른 검색어로 신뢰 공식기관 검색 3회와 일반 동향 검색 3회를
+   실행합니다. 법령·집행지침·품목, 주요 언론·현지어/업계·한국 공급망 관점을 나눠 봅니다.
 4. 결과를 `cli\output\monitoring.html`에 안전하게 교체 저장합니다.
 5. 저장된 HTML을 기본 브라우저로 엽니다.
 
 메일, 예약 작업, 외부 저장은 실행하지 않습니다. 다음 실행 때는 clone이나 로그인 명령을
 반복할 필요 없이 저장소 폴더에서 `.\run-monitoring.cmd`만 실행하면 됩니다.
 
-정상 실행 기준으로 Claude 조사 호출은 18회이고, 성공한 WebSearch는 최소 36회입니다.
+정상 실행 기준으로 Claude 조사 호출은 18회이고, 성공한 WebSearch는 최소 108회입니다.
+중복 제거 후 카테고리별로 최대 10건을 HTML에 담습니다.
 회사 네트워크와 Claude 응답 속도에 따라 시간이 걸릴 수 있으므로 실행 중에는 같은 결과를
 대상으로 다른 모니터링을 시작하지 마세요.
 
@@ -122,7 +123,7 @@ git pull --ff-only origin agent/claude-cli-category-deep-scan
 ```
 
 단일 실행은 사전 버전 확인을 제외하고 선택한 카테고리에 대해서만 Claude 조사 호출을
-1회 수행하며, 공식기관 검색 1회와 일반 동향 검색 1회를 모두 확인합니다. 결과는 기본적으로
+1회 수행하며, 공식기관 검색 3회와 일반 동향 검색 3회를 모두 확인합니다. 결과는 기본적으로
 `cli\output\monitoring-category.html`에 저장되므로 전체 결과인 `monitoring.html`을
 덮어쓰지 않습니다. 조사 기간을 함께 지정할 수도 있습니다.
 
@@ -197,7 +198,7 @@ CLAUDE_CLI_BIN=claude
 CLAUDE_CLI_PREFLIGHT_TIMEOUT_MS=60000
 CLAUDE_CLI_TIMEOUT_MS=600000
 CLAUDE_CLI_RETRY_MAX=2
-CLAUDE_RUN_TIMEOUT_MS=2700000
+CLAUDE_RUN_TIMEOUT_MS=5400000
 LOCAL_OUTPUT_FILE=
 ```
 
@@ -231,9 +232,11 @@ CLAUDE_CLI_MODEL=sonnet
 - `--no-session-persistence`: 조사 대화와 prompt history를 저장하지 않습니다.
 - `--no-chrome`: Chrome 연동을 사용하지 않습니다.
 - `stream-json`: 실제 `WebSearch` 호출과 대응하는 성공 결과를 ID와 검색어로 확인합니다.
-- 카테고리마다 서로 다른 검색어 2개, 해당 카테고리의 신뢰 목록 안에서만
-  `allowed_domains`를 사용한 공식기관 검색 1회, 도메인 제한이 없는 일반 동향 검색 1회를
+- 카테고리마다 서로 다른 검색어 6개, 해당 카테고리의 신뢰 목록 안에서만
+  `allowed_domains`를 사용한 공식기관 검색 3회, 도메인 제한이 없는 일반 동향 검색 3회를
   확인한 결과만 채택합니다. 목록 밖 도메인을 공식 검색으로 사용하면 결과를 폐기합니다.
+- 필수 6회가 모두 성공한 뒤 시도한 추가 검색만 실패한 경우에는 실패를 경고로 남기고
+  검증된 결과는 보존합니다.
 
 `--allowedTools`가 지정 도구를 사전 승인하고 권한 규칙이 권한 모드 위에 함께 적용되는
 방식은 [Claude Code 공식 권한 문서](https://code.claude.com/docs/en/permissions)에서
@@ -257,7 +260,7 @@ hook 이벤트가 감지되면 프로그램은 결과를 폐기하며, 관리 ho
 
 HTML은 다음 상태를 구분합니다.
 
-- `검색 2회 · 0건`: 공식기관·일반 동향 검색은 성공했지만 기간과 기준을 충족한 신규
+- `검색 6회 · 0건`: 공식기관·일반 동향 검색은 성공했지만 기간과 기준을 충족한 신규
   동향이 없음
 - `확인 불가`: 조사 호출, 검색 또는 응답 검증 실패
 - `검색 상태 정보 없음`: 검색 성공 증거를 확인할 수 없음
@@ -341,13 +344,14 @@ Get-ChildItem Env:CLAUDE_CODE_SUBPROCESS_ENV_SCRUB -ErrorAction SilentlyContinue
 
 ### `TIMEOUT` 또는 `TURN_LIMIT`
 
-조사 호출 한 번은 기본 10분, 전체 실행은 기본 45분으로 제한됩니다. `TIMEOUT`은 같은
-카테고리를 반복 실행하지 않습니다. 회사 네트워크가 정상인데 응답만 느린 경우에 한해
+조사 호출 한 번은 기본 10분, 전체 실행은 108회 심층 검색을 고려해 기본 90분으로
+제한됩니다. `TIMEOUT`은 같은 카테고리를 반복 실행하지 않습니다. 회사 네트워크가
+정상인데 응답만 느린 경우에 한해
 다음처럼 늘릴 수 있습니다.
 
 ```powershell
 $env:CLAUDE_CLI_TIMEOUT_MS = "900000"
-$env:CLAUDE_RUN_TIMEOUT_MS = "5400000"
+$env:CLAUDE_RUN_TIMEOUT_MS = "7200000"
 .\run-monitoring.cmd
 ```
 
@@ -374,6 +378,15 @@ Claude 응답 스트림이 손상됐거나 해당 카테고리의 신뢰 공식 
 연결 확인 명령을 다시 실행하고, 반복되면 오류 코드와 상세 메시지를 IT 담당자에게
 전달하세요.
 
+상세에 `Whitehouse.gov`가 표시되는 북미 관세 오류는 예전 코드의 신뢰 목록 누락입니다.
+이 브랜치의 최신 버전은 백악관과 미국 관세·통상 관련 공식기관 도메인을 허용하므로,
+저장소 폴더에서 다음 명령으로 업데이트한 뒤 북미만 다시 실행하세요.
+
+```powershell
+git pull --ff-only origin agent/claude-cli-category-deep-scan
+.\run-monitoring.cmd --category "customs:북미"
+```
+
 ## 개발자 테스트
 
 저장소 루트에서 실행합니다.
@@ -385,6 +398,6 @@ node .\cli\run.mjs --mock .\cli\test\fixtures\responses.json --out .\cli\output\
 ```
 
 테스트는 Windows의 가짜 `claude.cmd`를 실제 자식 프로세스로 실행해 버전, 고정 보안
-인수, stdin, stream-json, 카테고리별 이중 WebSearch 증거, 18개 순차 조사, 단일 카테고리
+인수, stdin, stream-json, 카테고리별 6회 다각도 WebSearch 증거, 18개 순차 조사, 단일 카테고리
 조사, timeout·중단·프로세스 정리와 HTML 저장을 검증합니다. 실제 회사 인증과 회사
 WebSearch 연결은 회사 PC의 짧은 연결 확인을 별도로 통과해야 합니다.

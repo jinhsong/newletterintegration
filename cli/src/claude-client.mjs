@@ -514,7 +514,7 @@ export function preflightTimeoutMs() {
 }
 
 export function totalTimeoutMs() {
-  return positiveInt(process.env.CLAUDE_RUN_TIMEOUT_MS, 2700000, 14400000);
+  return positiveInt(process.env.CLAUDE_RUN_TIMEOUT_MS, 5400000, 14400000);
 }
 
 function signalError(signal) {
@@ -866,6 +866,61 @@ function normalizeSearchQuery(value) {
     .toLocaleLowerCase('en-US')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
+}
+
+const MEANINGFUL_NUMERIC_CONTEXT = new Set([
+  'article', 'cfr', 'chapter', 'ear', 'eo', 'heading', 'hs', 'hts', 'htsus',
+  'order', 'part', 'proclamation', 'regulation', 'rule', 'section', 'title', 'usc',
+]);
+const LEADING_NUMERIC_CONTEXT = new Set(['cfr', 'usc']);
+const DECORATIVE_NUMERIC_PREFIX = new Set([
+  'attempt', 'query', 'run', 'search', 'try', '검색', '시도', '조사', '질의',
+]);
+
+function expandFingerprintToken(token) {
+  const wrappedContext = token.match(/^(\d+)(\p{L}+)(\d+)$/u);
+  if (wrappedContext && LEADING_NUMERIC_CONTEXT.has(wrappedContext[2])) {
+    return wrappedContext.slice(1);
+  }
+
+  const suffixedNumber = token.match(/^(\p{L}+)(\d+)$/u);
+  if (
+    suffixedNumber
+    && (
+      MEANINGFUL_NUMERIC_CONTEXT.has(suffixedNumber[1])
+      || DECORATIVE_NUMERIC_PREFIX.has(suffixedNumber[1])
+    )
+  ) {
+    return suffixedNumber.slice(1);
+  }
+  return [token];
+}
+
+export function searchQueryFingerprint(value) {
+  const normalized = normalizeSearchQuery(value);
+  if (!normalized) return '';
+  const tokens = normalized.split(' ').flatMap(expandFingerprintToken);
+  const preservedNumericIndexes = new Set();
+
+  tokens.forEach((token, index) => {
+    if (!MEANINGFUL_NUMERIC_CONTEXT.has(token)) return;
+
+    if (LEADING_NUMERIC_CONTEXT.has(token)) {
+      for (let cursor = index - 1; cursor >= 0 && /^\d+$/.test(tokens[cursor]); cursor -= 1) {
+        preservedNumericIndexes.add(cursor);
+      }
+    }
+    for (let cursor = index + 1; cursor < tokens.length && /^\d+$/.test(tokens[cursor]); cursor += 1) {
+      preservedNumericIndexes.add(cursor);
+    }
+  });
+
+  const semanticTokens = tokens.filter((token, index) => (
+    !/^\d+$/.test(token)
+    || preservedNumericIndexes.has(index)
+  ));
+  const uniqueTokens = [...new Set(semanticTokens)];
+  return uniqueTokens.sort().join(' ');
 }
 
 function webSearchDomains(input, key) {
@@ -1225,18 +1280,27 @@ export function parseClaudeStream(output, options = {}) {
       [`성공 ${success}회, 실패 ${fail}회`, ...warnings].join('\n'),
     );
   }
-  const distinctQueries = new Set(successfulSearches.map((value) => value.normalizedQuery));
+  const distinctQueries = new Set(
+    successfulSearches
+      .map((value) => searchQueryFingerprint(value.normalizedQuery))
+      .filter(Boolean),
+  );
   const official = successfulSearches.filter((value) => value.mode === 'official').length;
   const broad = successfulSearches.filter((value) => value.mode === 'broad').length;
+  const minimumOfficial = positiveInt(options.minimumOfficialSearches, 1, 200);
+  const minimumBroad = positiveInt(options.minimumBroadSearches, 1, 200);
+  const minimumDistinct = Math.max(minimum, minimumOfficial + minimumBroad);
   if (options.requireOfficialAndBroadSearch === true && (
-    distinctQueries.size < 2
-    || official < 1
-    || broad < 1
+    distinctQueries.size < minimumDistinct
+    || official < minimumOfficial
+    || broad < minimumBroad
   )) {
     throw streamError(
       'SEARCH_INCOMPLETE',
-      '공식기관 검색과 일반 동향 검색을 각각 확인하지 못했습니다.',
-      `서로 다른 query ${distinctQueries.size}개, 공식기관 검색 ${official}회, 일반 동향 검색 ${broad}회`,
+      '필수 다각도 공식기관 검색과 일반 동향 검색을 모두 확인하지 못했습니다.',
+      `서로 다른 query ${distinctQueries.size}개(최소 ${minimumDistinct}개), `
+      + `공식기관 검색 ${official}회(최소 ${minimumOfficial}회), `
+      + `일반 동향 검색 ${broad}회(최소 ${minimumBroad}회)`,
     );
   }
 

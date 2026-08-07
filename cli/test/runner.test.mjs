@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   buildCategoryPrompt,
   buildDomainPrompt,
+  CATEGORY_RESEARCH_POLICY,
   categoryCatalog,
   domains,
   isTrustedOfficialDomain,
@@ -72,16 +73,31 @@ function searchedEnvelope(response, overrides = {}) {
     entry.domainKey === response?.domain && entry.unitKey === responseCategory
   ));
   const officialDomain = configuredCategory?.officialDomains?.[0] || 'agency.gov';
-  const searchCount = overrides.expectedSearches ?? Math.max(2, categoryCount * 2);
+  const searchCount = overrides.expectedSearches
+    ?? Math.max(
+      CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
+      categoryCount * CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
+    );
+  const officialPerspectives = [
+    'official law gazette',
+    'official implementation guidance',
+    'official product HS measure',
+  ];
+  const broadPerspectives = [
+    'major media policy news',
+    'local language industry news',
+    'Korean company supply chain impact',
+  ];
   const queries = overrides.queries || Array.from({ length: searchCount }, (_, index) => (
-    index === 0
+    index < CATEGORY_RESEARCH_POLICY.minimumOfficialSearches
       ? {
-        query: `official source query ${index + 1}`,
+        query: officialPerspectives[index],
         mode: 'official',
         allowedDomains: [officialDomain],
       }
       : {
-        query: `broad trend query ${index + 1}`,
+        query: broadPerspectives[index - CATEGORY_RESEARCH_POLICY.minimumOfficialSearches]
+          || `additional regional perspective variant${index + 1}`,
         mode: 'broad',
         allowedDomains: [],
       }
@@ -127,6 +143,14 @@ test('순수 Node 설정에 글로벌 3개 영역과 18개 카테고리가 있�
   assert.equal(categoryCatalog.length, 18);
   assert.equal(new Set(categoryCatalog.map((entry) => entry.id)).size, 18);
   assert.ok(categoryCatalog.every((entry) => entry.officialDomains.length > 0));
+  const northAmerica = resolveCategorySelector('customs:북미');
+  assert.ok(northAmerica.officialDomains.includes('whitehouse.gov'));
+  assert.ok(northAmerica.officialDomains.includes('federalregister.gov'));
+  assert.equal(isTrustedOfficialDomain('Whitehouse.gov', northAmerica.officialDomains), true);
+  assert.equal(isTrustedOfficialDomain('www.WHITEHOUSE.GOV', northAmerica.officialDomains), true);
+  assert.equal(isTrustedOfficialDomain('notwhitehouse.gov', northAmerica.officialDomains), false);
+  assert.equal(isTrustedOfficialDomain('whitehouse.gov.evil.com', northAmerica.officialDomains), false);
+  assert.equal(isTrustedOfficialDomain('gov.cn', northAmerica.officialDomains), false);
   assert.equal(isTrustedOfficialDomain('www.bis.gov', ['bis.gov']), true);
   assert.equal(isTrustedOfficialDomain('reuters.com', ['bis.gov']), false);
   assert.equal(isTrustedOfficialDomain('..bis.gov', ['bis.gov']), false);
@@ -138,7 +162,7 @@ test('순수 Node 설정에 글로벌 3개 영역과 18개 카테고리가 있�
   assert.throws(() => resolveCategorySelector('없는범위'), /--list-categories/);
 });
 
-test('카테고리 프롬프트는 한 범위와 공식기관·일반 동향 이중 검색을 요구한다', () => {
+test('카테고리 프롬프트는 한 범위와 공식기관·일반 동향 6회 심층 검색을 요구한다', () => {
   const context = createContext(now, 24);
   for (const domain of domains) {
     for (const unit of domain.units) {
@@ -149,6 +173,11 @@ test('카테고리 프롬프트는 한 범위와 공식기관·일반 동향 이
       assert.match(prompt, new RegExp(unit.officialDomains[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
       assert.match(prompt, /일반 동향 검색/);
       assert.match(prompt, /서로 다른 query/);
+      assert.match(prompt, /총 최소 6회/);
+      assert.match(prompt, /공식기관 원문 검색은 서로 다른 query로 최소 3회/);
+      assert.match(prompt, /일반 동향 검색은 서로 다른 query로 최소 3회/);
+      assert.match(prompt, /최대 10건/);
+      assert.match(prompt, /복수 국가·기관 카테고리/);
       assert.match(prompt, /파일을 읽거나 수정하지 말고/);
       assert.match(prompt, /announcedAt/);
       for (const other of domain.units.filter((candidate) => candidate.key !== unit.key)) {
@@ -187,36 +216,68 @@ test('공개 HTTPS 링크와 실제 달력 날짜만 허용한다', () => {
 
 test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', () => {
   const good = validateResearchEnvelope(searchedEnvelope('{}', { warnings: ['일반 업데이트 안내'] }));
-  assert.equal(good.webSearchSuccesses, 2);
+  assert.equal(good.webSearchSuccesses, 6);
   assert.equal(good.warnings.length, 1);
 
   const deep = validateResearchEnvelope(
     searchedEnvelope('{}'),
     '카테고리 조사',
-    2,
+    CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
     {
+      minimumOfficialSearches: CATEGORY_RESEARCH_POLICY.minimumOfficialSearches,
+      minimumBroadSearches: CATEGORY_RESEARCH_POLICY.minimumBroadSearches,
       requireOfficialAndBroadSearch: true,
       officialDomainAllowlist: ['agency.gov'],
     },
   );
-  assert.equal(deep.officialSearches, 1);
-  assert.equal(deep.broadSearches, 1);
+  assert.equal(deep.officialSearches, 3);
+  assert.equal(deep.broadSearches, 3);
+
+  const northAmerica = resolveCategorySelector('customs:북미');
+  const northAmericaAudit = validateResearchEnvelope(
+    searchedEnvelope('{}', {
+      queries: [
+        { query: 'White House tariff action', mode: 'official', allowedDomains: ['Whitehouse.gov'] },
+        { query: 'Federal Register tariff notice', mode: 'official', allowedDomains: ['federalregister.gov'] },
+        { query: 'CBP customs implementation', mode: 'official', allowedDomains: ['www.cbp.gov'] },
+        { query: 'North America tariff news', mode: 'broad', allowedDomains: [] },
+        { query: 'Canada customs industry update', mode: 'broad', allowedDomains: [] },
+        { query: 'Korean supply chain North America tariff', mode: 'broad', allowedDomains: [] },
+      ],
+    }),
+    '관세 / 북미 조사',
+    CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
+    {
+      minimumOfficialSearches: CATEGORY_RESEARCH_POLICY.minimumOfficialSearches,
+      minimumBroadSearches: CATEGORY_RESEARCH_POLICY.minimumBroadSearches,
+      requireOfficialAndBroadSearch: true,
+      officialDomainAllowlist: northAmerica.officialDomains,
+    },
+  );
+  assert.equal(northAmericaAudit.officialSearches, 3);
 
   assert.throws(
-    () => validateResearchEnvelope(searchedEnvelope('{}', { expectedSearches: 1 }), '카테고리 조사', 2),
+    () => validateResearchEnvelope(
+      searchedEnvelope('{}', { expectedSearches: 5 }),
+      '카테고리 조사',
+      CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
+    ),
     (error) => error.code === 'SEARCH_INCOMPLETE',
   );
   assert.throws(
     () => validateResearchEnvelope(
       searchedEnvelope('{}', {
-        queries: [
-          { query: 'first broad', mode: 'broad', allowedDomains: [] },
-          { query: 'second broad', mode: 'broad', allowedDomains: [] },
-        ],
+        queries: Array.from({ length: 6 }, (_, index) => ({
+          query: `broad query ${index + 1}`,
+          mode: 'broad',
+          allowedDomains: [],
+        })),
       }),
       '카테고리 조사',
-      2,
+      CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
       {
+        minimumOfficialSearches: CATEGORY_RESEARCH_POLICY.minimumOfficialSearches,
+        minimumBroadSearches: CATEGORY_RESEARCH_POLICY.minimumBroadSearches,
         requireOfficialAndBroadSearch: true,
         officialDomainAllowlist: ['agency.gov'],
       },
@@ -263,6 +324,7 @@ test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', ()
   assert.throws(
     () => validateResearchEnvelope(
       searchedEnvelope('{}', {
+        expectedSearches: 2,
         queries: [
           { query: 'claimed official', mode: 'official', allowedDomains: [] },
           { query: 'second broad', mode: 'broad', allowedDomains: [] },
@@ -277,6 +339,99 @@ test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', ()
     ),
     (error) => error.code === 'SEARCH_INCOMPLETE' && /공식기관 검색 0회/.test(error.details),
   );
+
+  assert.throws(
+    () => validateResearchEnvelope(
+      searchedEnvelope('{}', {
+        queries: [
+          ...Array.from({ length: 2 }, (_, index) => ({
+            query: `official query ${index + 1}`,
+            mode: 'official',
+            allowedDomains: ['agency.gov'],
+          })),
+          ...Array.from({ length: 4 }, (_, index) => ({
+            query: `broad query ${index + 1}`,
+            mode: 'broad',
+            allowedDomains: [],
+          })),
+        ],
+      }),
+      '카테고리 조사',
+      CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
+      {
+        minimumOfficialSearches: CATEGORY_RESEARCH_POLICY.minimumOfficialSearches,
+        minimumBroadSearches: CATEGORY_RESEARCH_POLICY.minimumBroadSearches,
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['agency.gov'],
+      },
+    ),
+    (error) => error.code === 'SEARCH_INCOMPLETE' && /공식기관 검색 2회/.test(error.details),
+  );
+
+  assert.throws(
+    () => validateResearchEnvelope(
+      searchedEnvelope('{}', {
+        queries: [
+          { query: 'official duplicate', mode: 'official', allowedDomains: ['agency.gov'] },
+          { query: ' official---duplicate ', mode: 'official', allowedDomains: ['agency.gov'] },
+          { query: 'official third', mode: 'official', allowedDomains: ['agency.gov'] },
+          { query: 'broad first', mode: 'broad', allowedDomains: [] },
+          { query: 'broad second', mode: 'broad', allowedDomains: [] },
+          { query: 'broad third', mode: 'broad', allowedDomains: [] },
+        ],
+      }),
+      '카테고리 조사',
+      CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
+      {
+        minimumOfficialSearches: CATEGORY_RESEARCH_POLICY.minimumOfficialSearches,
+        minimumBroadSearches: CATEGORY_RESEARCH_POLICY.minimumBroadSearches,
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['agency.gov'],
+      },
+    ),
+    (error) => error.code === 'SEARCH_INCOMPLETE' && /서로 다른 query 5개/.test(error.details),
+  );
+
+  assert.throws(
+    () => validateResearchEnvelope(
+      searchedEnvelope('{}', {
+        queries: [
+          { query: 'official law gazette', mode: 'official', allowedDomains: ['agency.gov'] },
+          { query: 'official implementation guidance', mode: 'official', allowedDomains: ['agency.gov'] },
+          { query: 'official product HS 8517 measure', mode: 'official', allowedDomains: ['agency.gov'] },
+          { query: 'major media policy news', mode: 'broad', allowedDomains: [] },
+          { query: 'local language industry news', mode: 'broad', allowedDomains: [] },
+          { query: '123', mode: 'broad', allowedDomains: [] },
+        ],
+      }),
+      '카테고리 조사',
+      CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
+      {
+        minimumOfficialSearches: CATEGORY_RESEARCH_POLICY.minimumOfficialSearches,
+        minimumBroadSearches: CATEGORY_RESEARCH_POLICY.minimumBroadSearches,
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['agency.gov'],
+      },
+    ),
+    (error) => error.code === 'SEARCH_INCOMPLETE' && /서로 다른 query 5개/.test(error.details),
+  );
+
+  const withSurplusFailure = validateResearchEnvelope(
+    searchedEnvelope('{}', {
+      search: { count: 7, success: 6, fail: 1 },
+      warnings: ['WebSearch 실패: 추가 탐색 일시 오류'],
+    }),
+    '카테고리 조사',
+    CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
+    {
+      minimumOfficialSearches: CATEGORY_RESEARCH_POLICY.minimumOfficialSearches,
+      minimumBroadSearches: CATEGORY_RESEARCH_POLICY.minimumBroadSearches,
+      requireOfficialAndBroadSearch: true,
+      officialDomainAllowlist: ['agency.gov'],
+    },
+  );
+  assert.equal(withSurplusFailure.webSearchSuccesses, 6);
+  assert.equal(withSurplusFailure.warnings.length, 1);
 
   assert.throws(
     () => validateResearchEnvelope({
@@ -309,7 +464,7 @@ test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', ()
   );
 });
 
-test('항목은 정규화·필수 필드·실제 날짜·정확한 시각·정렬 순으로 검증한 뒤 5건으로 제한한다', () => {
+test('항목은 정규화·필수 필드·실제 날짜·정확한 시각·정렬 순으로 검증한 뒤 10건으로 제한한다', () => {
   const context = createContext(now, 24);
   const response = responseFor(domains[0]);
   response.categories.북미 = [
@@ -319,6 +474,12 @@ test('항목은 정규화·필수 필드·실제 날짜·정확한 시각·정�
     item({ title: '중 등급 2', importance: '중', sourceUrl: 'https://example.com/mid2' }),
     item({ title: '상 등급 2', importance: '상', sourceUrl: 'https://example.com/high2' }),
     item({ title: '중 등급 3', importance: '중', sourceUrl: 'https://example.com/mid3' }),
+    ...Array.from({ length: 5 }, (_, index) => item({
+      title: `추가 동향 ${index + 1}`,
+      importance: '하',
+      measureType: `추가 조치 ${index + 1}`,
+      sourceUrl: `https://example.com/extra-${index + 1}`,
+    })),
     item({ title: '잘못된 중요도', importance: '최상', sourceUrl: 'https://example.com/bad-importance' }),
     item({ title: '존재하지 않는 날짜', announcedDate: '2026-02-30', sourceUrl: 'https://example.com/bad-date' }),
     item({
@@ -341,13 +502,13 @@ test('항목은 정규화·필수 필드·실제 날짜·정확한 시각·정�
   ];
 
   const parsed = parseDomainResponse(domains[0], response, context);
-  assert.equal(parsed.categories.북미.length, 5);
+  assert.equal(parsed.categories.북미.length, CATEGORY_RESEARCH_POLICY.maximumItemsPerCategory);
   assert.deepEqual(parsed.categories.북미.slice(0, 2).map((entry) => entry.importance), ['상', '상']);
   assert.equal(parsed.categoryStatus.북미.rejectedCount, 5);
   assert.equal(parsed.categories.북미.every((entry) => entry.sourceVerification === 'format-only'), true);
 });
 
-test('상위 중복 항목을 먼저 제거한 뒤 서로 다른 항목을 최대 5건 유지한다', () => {
+test('상위 중복 항목을 먼저 제거한 뒤 서로 다른 항목을 최대 10건 유지한다', () => {
   const context = createContext(now, 24);
   const response = responseFor(domains[0]);
   response.categories.북미 = [
@@ -358,7 +519,7 @@ test('상위 중복 항목을 먼저 제거한 뒤 서로 다른 항목을 최�
       summary: '더 충실한 설명을 포함한 동일 원문 조치입니다. 추가 적용 범위와 일정을 확인했습니다.',
       sourceUrl: 'https://example.com/duplicate',
     }),
-    ...Array.from({ length: 5 }, (_, index) => item({
+    ...Array.from({ length: 10 }, (_, index) => item({
       title: `서로 다른 조치 ${index + 1}`,
       importance: '중',
       measureType: `서로 다른 조치 유형 ${index + 1}`,
@@ -369,9 +530,12 @@ test('상위 중복 항목을 먼저 제거한 뒤 서로 다른 항목을 최�
   ];
 
   const parsed = parseDomainResponse(domains[0], response, context);
-  assert.equal(parsed.categories.북미.length, 5);
-  assert.equal(new Set(parsed.categories.북미.map((entry) => entry.sourceUrl)).size, 5);
-  assert.ok(parsed.categories.북미.some((entry) => entry.sourceUrl.endsWith('/distinct-4')));
+  assert.equal(parsed.categories.북미.length, CATEGORY_RESEARCH_POLICY.maximumItemsPerCategory);
+  assert.equal(
+    new Set(parsed.categories.북미.map((entry) => entry.sourceUrl)).size,
+    CATEGORY_RESEARCH_POLICY.maximumItemsPerCategory,
+  );
+  assert.equal(parsed.categories.북미.filter((entry) => entry.sourceUrl.endsWith('/duplicate')).length, 1);
 });
 
 test('검색 근거 연결은 같은 hostname이 아니라 정확히 같은 URL일 때만 표시한다', () => {
@@ -457,7 +621,7 @@ test('mock 수집은 Claude 호출 없이 상태를 포함한 공통 payload를 
   assert.equal(payload.results.trade.categoryStatus.반덤핑.status, 'empty');
 });
 
-test('전체 조사는 18개 카테고리를 각각 한 번 호출하고 호출마다 이중 검색을 요구한다', async () => {
+test('전체 조사는 18개 카테고리를 각각 한 번 호출하고 호출마다 6회 심층 검색을 요구한다', async () => {
   const requested = [];
   let active = 0;
   let maxActive = 0;
@@ -466,7 +630,18 @@ test('전체 조사는 18개 카테고리를 각각 한 번 호출하고 호출�
     maxActive = Math.max(maxActive, active);
       const { domain, units } = promptDomainAndUnits(prompt);
       assert.equal(units.length, 1);
-      assert.equal(options.minimumWebSearchSuccesses, 2);
+      assert.equal(
+        options.minimumWebSearchSuccesses,
+        CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
+      );
+      assert.equal(
+        options.minimumOfficialSearches,
+        CATEGORY_RESEARCH_POLICY.minimumOfficialSearches,
+      );
+      assert.equal(
+        options.minimumBroadSearches,
+        CATEGORY_RESEARCH_POLICY.minimumBroadSearches,
+      );
       assert.equal(options.requireOfficialAndBroadSearch, true);
       assert.deepEqual(options.officialDomainAllowlist, units[0].officialDomains);
     requested.push(`${domain.key}:${units[0].key}`);
@@ -481,9 +656,9 @@ test('전체 조사는 18개 카테고리를 각각 한 번 호출하고 호출�
   assert.equal(payload.collection.totalCategories, 18);
   assert.equal(payload.collection.completedCategories, 18);
   assert.equal(payload.collection.scope, 'all');
-  assert.equal(payload.results.customs.coverage.webSearchSuccesses, 18);
-  assert.equal(payload.results.export.coverage.webSearchSuccesses, 12);
-  assert.equal(payload.results.trade.coverage.webSearchSuccesses, 6);
+  assert.equal(payload.results.customs.coverage.webSearchSuccesses, 54);
+  assert.equal(payload.results.export.coverage.webSearchSuccesses, 36);
+  assert.equal(payload.results.trade.coverage.webSearchSuccesses, 18);
 });
 
 test('단일 카테고리 선택은 해당 범위만 한 번 호출하고 1/1 결과를 만든다', async () => {

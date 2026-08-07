@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import net from 'node:net';
 import {
   buildCategoryPrompt,
+  CATEGORY_RESEARCH_POLICY,
   domains,
   isTrustedOfficialDomain,
   resolveCategorySelector,
@@ -12,6 +13,7 @@ import {
   ClaudeCliError,
   isRetryableClaudeError,
   retryMax,
+  searchQueryFingerprint,
 } from './claude-client.mjs';
 import { parseJsonObject } from './json-utils.mjs';
 
@@ -350,7 +352,10 @@ export function parseDomainResponse(domain, response, context, options = {}) {
       }
     }
     uniqueAccepted.sort(compareItems);
-    result.categories[unit.key] = uniqueAccepted.slice(0, 5);
+    result.categories[unit.key] = uniqueAccepted.slice(
+      0,
+      CATEGORY_RESEARCH_POLICY.maximumItemsPerCategory,
+    );
 
     if (rawItems.length > 0 && accepted.length === 0) {
       result.categoryStatus[unit.key] = {
@@ -415,6 +420,7 @@ function normalizedEvidenceQueries(search, officialDomainAllowlist = []) {
     return {
       query,
       normalized,
+      fingerprint: searchQueryFingerprint(normalized),
       mode,
     };
   }).filter(Boolean);
@@ -452,7 +458,7 @@ export function validateResearchEnvelope(
       `필요 ${expectedSearches}회, 성공 ${success}회`,
     );
   }
-  if (!Number.isSafeInteger(fail) || fail < 0 || fail > 0) {
+  if (!Number.isSafeInteger(fail) || fail < 0) {
     throw new ClaudeCliError(
       'SEARCH_FAILED',
       `${label} 중 Claude WebSearch 실패가 감지되었습니다.`,
@@ -465,6 +471,23 @@ export function validateResearchEnvelope(
   if (options.requireOfficialAndBroadSearch === true && officialDomainAllowlist.length === 0) {
     throw new ClaudeCliError('CONFIG', `${label}의 공식기관 신뢰 도메인 목록이 비어 있습니다.`);
   }
+  const minimumOfficialSearches = options.minimumOfficialSearches ?? 1;
+  const minimumBroadSearches = options.minimumBroadSearches ?? 1;
+  if (options.requireOfficialAndBroadSearch === true && (
+    !Number.isSafeInteger(minimumOfficialSearches)
+    || minimumOfficialSearches < 1
+    || !Number.isSafeInteger(minimumBroadSearches)
+    || minimumBroadSearches < 1
+  )) {
+    throw new ClaudeCliError('CONFIG', `${label}의 검색 종류별 최소 횟수 설정이 올바르지 않습니다.`);
+  }
+  if (options.requireOfficialAndBroadSearch !== true && fail > 0) {
+    throw new ClaudeCliError(
+      'SEARCH_FAILED',
+      `${label} 중 Claude WebSearch 실패가 감지되었습니다.`,
+      warnings.join('\n'),
+    );
+  }
   const queries = normalizedEvidenceQueries(search, officialDomainAllowlist);
   if (options.requireOfficialAndBroadSearch === true && queries.length !== success) {
     throw new ClaudeCliError(
@@ -473,7 +496,9 @@ export function validateResearchEnvelope(
       `성공 ${success}회, 검증 가능한 검색 증거 ${queries.length}개`,
     );
   }
-  const distinctQueries = new Set(queries.map((entry) => entry.normalized));
+  const distinctQueries = new Set(
+    queries.map((entry) => entry.fingerprint).filter(Boolean),
+  );
   const officialSearches = queries.filter((entry) => entry.mode === 'official').length;
   const broadSearches = queries.filter((entry) => entry.mode === 'broad').length;
   const untrustedSearches = queries.filter((entry) => entry.mode === 'untrusted').length;
@@ -484,19 +509,26 @@ export function validateResearchEnvelope(
       `신뢰 목록 밖 도메인 제한 검색 ${untrustedSearches}회`,
     );
   }
+  const minimumDistinctQueries = Math.max(
+    expectedSearches,
+    minimumOfficialSearches + minimumBroadSearches,
+  );
   if (options.requireOfficialAndBroadSearch === true && (
-    distinctQueries.size < 2
-    || officialSearches < 1
-    || broadSearches < 1
+    distinctQueries.size < minimumDistinctQueries
+    || officialSearches < minimumOfficialSearches
+    || broadSearches < minimumBroadSearches
   )) {
     throw new ClaudeCliError(
       'SEARCH_INCOMPLETE',
-      `${label}에서 공식기관 검색과 일반 동향 검색을 각각 확인하지 못했습니다.`,
-      `서로 다른 query ${distinctQueries.size}개, 공식기관 검색 ${officialSearches}회, 일반 동향 검색 ${broadSearches}회`,
+      `${label}에서 필수 다각도 공식기관 검색과 일반 동향 검색을 모두 확인하지 못했습니다.`,
+      `서로 다른 query ${distinctQueries.size}개(최소 ${minimumDistinctQueries}개), `
+      + `공식기관 검색 ${officialSearches}회(최소 ${minimumOfficialSearches}회), `
+      + `일반 동향 검색 ${broadSearches}회(최소 ${minimumBroadSearches}회)`,
     );
   }
   const blockingWarnings = warnings.filter((warning) => (
-    /\b(?:error|failed|failure|denied|forbidden|blocked|disabled|unavailable)\b|오류|실패|거부|차단|비활성|사용할 수 없/i.test(warning)
+    !(options.requireOfficialAndBroadSearch === true && fail > 0 && /^WebSearch 실패:/i.test(warning))
+    && /\b(?:error|failed|failure|denied|forbidden|blocked|disabled|unavailable)\b|오류|실패|거부|차단|비활성|사용할 수 없/i.test(warning)
   ));
   if (blockingWarnings.length > 0) {
     throw new ClaudeCliError(
@@ -621,7 +653,9 @@ function dedupeDomain(result, domain) {
 
 function syncCategoryStatuses(result, domain) {
   for (const unit of domain.units) {
-    const items = result.categories[unit.key].sort(compareItems).slice(0, 5);
+    const items = result.categories[unit.key]
+      .sort(compareItems)
+      .slice(0, CATEGORY_RESEARCH_POLICY.maximumItemsPerCategory);
     result.categories[unit.key] = items;
     if (items.length === 0 && result.categoryInsights) result.categoryInsights[unit.key] = '';
     const status = result.categoryStatus[unit.key];
@@ -760,15 +794,19 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
       const envelope = await caller(buildCategoryPrompt(domain, unit, context), {
         cwd: options.cwd,
         signal: options.signal,
-        minimumWebSearchSuccesses: 2,
+        minimumWebSearchSuccesses: CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
+        minimumOfficialSearches: CATEGORY_RESEARCH_POLICY.minimumOfficialSearches,
+        minimumBroadSearches: CATEGORY_RESEARCH_POLICY.minimumBroadSearches,
         requireOfficialAndBroadSearch: true,
         officialDomainAllowlist: unit.officialDomains,
       });
       const audit = validateResearchEnvelope(
         envelope,
         `${domain.label} / ${unit.label} 조사`,
-        2,
+        CATEGORY_RESEARCH_POLICY.minimumSearchesPerCategory,
         {
+          minimumOfficialSearches: CATEGORY_RESEARCH_POLICY.minimumOfficialSearches,
+          minimumBroadSearches: CATEGORY_RESEARCH_POLICY.minimumBroadSearches,
           requireOfficialAndBroadSearch: true,
           officialDomainAllowlist: unit.officialDomains,
         },
@@ -908,7 +946,8 @@ export async function collectMonitoring(options = {}) {
   console.log(`조사 기간: ${context.fromStr} ~ ${context.toStr} KST`);
   console.log(
     `Claude 호출: ${targets.length}개 카테고리를 각각 조사하며, `
-    + '카테고리마다 공식기관 검색과 일반 동향 검색을 별도로 실행합니다.',
+    + `카테고리마다 공식기관 ${CATEGORY_RESEARCH_POLICY.minimumOfficialSearches}회와 `
+    + `일반 동향 ${CATEGORY_RESEARCH_POLICY.minimumBroadSearches}회를 별도로 실행합니다.`,
   );
 
   for (let index = 0; index < targets.length; index += 1) {

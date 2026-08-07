@@ -56,12 +56,12 @@ test('단일 카테고리 HTML은 선택 범위만 표시하고 미선택 17개�
     lookbackHours: 24,
   });
   payload.collection.mode = 'live';
-  payload.results.export.coverage.webSearchSuccesses = 2;
-  payload.results.export.categoryStatus.미국.webSearchSuccesses = 2;
+  payload.results.export.coverage.webSearchSuccesses = 6;
+  payload.results.export.categoryStatus.미국.webSearchSuccesses = 6;
   const html = renderMonitoringHtml(payload);
   assert.match(html, /선택 조사 · 수출통제 \/ 미국/);
-  assert.match(html, /요청한 1개 카테고리의 Claude Code 이중 검색 결과/);
-  assert.match(html, /카테고리 1\/1 · 웹 검색 2회 성공/);
+  assert.match(html, /요청한 1개 카테고리의 Claude Code 다각도 심층 검색 결과/);
+  assert.match(html, /카테고리 1\/1 · 웹 검색 6회 성공/);
   assert.match(html, />미국</);
   assert.doesNotMatch(html, />한국</);
   assert.doesNotMatch(html, />북미</);
@@ -142,7 +142,7 @@ test('부분 실패, 확인 불가, 검색 후 0건을 영역과 카테고리에
     requestedCategories: 3,
     completedCategories: 2,
     failedCategories: 1,
-    webSearchSuccesses: 2,
+    webSearchSuccesses: 12,
     warningCount: 1,
     complete: false,
   };
@@ -160,7 +160,7 @@ test('부분 실패, 확인 불가, 검색 후 0건을 영역과 카테고리에
   const html = renderMonitoringHtml(payload);
   assert.match(html, /일부 범위 조사 실패/);
   assert.match(html, /부분 결과/);
-  assert.match(html, /카테고리 2\/3 · 웹 검색 2회 성공 · Claude 경고 1건/);
+  assert.match(html, /카테고리 2\/3 · 웹 검색 12회 성공 · Claude 경고 1건/);
   assert.match(html, /수집 실패로 확인할 수 없습니다/);
   assert.match(html, /사유: &lt;정책 차단&gt;/);
   assert.match(html, /웹 검색을 마쳤으며, 조사 기간과 포함 기준을 충족한 신규 동향은 0건입니다/);

@@ -9,11 +9,13 @@ import {
   callClaudeCli,
   createProcessCleanupError,
   parseCliVersion,
+  parseClaudeStream,
   prepareResearchWorkspace,
   preflightClaudeCli,
   preflightTimeoutMs,
   resolveForcedStopError,
   retryMax,
+  searchQueryFingerprint,
   stopAllClaudeProcesses,
   totalTimeoutMs,
 } from '../src/claude-client.mjs';
@@ -221,15 +223,15 @@ test('재시도 환경변수는 숫자 전체가 올바를 때만 허용한다',
   }
 });
 
-test('전체 실행 제한은 기본 45분이며 안전한 정수 환경변수만 반영한다', () => {
+test('전체 실행 제한은 기본 90분이며 안전한 정수 환경변수만 반영한다', () => {
   const original = process.env.CLAUDE_RUN_TIMEOUT_MS;
   try {
     delete process.env.CLAUDE_RUN_TIMEOUT_MS;
-    assert.equal(totalTimeoutMs(), 2700000);
+    assert.equal(totalTimeoutMs(), 5400000);
     process.env.CLAUDE_RUN_TIMEOUT_MS = '3600000';
     assert.equal(totalTimeoutMs(), 3600000);
     process.env.CLAUDE_RUN_TIMEOUT_MS = '10minutes';
-    assert.equal(totalTimeoutMs(), 2700000);
+    assert.equal(totalTimeoutMs(), 5400000);
   } finally {
     if (original === undefined) delete process.env.CLAUDE_RUN_TIMEOUT_MS;
     else process.env.CLAUDE_RUN_TIMEOUT_MS = original;
@@ -268,6 +270,116 @@ test('Claude Code 버전 파서는 사내 배너를 무시하고 공식 버전 �
   });
   assert.equal(parseCliVersion('Security Agent 8.2.1'), null);
   assert.equal(parseCliVersion('Claude Desktop 1.2.3'), null);
+});
+
+test('검색어 다양성 지문은 순서·반복·장식 숫자는 무시하고 규정 번호는 보존한다', () => {
+  assert.equal(
+    searchQueryFingerprint('North America tariff official search 1'),
+    searchQueryFingerprint('tariff official North America search 2'),
+  );
+  assert.equal(
+    searchQueryFingerprint('tariff tariff official North America'),
+    searchQueryFingerprint('North America official tariff'),
+  );
+  assert.notEqual(
+    searchQueryFingerprint('US tariff Section 232'),
+    searchQueryFingerprint('US tariff Section 301'),
+  );
+  assert.notEqual(
+    searchQueryFingerprint('electronics HS 8517 tariff'),
+    searchQueryFingerprint('electronics HS 8542 tariff'),
+  );
+  assert.notEqual(
+    searchQueryFingerprint('electronics HS 85.17 tariff'),
+    searchQueryFingerprint('electronics HS 85.42 tariff'),
+  );
+  assert.notEqual(
+    searchQueryFingerprint('15 CFR 744.21 export control'),
+    searchQueryFingerprint('15 CFR 746.8 export control'),
+  );
+  assert.notEqual(
+    searchQueryFingerprint('15CFR744.21 export control'),
+    searchQueryFingerprint('15CFR744.8 export control'),
+  );
+  assert.notEqual(
+    searchQueryFingerprint('electronics HS85.17 tariff'),
+    searchQueryFingerprint('electronics HS85.42 tariff'),
+  );
+  assert.equal(
+    searchQueryFingerprint('North America tariff search1'),
+    searchQueryFingerprint('North America tariff search2'),
+  );
+  assert.notEqual(
+    searchQueryFingerprint('NVIDIA H100 restrictions'),
+    searchQueryFingerprint('NVIDIA H200 restrictions'),
+  );
+  assert.equal(
+    searchQueryFingerprint('1 Section 232 tariff'),
+    searchQueryFingerprint('2 Section 232 tariff'),
+  );
+  assert.equal(searchQueryFingerprint('1'), searchQueryFingerprint('6'));
+  assert.equal(searchQueryFingerprint('1'), '');
+});
+
+test('stream-json 심층 검색 검증도 장식만 바꾼 query를 중복으로 거부한다', () => {
+  const streamFor = (queries) => {
+    const events = [initEvent()];
+    queries.forEach((query, index) => {
+      const id = `fingerprint-${index + 1}`;
+      const official = index < 3;
+      events.push(assistantToolUse(id, 'WebSearch', {
+        query,
+        ...(official ? { allowed_domains: ['agency.gov'] } : {}),
+      }));
+      events.push(userToolResult(id, {
+        query,
+        content: `https://example.com/fingerprint-${index + 1}`,
+        structuredResult: {
+          query,
+          results: [{
+            tool_use_id: id,
+            content: [{
+              title: '검색 결과',
+              url: `https://example.com/fingerprint-${index + 1}`,
+            }],
+          }],
+          searchCount: 1,
+        },
+      }));
+    });
+    events.push(successResult());
+    return events.map((event) => JSON.stringify(event)).join('\n');
+  };
+  const options = {
+    minimumWebSearchSuccesses: 6,
+    minimumOfficialSearches: 3,
+    minimumBroadSearches: 3,
+    requireOfficialAndBroadSearch: true,
+    officialDomainAllowlist: ['agency.gov'],
+  };
+  const queries = [
+    'official law gazette',
+    'official implementation guidance',
+    'official product HS 8517 measure',
+    'major media policy news',
+    'local language industry news',
+    'Korean company supply chain impact',
+  ];
+  assert.equal(parseClaudeStream(streamFor(queries), options).toolEvidence.totalSuccess, 6);
+
+  const duplicateQueries = [...queries];
+  duplicateQueries[1] = 'gazette law official 2';
+  assert.throws(
+    () => parseClaudeStream(streamFor(duplicateQueries), options),
+    (error) => error.code === 'SEARCH_INCOMPLETE' && /서로 다른 query 5개/.test(error.details),
+  );
+
+  const numericOnlyQueries = [...queries];
+  numericOnlyQueries[5] = '123';
+  assert.throws(
+    () => parseClaudeStream(streamFor(numericOnlyQueries), options),
+    (error) => error.code === 'SEARCH_INCOMPLETE' && /서로 다른 query 5개/.test(error.details),
+  );
 });
 
 test('프로세스 정리 실패 오류는 원래 오류와 정리 상태 및 PID를 보존한다', () => {
@@ -393,57 +505,125 @@ test('WebSearch 병렬 호출은 tool_use_id로 결과를 짝지어 계산한다
   });
 });
 
-test('카테고리 조사는 서로 다른 공식기관 검색과 일반 동향 검색을 모두 증명한다', {
+test('카테고리 조사는 서로 다른 공식기관 3회와 일반 동향 3회를 모두 증명한다', {
   skip: process.platform !== 'win32',
 }, async () => {
-  const events = [
-    initEvent(),
-    assistantToolUse('toolu-official', 'WebSearch', {
-      query: 'BIS official export control announcement July 2026',
-      allowed_domains: ['www.bis.gov'],
-    }),
-    userToolResult('toolu-official', {
-      query: 'BIS official export control announcement July 2026',
-      content: 'https://bis.gov/rule',
-      structuredResult: {
-        query: 'BIS official export control announcement July 2026',
-        results: [{
-          tool_use_id: 'toolu-official',
-          content: [{ title: 'BIS rule', url: 'https://bis.gov/rule' }],
-        }],
-        searchCount: 1,
-      },
-    }),
-    assistantToolUse('toolu-broad', 'WebSearch', {
-      query: 'latest semiconductor export control news July 2026',
-    }),
-    userToolResult('toolu-broad', {
-      query: 'latest semiconductor export control news July 2026',
-      content: 'https://news.example.com/export',
-      structuredResult: {
-        query: 'latest semiconductor export control news July 2026',
-        results: [{
-          tool_use_id: 'toolu-broad',
-          content: [{ title: 'Industry news', url: 'https://news.example.com/export' }],
-        }],
-        searchCount: 1,
-      },
-    }),
-    successResult(),
+  const events = [initEvent()];
+  const queryPerspectives = [
+    'official North America tariff law gazette',
+    'official North America customs implementation guidance',
+    'official North America electronics product HS measure',
+    'North America tariff major media policy news',
+    'North America tariff local industry news',
+    'North America tariff Korean supply chain impact',
   ];
+  for (let index = 0; index < 6; index += 1) {
+    const official = index < 3;
+    const id = `toolu-${official ? 'official' : 'broad'}-${index + 1}`;
+    const query = queryPerspectives[index];
+    events.push(assistantToolUse(id, 'WebSearch', {
+      query,
+      ...(official ? { allowed_domains: [index === 0 ? 'Whitehouse.gov' : 'cbp.gov'] } : {}),
+    }));
+    events.push(userToolResult(id, {
+      query,
+      content: `https://example.com/result-${index + 1}`,
+      structuredResult: {
+        query,
+        results: [{
+          tool_use_id: id,
+          content: [{ title: '검색 결과', url: `https://example.com/result-${index + 1}` }],
+        }],
+        searchCount: 1,
+      },
+    }));
+  }
+  events.push(successResult());
   await withFakeClaude({ events }, async ({ directory }) => {
     const result = await callClaudeCli('시험', {
       cwd: directory,
       timeoutMs: 5000,
-      minimumWebSearchSuccesses: 2,
+      minimumWebSearchSuccesses: 6,
+      minimumOfficialSearches: 3,
+      minimumBroadSearches: 3,
       requireOfficialAndBroadSearch: true,
-      officialDomainAllowlist: ['bis.gov'],
+      officialDomainAllowlist: ['whitehouse.gov', 'cbp.gov'],
     });
-    assert.equal(result.toolEvidence.byName.WebSearch.official, 1);
-    assert.equal(result.toolEvidence.byName.WebSearch.broad, 1);
+    assert.equal(result.toolEvidence.byName.WebSearch.official, 3);
+    assert.equal(result.toolEvidence.byName.WebSearch.broad, 3);
     assert.deepEqual(
       result.toolEvidence.byName.WebSearch.queries.map((entry) => entry.mode),
-      ['official', 'broad'],
+      ['official', 'official', 'official', 'broad', 'broad', 'broad'],
+    );
+    assert.deepEqual(result.toolEvidence.byName.WebSearch.queries[0].allowedDomains, ['whitehouse.gov']);
+  });
+});
+
+test('총 6회여도 공식 검색이 부족하거나 query가 중복되면 심층 조사로 인정하지 않는다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const deepEvents = (officialCount, duplicateOfficial = false) => {
+    const events = [initEvent()];
+    const officialQueries = [
+      'official law gazette',
+      'official implementation guidance',
+      'official product HS analysis',
+    ];
+    const broadQueries = [
+      'major media policy news',
+      'local language industry news',
+      'Korean company supply chain impact',
+      'additional regional market analysis',
+    ];
+    let officialIndex = 0;
+    let broadIndex = 0;
+    for (let index = 0; index < 6; index += 1) {
+      const official = index < officialCount;
+      const id = `deep-${official ? 'official' : 'broad'}-${index + 1}`;
+      const query = duplicateOfficial && index === 1
+        ? '  gazette---law---official---2  '
+        : (official ? officialQueries[officialIndex++] : broadQueries[broadIndex++]);
+      events.push(assistantToolUse(id, 'WebSearch', {
+        query,
+        ...(official ? { allowed_domains: ['agency.gov'] } : {}),
+      }));
+      events.push(userToolResult(id, {
+        query,
+        content: `https://example.com/deep-${index + 1}`,
+        structuredResult: {
+          query,
+          results: [{
+            tool_use_id: id,
+            content: [{ title: '검색 결과', url: `https://example.com/deep-${index + 1}` }],
+          }],
+          searchCount: 1,
+        },
+      }));
+    }
+    events.push(successResult());
+    return events;
+  };
+  const options = (directory) => ({
+    cwd: directory,
+    timeoutMs: 5000,
+    minimumWebSearchSuccesses: 6,
+    minimumOfficialSearches: 3,
+    minimumBroadSearches: 3,
+    requireOfficialAndBroadSearch: true,
+    officialDomainAllowlist: ['agency.gov'],
+  });
+
+  await withFakeClaude({ events: deepEvents(2) }, async ({ directory }) => {
+    await assert.rejects(
+      () => callClaudeCli('시험', options(directory)),
+      (error) => error.code === 'SEARCH_INCOMPLETE' && /공식기관 검색 2회/.test(error.details),
+    );
+  });
+
+  await withFakeClaude({ events: deepEvents(3, true) }, async ({ directory }) => {
+    await assert.rejects(
+      () => callClaudeCli('시험', options(directory)),
+      (error) => error.code === 'SEARCH_INCOMPLETE' && /서로 다른 query 5개/.test(error.details),
     );
   });
 });

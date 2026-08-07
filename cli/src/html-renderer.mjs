@@ -254,7 +254,7 @@ function failureBanner(payload) {
       (sum, domain) => sum + domain.units.length,
       0,
     );
-    return `<div class="status status-ok"><b>결과 생성 완료</b><span>요청한 ${escapeHtml(total)}개 카테고리의 Claude Code 이중 검색 결과를 정리했습니다. 검색 범위와 원문을 수동으로 확인하세요.</span></div>`;
+    return `<div class="status status-ok"><b>결과 생성 완료</b><span>요청한 ${escapeHtml(total)}개 카테고리의 Claude Code 다각도 심층 검색 결과를 정리했습니다. 검색 범위와 원문을 수동으로 확인하세요.</span></div>`;
   }
   const failureItems = failures
     .map((failure) => `<li><b>${escapeHtml(failure.domainLabel)}${failure.categoryLabel ? ` / ${escapeHtml(failure.categoryLabel)}` : ''}</b> <code>${escapeHtml(failure.code)}</code> ${escapeHtml(failure.reason)}</li>`)
