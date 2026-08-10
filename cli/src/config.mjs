@@ -130,8 +130,15 @@ export const domains = [
   {
     key: 'customs',
     label: '관세',
-    color: '#2563eb',
-    softColor: '#eff6ff',
+    color: '#1a4d8f',
+    softColor: '#eaf1fa',
+    palette: Object.freeze({
+      band: '#13335f',
+      catBg: '#eaf1fa',
+      catBorder: '#1a4d8f',
+      catText: '#15406f',
+      chip: '#1a4d8f',
+    }),
     units: units(customsUnits, 'customs'),
     scope: `
 [관세 영역]
@@ -143,8 +150,15 @@ export const domains = [
   {
     key: 'export',
     label: '수출통제',
-    color: '#dc2626',
-    softColor: '#fef2f2',
+    color: '#9c2a2a',
+    softColor: '#fbeded',
+    palette: Object.freeze({
+      band: '#7a1f1f',
+      catBg: '#fbeded',
+      catBorder: '#9c2a2a',
+      catText: '#8a2424',
+      chip: '#9c2a2a',
+    }),
     units: units(exportUnits, 'export'),
     scope: `
 [수출통제 영역]
@@ -157,8 +171,15 @@ export const domains = [
   {
     key: 'trade',
     label: '무역구제',
-    color: '#15803d',
-    softColor: '#f0fdf4',
+    color: '#1e7045',
+    softColor: '#e9f4ee',
+    palette: Object.freeze({
+      band: '#1b5e3b',
+      catBg: '#e9f4ee',
+      catBorder: '#1e7045',
+      catText: '#1a5e3a',
+      chip: '#1e7045',
+    }),
     units: units(tradeUnits, 'trade'),
     scope: `
 [무역구제 영역]

@@ -37,6 +37,21 @@ test('HTML은 자체 포함 CSS와 세 영역을 가지며 외부 리소스와 �
   assert.doesNotMatch(html, /<script\b/i);
   assert.doesNotMatch(html, /<link\b/i);
   assert.doesNotMatch(html, /<img\b/i);
+  assert.doesNotMatch(html, /@import|@font-face|url\s*\(/i);
+  assert.doesNotMatch(html, /<(?:iframe|object|embed|audio|video|source)\b/i);
+  assert.match(html, /--canvas:#eef1f5;--navy:#0d1b30;--gold:#ffd54f/);
+  assert.match(html, /max-width:680px/);
+  assert.match(html, /"Malgun Gothic","맑은 고딕","Apple SD Gothic Neo",Arial,sans-serif/);
+  assert.match(html, /--domain-band:#13335f;--domain-cat-bg:#eaf1fa;--domain-cat-border:#1a4d8f;--domain-cat-text:#15406f;--domain-chip:#1a4d8f/);
+  assert.match(html, /--domain-band:#7a1f1f;--domain-cat-bg:#fbeded;--domain-cat-border:#9c2a2a;--domain-cat-text:#8a2424;--domain-chip:#9c2a2a/);
+  assert.match(html, /--domain-band:#1b5e3b;--domain-cat-bg:#e9f4ee;--domain-cat-border:#1e7045;--domain-cat-text:#1a5e3a;--domain-chip:#1e7045/);
+  assert.match(html, /--high:#c62828;--high-bg:#fdecea;--mid:#ef6c00;--mid-bg:#fff3e0;--low:#2e7d32;--low-bg:#e8f5e9/);
+  assert.match(html, /--importance-color:#c62828;--importance-bg:#fdecea;--importance-text:#c62828/);
+  assert.match(html, /--importance-color:#ef6c00;--importance-bg:#fff3e0;--importance-text:#8a4b00/);
+  assert.match(html, /PART 1/);
+  assert.match(html, /① 관세 동향/);
+  assert.match(html, /② 수출통제 동향/);
+  assert.match(html, /③ 무역구제 동향/);
   assert.ok(html.indexOf('>관세<') < html.indexOf('>수출통제<'));
   assert.ok(html.indexOf('>수출통제<') < html.indexOf('>무역구제<'));
   assert.match(html, /target="_blank" rel="noopener noreferrer"/);
@@ -46,6 +61,14 @@ test('HTML은 자체 포함 CSS와 세 영역을 가지며 외부 리소스와 �
   assert.match(html, /발표시각이 확인된 항목은 정확한 시각/);
   assert.match(html, /<span class="sr-only">\(새 창\)<\/span>/);
   assert.doesNotMatch(html, /정상적으로 완료/);
+});
+
+test('중요도 하 카드도 원본 녹색 팔레트와 좌측 강조선을 사용한다', async () => {
+  const payload = await mockPayload();
+  payload.results.customs.categories.북미[0].importance = '하';
+  const html = renderMonitoringHtml(payload);
+  assert.match(html, /--importance-color:#2e7d32;--importance-bg:#e8f5e9;--importance-text:#2e7d32/);
+  assert.match(html, /border-left:5px solid var\(--importance-color\)/);
 });
 
 test('단일 카테고리 HTML은 선택 범위만 표시하고 미선택 17개를 숨긴다', async () => {
@@ -62,6 +85,12 @@ test('단일 카테고리 HTML은 선택 범위만 표시하고 미선택 17개�
   assert.match(html, /선택 조사 · 수출통제 \/ 미국/);
   assert.match(html, /요청한 1개 카테고리의 Claude Code 다각도 심층 검색 결과/);
   assert.match(html, /카테고리 1\/1 · 웹 검색 6회 성공/);
+  assert.match(html, /--domain-band:#7a1f1f/);
+  assert.doesNotMatch(html, /--domain-band:#13335f/);
+  assert.doesNotMatch(html, /--domain-band:#1b5e3b/);
+  assert.match(html, /PART 1/);
+  assert.match(html, /① 수출통제 동향/);
+  assert.doesNotMatch(html, /PART 2/);
   assert.match(html, />미국</);
   assert.doesNotMatch(html, />한국</);
   assert.doesNotMatch(html, />북미</);

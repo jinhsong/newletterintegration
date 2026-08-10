@@ -1,6 +1,29 @@
 import net from 'node:net';
 import { domains } from './config.mjs';
 
+const DOMAIN_CIRCLED = ['①', '②', '③', '④', '⑤'];
+const IMPORTANCE_PALETTE = Object.freeze({
+  상: Object.freeze({ color: '#c62828', background: '#fdecea', text: '#c62828' }),
+  중: Object.freeze({ color: '#ef6c00', background: '#fff3e0', text: '#8a4b00' }),
+  하: Object.freeze({ color: '#2e7d32', background: '#e8f5e9', text: '#2e7d32' }),
+});
+
+function domainPaletteStyle(domain) {
+  const palette = domain.palette || {};
+  const band = palette.band || domain.color || '#526073';
+  const catBg = palette.catBg || domain.softColor || '#f1f3f6';
+  const catBorder = palette.catBorder || domain.color || '#526073';
+  const catText = palette.catText || domain.color || '#384860';
+  const chip = palette.chip || domain.color || '#526073';
+  return [
+    `--domain-band:${band}`,
+    `--domain-cat-bg:${catBg}`,
+    `--domain-cat-border:${catBorder}`,
+    `--domain-cat-text:${catText}`,
+    `--domain-chip:${chip}`,
+  ].join(';');
+}
+
 function visibleDomains(payload) {
   const requested = payload?.collection?.requestedCategoryIds;
   if (!Array.isArray(requested)) return domains;
@@ -86,13 +109,14 @@ function sourceLink(item) {
   return `<div class="source-block"><a class="source" href="${escapeHtml(item.sourceUrl)}" target="_blank" rel="noopener noreferrer"><span class="source-name">${escapeHtml(sourceName)}</span><span class="source-host">${escapeHtml(hostname)}</span><span class="source-action">원문 열기 <span aria-hidden="true">↗</span><span class="sr-only">(새 창)</span></span></a><span class="source-verification verification-${verification.kind}">${verification.label}</span></div>`;
 }
 
-function itemCard(item, { compact = false, headingLevel = 4 } = {}) {
+function itemCard(item, { unit = null, headingLevel = 4 } = {}) {
   const headingTag = headingLevel === 3 ? 'h3' : 'h4';
+  const importance = IMPORTANCE_PALETTE[item.importance]
+    || { color: '#90a4ae', background: '#eceff1', text: '#526073' };
+  const categoryLabel = item.measureType || item.issuingCountry || unit?.label || '';
   const meta = [
     metaItem('발표', dateLabel(item.announcedDate)),
     metaItem('발표시각', item.announcedAt),
-    metaItem('시행', dateLabel(item.effectiveDate)),
-    metaItem('조치', item.measureType),
     metaItem('발표국·기구', item.issuingCountry),
     metaItem('대상', item.targetCountries),
     metaItem('기관', item.agency),
@@ -100,9 +124,13 @@ function itemCard(item, { compact = false, headingLevel = 4 } = {}) {
   ].filter(Boolean).join('');
 
   return `
-    <article class="item-card${compact ? ' compact' : ''}">
+    <article class="item-card" style="--importance-color:${importance.color};--importance-bg:${importance.background};--importance-text:${importance.text}">
+      <div class="item-badges">
+        <span class="importance">${escapeHtml(item.importance)}</span>
+        ${categoryLabel ? `<span class="domain-chip">${escapeHtml(categoryLabel)}</span>` : ''}
+        ${item.effectiveDate ? `<span class="effective-chip">시행 ${escapeHtml(dateLabel(item.effectiveDate))}</span>` : ''}
+      </div>
       <div class="item-heading">
-        <span class="importance importance-${escapeHtml(item.importance)}">${escapeHtml(item.importance)}</span>
         <${headingTag}>${escapeHtml(item.title)}</${headingTag}>
       </div>
       ${item.titleEn ? `<p class="title-en">${escapeHtml(item.titleEn)}</p>` : ''}
@@ -198,37 +226,38 @@ function domainState(domain, payload, result) {
   return { label: '상태 정보 없음', detail: '구버전 결과', kind: 'unknown' };
 }
 
-function domainSection(domain, payload) {
+function domainSection(domain, payload, domainIndex) {
   const result = payload.results?.[domain.key] || { categories: {} };
   const domainStats = payload.stats?.byDomain?.[domain.key] || { total: 0 };
   const failure = failureForDomain(payload, domain.key);
   const state = domainState(domain, payload, result);
   const categorySections = domain.units.map((unit) => {
     const items = result.categories?.[unit.key] || [];
+    const highCount = items.filter((item) => item.importance === '상').length;
     const category = categoryState(result, unit.key, failure);
     const categoryInsight = result.categoryInsights?.[unit.key] || '';
     return `
       <section class="category">
         <div class="category-heading">
-          <h3>${escapeHtml(unit.label)}</h3>
-          <div class="category-meta"><span>${items.length}건</span><span class="state-chip state-${escapeHtml(category.status)}">${categoryStateLabel(category, items.length)}</span></div>
+          <div class="category-title"><h3>${escapeHtml(unit.label)}</h3><div class="category-meta"><span>${items.length}건${highCount > 0 ? ` · 상 ${highCount}` : ''}</span><span class="state-chip state-${escapeHtml(category.status)}">${categoryStateLabel(category, items.length)}</span></div></div>
+          ${unit.description ? `<p class="category-description">${escapeHtml(unit.description)}</p>` : ''}
         </div>
         ${categoryInsight ? `<div class="category-insight"><b>카테고리 요약</b><p>${escapeHtml(categoryInsight)}</p></div>` : ''}
         ${items.length > 0
-    ? `<div class="items">${items.map((item) => itemCard(item)).join('')}</div>`
+    ? `<div class="items">${items.map((item) => itemCard(item, { unit })).join('')}</div>`
     : emptyCategoryMessage(category)}
       </section>`;
   }).join('');
 
   return `
-    <section class="domain" id="domain-${escapeHtml(domain.key)}" style="--domain:${domain.color};--domain-soft:${domain.softColor}">
+    <section class="domain" id="domain-${escapeHtml(domain.key)}" style="${domainPaletteStyle(domain)}">
       <div class="domain-heading">
         <div>
-          <p class="eyebrow">MONITORING AREA</p>
-          <h2>${escapeHtml(domain.label)}</h2>
+          <p class="domain-part">PART ${domainIndex + 1}</p>
+          <h2>${DOMAIN_CIRCLED[domainIndex] || ''} ${escapeHtml(domain.label)} 동향</h2>
           <p class="domain-state state-${state.kind}"><b>${state.label}</b><span>${escapeHtml(state.detail)}</span></p>
         </div>
-        <div class="domain-count"><strong>${domainStats.total}</strong><span>건</span></div>
+        <div class="domain-count"><strong>${domainStats.total}</strong><span>건</span>${domainStats.high > 0 ? `<small>중요 상 ${domainStats.high}건</small>` : ''}</div>
       </div>
       ${result.insight
     ? `<div class="insight"><b>핵심 흐름</b><p>${escapeHtml(result.insight)}</p></div>`
@@ -341,23 +370,27 @@ function highPriority(payload) {
   return `
     <section class="priority">
       <div class="section-title">
-        <div><p class="eyebrow">EXECUTIVE WATCH</p><h2>우선 검토할 동향</h2><p class="section-help">영역별 최신 항목을 우선 포함한 뒤 발표일 최신순으로 표시합니다.</p></div>
+        <div><h2>오늘의 하이라이트 · 중요도 상 ${items.length}건</h2><p class="section-help">영역별 최신 항목을 우선 포함한 뒤 발표일 최신순으로 표시합니다.</p></div>
         <span>${selected.length}/${items.length}건 표시</span>
       </div>
       <div class="priority-grid">
         ${selected.map(({ domain, unit, item }) => `
-          <div class="priority-wrap" style="--domain:${domain.color}">
-            <p class="priority-label">${escapeHtml(domain.label)} · ${escapeHtml(unit.label)}</p>
-            ${itemCard(item, { compact: true, headingLevel: 3 })}
-          </div>`).join('')}
+          <article class="priority-wrap" style="${domainPaletteStyle(domain)}">
+            <span class="priority-label">${escapeHtml(domain.label)}</span>
+            <div class="priority-content">
+              <h3>${escapeHtml(item.title)}</h3>
+              <p>${escapeHtml(unit.label)}${item.announcedDate ? ` · ${escapeHtml(dateLabel(item.announcedDate))}` : ''}</p>
+              <div class="priority-source">${sourceLink(item)}</div>
+            </div>
+          </article>`).join('')}
       </div>
     </section>`;
 }
 
 export function renderMonitoringHtml(payload) {
   const requestedDomains = visibleDomains(payload);
-  const nav = requestedDomains.map((domain) => (
-    `<a href="#domain-${escapeHtml(domain.key)}" style="--domain:${domain.color}">${escapeHtml(domain.label)} <b>${payload.stats?.byDomain?.[domain.key]?.total ?? 0}</b></a>`
+  const nav = requestedDomains.map((domain, index) => (
+    `<a href="#domain-${escapeHtml(domain.key)}" style="${domainPaletteStyle(domain)}">${DOMAIN_CIRCLED[index] || ''} ${escapeHtml(domain.label)} <b>${payload.stats?.byDomain?.[domain.key]?.total ?? 0}</b></a>`
   )).join('');
   const selection = payload.collection?.selection;
   const heroSubtitle = selection
@@ -371,21 +404,19 @@ export function renderMonitoringHtml(payload) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>글로벌 통상 모니터링 ${escapeHtml(payload.context.toISO)}</title>
   <style>
-    :root{color-scheme:light;--ink:#172033;--muted:#64748b;--line:#dce3ec;--paper:#fff;--canvas:#f3f6fa;--navy:#10233f;--high:#c62828;--mid:#b45309;--low:#347052}
-    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--canvas);color:var(--ink);font-family:"Malgun Gothic","맑은 고딕","Apple SD Gothic Neo",Arial,sans-serif;line-height:1.6}.sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
-    a{color:inherit}.shell{max-width:1120px;margin:0 auto;padding:32px 20px 64px}.hero{overflow:hidden;background:linear-gradient(135deg,#0c1d35,#183b68 70%,#225a89);border-radius:24px;color:#fff;padding:42px;box-shadow:0 20px 50px rgba(15,35,63,.16)}
-    .hero-top{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}.hero .eyebrow{color:#9fd0ff}.eyebrow{margin:0 0 6px;font-size:11px;font-weight:800;letter-spacing:.14em}.hero h1{margin:0;font-size:36px;letter-spacing:-.05em;line-height:1.25}.hero-sub{margin:12px 0 0;color:#d6e6f7;font-size:15px}
-    .period{text-align:right;color:#d6e6f7;font-size:13px}.period b{display:block;color:#fff;font-size:15px}.period small{display:block;max-width:360px;margin-top:5px;color:#b9d0e7;font-size:11px;line-height:1.45}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:30px}.metric{padding:16px 18px;border:1px solid rgba(255,255,255,.18);border-radius:15px;background:rgba(255,255,255,.08)}.metric strong{display:block;font-size:28px;line-height:1.1}.metric span{font-size:12px;color:#c8daed}
-    .status{display:flex;gap:12px;align-items:flex-start;margin:18px 0;padding:15px 18px;border-radius:13px;font-size:14px}.status b{white-space:nowrap}.status span{color:#42526a}.status-ok{background:#eaf8ef;border:1px solid #b9e3c7}.status-mock{background:#fdecec;border:2px solid #d85b5b}.status-mock b{color:#8e2020}.status-warn{display:block;background:#fff7e6;border:1px solid #f3ce81}.status-warn span{margin-left:10px}.status ul{margin:8px 0 0 20px}.status code{margin:0 5px;padding:2px 5px;background:#fff;border-radius:4px}.research-notice{display:flex;gap:12px;align-items:flex-start;margin:18px 0;padding:15px 18px;border:1px solid #b9c9dd;border-radius:13px;background:#eef5fc;font-size:13px}.research-notice b{flex:0 0 auto;color:#153e6f}.research-notice span{color:#42526a}
-    .quick-nav{display:flex;gap:9px;flex-wrap:wrap;margin:18px 0 26px}.quick-nav a{text-decoration:none;background:#fff;border:1px solid var(--line);border-top:3px solid var(--domain);border-radius:10px;padding:9px 14px;font-size:13px}.quick-nav b{margin-left:5px}
-    .priority,.domain{background:var(--paper);border:1px solid var(--line);border-radius:20px;padding:26px;margin-top:22px;box-shadow:0 7px 22px rgba(15,35,63,.05)}.section-title,.domain-heading,.category-heading,.item-heading{display:flex;justify-content:space-between;gap:16px;align-items:center}.section-title h2,.domain-heading h2{margin:0;letter-spacing:-.04em}.section-title>span{background:#fdecec;color:var(--high);font-weight:800;padding:5px 10px;border-radius:999px}.section-help{margin:4px 0 0;color:var(--muted);font-size:12px}
-    .priority-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:18px}.priority-wrap{border-top:3px solid var(--domain);border-radius:13px;background:#fafbfd;padding:13px}.priority-label{margin:0 0 8px;color:var(--domain);font-size:12px;font-weight:800}.priority-wrap .item-card{border:0;padding:0;background:transparent}
-    .domain{border-top:6px solid var(--domain)}.domain .eyebrow{color:var(--domain)}.domain-state{display:flex;gap:8px;align-items:center;margin:7px 0 0;font-size:12px}.domain-state b{padding:2px 7px;border-radius:999px}.domain-state span{color:var(--muted)}.domain-state.state-ok b{background:#e7f6ec;color:#24623a}.domain-state.state-warn b{background:#fff0cf;color:#7b5200}.domain-state.state-unknown b{background:#eef1f5;color:#526073}.domain-count{display:flex;align-items:baseline;gap:4px;color:var(--domain)}.domain-count strong{font-size:32px}.domain-count span{font-size:13px}.insight,.category-insight{margin:18px 0 24px;padding:17px 19px;border-left:4px solid var(--domain);background:var(--domain-soft);border-radius:0 12px 12px 0}.insight b,.category-insight b{color:var(--domain)}.insight p,.category-insight p{margin:4px 0 0}.category-insight{margin:12px 0 0;padding:12px 15px;font-size:13px}
-    .category{margin-top:27px}.category-heading{padding-bottom:9px;border-bottom:2px solid var(--domain-soft)}.category-heading h3{margin:0;font-size:17px}.category-meta{display:flex;gap:7px;align-items:center}.category-heading span{color:var(--muted);font-size:12px}.category-heading .state-chip{padding:2px 7px;border-radius:999px;background:#eef1f5}.category-heading .state-success,.category-heading .state-empty{background:#e7f6ec;color:#24623a}.category-heading .state-failure{background:#fff0cf;color:#7b5200}.items{display:grid;gap:12px;margin-top:12px}.item-card{border:1px solid var(--line);border-radius:14px;padding:18px;background:#fff}.item-heading{justify-content:flex-start;align-items:flex-start}.item-heading h3,.item-heading h4{margin:0;font-size:17px;letter-spacing:-.025em}.importance{flex:0 0 auto;display:inline-grid;place-items:center;width:28px;height:25px;border-radius:7px;font-size:12px;font-weight:900;color:#fff}.importance-상{background:var(--high)}.importance-중{background:var(--mid)}.importance-하{background:var(--low)}
-    .title-en{margin:4px 0 0 40px;color:var(--muted);font-size:12px}.meta{display:flex;flex-wrap:wrap;gap:5px 15px;margin:11px 0 0;padding:9px 11px;border-radius:9px;background:#f6f8fb;color:#5b687b;font-size:12px}.meta b{color:#344258;margin-right:3px}.summary{margin:12px 0 0}.impact,.reason,.notes{margin:10px 0 0;padding:10px 12px;border-radius:9px;font-size:13px}.impact{background:#fff8e8;color:#5e4a1f}.reason{background:#fdf2f2;color:#6c3434}.notes{background:#f6f8fb;color:#536074}.impact b,.reason b,.notes b{margin-right:7px}.source-row{margin-top:12px}.source-block{display:flex;gap:7px 12px;align-items:center;flex-wrap:wrap}.source{display:inline-flex;gap:7px;align-items:center;flex-wrap:wrap;font-size:12px;font-weight:700;color:#1d5fa7;text-decoration:none}.source:hover .source-action{text-decoration:underline}.source-host{padding:1px 6px;border-radius:5px;background:#edf2f7;color:#526073;font-weight:500}.source-verification{padding:2px 7px;border-radius:999px;background:#fff4da;color:#735200;font-size:11px}.verification-grounded{background:#e7f6ec;color:#24623a}.verification-missing{background:#fdecec;color:#8e2f2f}.verification-unknown{background:#eef1f5;color:#526073}.source-muted{color:var(--muted);font-weight:400}.empty-category{margin:11px 0 0;padding:13px;background:#f8fafc;border-radius:10px;color:var(--muted);font-size:13px}.empty-failed{background:#fff7e6;color:#785700}.empty-failed b{margin-right:5px}.empty-unknown{background:#f1f3f6;color:#526073}
-    .footer{text-align:center;margin-top:28px;color:var(--muted);font-size:12px}.footer b{color:#384860}
-    @media(max-width:720px){.shell{padding:14px 10px 40px}.hero{padding:26px 22px;border-radius:18px}.hero-top{display:block}.hero h1{font-size:28px}.period{text-align:left;margin-top:18px}.metrics{grid-template-columns:1fr}.priority,.domain{padding:19px;border-radius:16px}.priority-grid{grid-template-columns:1fr}.status,.research-notice{display:block}.status span,.research-notice span{display:block;margin:3px 0 0}.title-en{margin-left:0}.domain-heading{align-items:flex-end}.domain-state{display:block}.category-heading{align-items:flex-start}.category-meta{justify-content:flex-end;flex-wrap:wrap}}
-    @media print{body{background:#fff}.shell{max-width:none;padding:0}.hero,.priority,.domain{box-shadow:none;break-inside:avoid}.quick-nav{display:none}.item-card{break-inside:avoid}}
+    :root{color-scheme:light;--ink:#1a2a4a;--body:#46566a;--muted:#7c8b9a;--line:#dde1e7;--paper:#fff;--canvas:#eef1f5;--navy:#0d1b30;--gold:#ffd54f;--high:#c62828;--high-bg:#fdecea;--mid:#ef6c00;--mid-bg:#fff3e0;--low:#2e7d32;--low-bg:#e8f5e9}
+    *{box-sizing:border-box}html{scroll-behavior:smooth;background:var(--canvas)}body{margin:0;padding:16px 8px;background:var(--canvas);color:var(--ink);font-family:"Malgun Gothic","맑은 고딕","Apple SD Gothic Neo",Arial,sans-serif;line-height:1.6;overflow-wrap:anywhere}.sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+    a{color:inherit}a:focus-visible{outline:3px solid var(--gold);outline-offset:3px}.shell{width:100%;max-width:680px;margin:0 auto;background:var(--paper);border:1px solid var(--line)}.hero{background:var(--navy);color:#fff;padding:26px 28px}
+    .hero-top{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}.hero .eyebrow{color:#9fb4d0}.eyebrow{margin:0 0 4px;font-size:10px;font-weight:800;letter-spacing:.12em}.hero h1{margin:0;font-size:21px;letter-spacing:-.035em;line-height:1.4}.hero-sub{margin:5px 0 0;color:#9fb4d0;font-size:12px}.period{text-align:right;color:#9fb4d0;font-size:11px}.period b{display:block;color:#fff;font-size:13px}.period small{display:block;max-width:310px;margin-top:3px;color:#7088a8;font-size:10px;line-height:1.45}.quick-nav{display:flex;gap:4px 6px;flex-wrap:wrap;margin-top:14px}.quick-nav a{display:inline-block;padding:4px 11px;border-radius:14px;background:var(--domain-band);color:#fff;font-size:12px;white-space:nowrap;text-decoration:none}.quick-nav b{margin-left:4px}.hero-summary{margin:10px 0 0;color:var(--gold);font-size:12px}.hero-summary b{font-size:13px}
+    .status,.research-notice{display:flex;gap:10px;align-items:flex-start;margin:0;padding:10px 28px;border:0;border-top:3px solid;font-size:12px;line-height:1.6}.status b,.research-notice>b{flex:0 0 auto;white-space:nowrap}.status span,.research-notice span{color:inherit}.status-ok{background:#eaf6ee;border-color:#2e8b57;color:#22643c}.status-mock{background:#fdecea;border-color:#c62828;color:#9c2a20}.status-warn{display:block;background:#fff3e0;border-color:#ef6c00;color:#8a5300}.status-warn span{margin-left:8px}.status ul{margin:6px 0 0 18px;padding:0}.status code{margin:0 4px;padding:1px 4px;background:rgba(255,255,255,.75);border-radius:3px}.research-notice{background:#eef5fc;border-color:#1a4d8f;color:#315577}.research-notice>b{color:#15406f}
+    .priority{margin:0;padding:16px 28px 18px;background:#fff8f8;border-top:3px solid var(--high);border-bottom:1px solid #f0d8d8}.section-title{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.section-title h2{margin:0;color:var(--high);font-size:13px;letter-spacing:-.02em}.section-title>span{flex:0 0 auto;padding:2px 7px;border-radius:3px;background:var(--high-bg);color:var(--high);font-size:11px;font-weight:800}.section-help{margin:3px 0 0;color:var(--muted);font-size:11px}.priority-grid{display:grid;gap:7px;margin-top:8px}.priority-wrap{display:flex;gap:8px;align-items:flex-start}.priority-label{flex:0 0 auto;display:inline-block;margin-top:2px;padding:1px 7px;border-radius:3px;background:var(--domain-chip);color:#fff;font-size:11px;font-weight:800;white-space:nowrap}.priority-content{min-width:0}.priority-content h3{margin:0;color:var(--ink);font-size:13px;line-height:1.6}.priority-content>p{margin:0;color:#9aa7b4;font-size:11px}.priority-source{margin-top:2px}.priority-source .source{font-size:11px}.priority-source .source-verification{font-size:10px}
+    .domain{margin:0;border-top:18px solid var(--canvas);background:#fff}.domain-heading{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:18px 28px;background:var(--domain-band);border-left:8px solid var(--gold);color:#fff}.domain-part{margin:0;color:var(--gold);font-size:11px;font-weight:800;letter-spacing:.09em}.domain-heading h2{margin:2px 0 0;color:#fff;font-size:20px;letter-spacing:-.03em;line-height:1.3}.domain-state{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:7px 0 0;font-size:11px}.domain-state b{padding:1px 6px;border-radius:3px;background:rgba(255,255,255,.94);color:#384860}.domain-state span{color:#dbe5ef}.domain-state.state-ok b{color:#24623a}.domain-state.state-warn b{color:#8a5300}.domain-state.state-unknown b{color:#526073}.domain-count{text-align:right;color:#fff;white-space:nowrap}.domain-count strong{font-size:18px}.domain-count>span{margin-left:2px;font-size:13px}.domain-count small{display:block;color:#ffd9d9;font-size:11px}.insight{margin:0;padding:14px 28px;background:var(--domain-cat-bg);border-bottom:1px solid var(--domain-cat-bg)}.insight b{color:var(--domain-cat-text);font-size:12px}.insight p{margin:5px 0 0;color:#3a4a5a;font-size:13px;line-height:1.8}
+    .category{margin:0}.category-heading{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:9px 28px 9px 24px;background:var(--domain-cat-bg);border-left:4px solid var(--domain-cat-border)}.category-title{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}.category-heading h3{margin:0;color:var(--domain-cat-text);font-size:13px;white-space:nowrap}.category-meta{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.category-meta>span{color:#7c8b9a;font-size:11px}.category-meta .state-chip{padding:1px 6px;border-radius:3px;background:#eef1f5}.category-meta .state-success,.category-meta .state-empty{background:#e7f6ec;color:#24623a}.category-meta .state-failure{background:#fff0cf;color:#7b5200}.category-description{max-width:52%;margin:0;color:#9aa7b4;font-size:10px;line-height:1.5;text-align:right}.category-insight{margin:0;padding:9px 28px;background:#fbfcfe;border-bottom:1px solid #eef1f5;font-size:12px;color:#4a5a6a}.category-insight b{color:var(--domain-cat-text)}.category-insight p{display:inline;margin:0 0 0 7px;line-height:1.7}.items{display:block;margin:0;padding:4px 20px 14px}.item-card{margin-top:12px;padding:12px 16px;border:1px solid #e2e8f0;border-left:5px solid var(--importance-color);border-radius:0;background:#fff}.item-badges{display:flex;gap:5px;align-items:center;flex-wrap:wrap}.importance,.domain-chip,.effective-chip{display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:800;line-height:1.5}.importance{border:1px solid var(--importance-color);background:var(--importance-bg);color:var(--importance-text)}.domain-chip{background:var(--domain-chip);color:#fff}.effective-chip{border:1px solid #8fcccc;background:#e0f3f3;color:#0b6e6e}.item-heading{margin-top:9px}.item-heading h3,.item-heading h4{margin:0;color:var(--ink);font-size:14px;letter-spacing:-.02em;line-height:1.6}.title-en{margin:2px 0 0;color:#8a98a8;font-size:11px}.summary{margin:6px 0 0;color:var(--body);font-size:13px;line-height:1.75}.meta{display:flex;flex-wrap:wrap;gap:3px 13px;margin:10px 0 0;color:#7c8b9a;font-size:11px;line-height:1.9}.meta b{margin-right:3px;color:#9aa7b4;font-weight:400}.impact,.reason,.notes{margin:7px 0 0;padding-left:9px;border-left:2px solid #dde3ec;color:#667789;font-size:11px;line-height:1.7}.impact b,.reason b,.notes b{margin-right:6px;color:#46566a}.source-row{margin-top:9px}.source-block{display:flex;gap:5px 9px;align-items:center;flex-wrap:wrap}.source{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;color:#15418c;font-size:11px;font-weight:700;text-decoration:none}.source:hover .source-action{text-decoration:underline}.source-host{padding:1px 5px;border-radius:3px;background:#edf2f7;color:#526073;font-weight:500}.source-verification{padding:1px 6px;border-radius:3px;background:#fff4da;color:#735200;font-size:10px}.verification-grounded{background:#e7f6ec;color:#24623a}.verification-missing{background:#fdecec;color:#8e2f2f}.verification-unknown{background:#eef1f5;color:#526073}.source-muted{color:var(--muted);font-weight:400}.empty-category{margin:0;padding:9px 28px;border-bottom:1px solid #eef1f5;background:#fff;color:#9aa7b4;font-size:11px;font-style:italic}.empty-failed{background:#fff8ec;color:#a15c00;font-style:normal}.empty-failed b{margin-right:5px}.empty-unknown{background:#f6f8fa;color:#526073;font-style:normal}
+    .footer{margin:0;padding:14px 28px;border-top:1px solid #dde3ea;background:#f0f3f7;color:#7a8a9a;text-align:center;font-size:11px;line-height:1.7}.footer b{color:#384860}
+    @media(max-width:720px){body{padding:0}.shell{border:0}.hero{padding:22px 20px}.hero-top{display:block}.period{margin-top:14px;text-align:left}.period small{max-width:none}.status,.research-notice{display:block;padding:10px 20px}.status span,.research-notice span{display:block;margin:3px 0 0}.status-warn span{margin-left:0}.priority{padding:14px 20px 16px}.domain-heading{align-items:flex-end;padding:16px 20px;border-left-width:6px}.insight{padding:12px 20px}.category-heading{padding:9px 20px 9px 16px}.category-description{max-width:46%}.category-insight{padding:9px 20px}.items{padding:4px 12px 12px}.item-card{padding:11px 13px}.empty-category{padding:9px 20px}.footer{padding:13px 20px}}
+    @media(max-width:480px){.hero-top,.section-title,.category-heading{display:block}.section-title>span{display:inline-block;margin-top:5px}.category-description{max-width:none;margin-top:3px;text-align:left}.domain-state{display:block}.domain-state span{display:block;margin-top:3px}.source-block{align-items:flex-start}.priority-wrap{gap:6px}}
+    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+    @media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}html,body{background:#fff}body{padding:0}.shell{max-width:none;border:0}.hero{background:#fff;color:var(--ink);border-bottom:2px solid var(--navy)}.hero h1,.period b{color:var(--ink)}.hero .eyebrow,.hero-sub,.period,.period small{color:#526073}.quick-nav{display:none}.hero-summary{color:#7b5200}.domain{border-top:12px solid #fff}.domain-heading{background:#fff;color:var(--ink);border:2px solid var(--domain-band);border-left:8px solid var(--domain-band)}.domain-heading h2,.domain-count{color:var(--ink)}.domain-part,.domain-count small{color:var(--domain-cat-text)}.domain-state span{color:#526073}.priority{background:#fff}.item-card,.priority-wrap{break-inside:avoid}.category-heading{break-after:avoid}.footer{background:#fff}}
   </style>
 </head>
 <body>
@@ -399,18 +430,14 @@ export function renderMonitoringHtml(payload) {
         </div>
         <div class="period"><span>조사 기간</span><b>${escapeHtml(payload.context.fromStr)} ~ ${escapeHtml(payload.context.toStr)} KST</b>${payload.context.dateCoverageNote ? `<small>${escapeHtml(payload.context.dateCoverageNote)}</small>` : ''}</div>
       </div>
-      <div class="metrics">
-        <div class="metric"><strong>${payload.stats?.total ?? 0}</strong><span>HTML에 정리된 항목</span></div>
-        <div class="metric"><strong>${payload.stats?.high ?? 0}</strong><span>중요도 '상' 분류</span></div>
-        <div class="metric"><strong>${payload.collection?.completedDomains ?? 0}/${payload.collection?.totalDomains ?? requestedDomains.length}</strong><span>표시 가능한 영역</span></div>
-      </div>
+      <nav class="quick-nav" aria-label="영역 바로가기">${nav}</nav>
+      <p class="hero-summary">합계 <b>${payload.stats?.total ?? 0}건</b> · 중요도 상 ${payload.stats?.high ?? 0}건 · 표시 가능 영역 ${payload.collection?.completedDomains ?? 0}/${payload.collection?.totalDomains ?? requestedDomains.length}</p>
     </header>
     ${mockBanner(payload)}
     ${failureBanner(payload)}
     ${researchNotice(payload)}
-    <nav class="quick-nav" aria-label="영역 바로가기">${nav}</nav>
     ${highPriority(payload)}
-    ${requestedDomains.map((domain) => domainSection(domain, payload)).join('')}
+    ${requestedDomains.map((domain, index) => domainSection(domain, payload, index)).join('')}
     <footer class="footer"><b>AI 예비 조사 · 원문 수동 확인 필수</b> · PC 로컬 HTML · 생성 ${escapeHtml(generatedLabel(payload.createdAt))} KST · 외부 저장 및 메일 발송 없음</footer>
   </main>
 </body>
