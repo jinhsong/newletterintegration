@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import test from 'node:test';
 import {
+  __stopProcessTreeForTest,
   ClaudeCliError,
   callClaudeCli,
   createProcessCleanupError,
@@ -14,8 +17,10 @@ import {
   preflightClaudeCli,
   preflightTimeoutMs,
   resolveForcedStopError,
+  resolveWindowsSystemExecutable,
   retryMax,
   searchQueryFingerprint,
+  sensitiveEnvironmentVariableNames,
   stopAllClaudeProcesses,
   totalTimeoutMs,
 } from '../src/claude-client.mjs';
@@ -41,7 +46,7 @@ const REQUIRED_RESEARCH_ARGS = [
   '--output-format', 'stream-json',
   '--verbose',
   '--include-hook-events',
-  '--max-turns', '20',
+  '--max-turns', '32',
   '-p', FIXED_PROMPT,
 ];
 
@@ -156,7 +161,18 @@ await fs.writeFile(new URL('./invocation.json', import.meta.url), JSON.stringify
 
 const versionCall = args.length === 1 && args[0] === '--version';
 const selected = versionCall ? (behavior.version || {}) : (behavior.research || behavior);
-if (selected.delayMs) await new Promise((resolve) => setTimeout(resolve, selected.delayMs));
+if (selected.delayMs) {
+  const stopFile = new URL('./stop-requested', import.meta.url);
+  const deadline = Date.now() + selected.delayMs;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(stopFile);
+      await fs.writeFile(new URL('./stop-acknowledged', import.meta.url), '', 'utf8');
+      process.exit(0);
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+  }
+}
 if (selected.stdoutRaw !== undefined) process.stdout.write(selected.stdoutRaw);
 for (const event of selected.events || []) process.stdout.write(JSON.stringify(event) + '\\n');
 if (selected.versionText !== undefined) process.stdout.write(String(selected.versionText) + '\\n');
@@ -177,10 +193,15 @@ async function withFakeClaude(behavior, worker, options = {}) {
   const driver = path.join(binDirectory, 'fake-claude.mjs');
   const runtime = path.join(binDirectory, 'node.exe');
   const invocation = path.join(binDirectory, 'invocation.json');
+  const stopFile = path.join(binDirectory, 'stop-requested');
+  const stopAcknowledgedFile = path.join(binDirectory, 'stop-acknowledged');
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') || 'Path';
   const originalPath = process.env[pathKey];
   const originalBin = process.env.CLAUDE_CLI_BIN;
   const originalModel = process.env.CLAUDE_CLI_MODEL;
+  const canStillBeDelayed = Boolean(
+    behavior?.delayMs || behavior?.research?.delayMs || behavior?.version?.delayMs,
+  );
   try {
     await fs.writeFile(driver, fakeDriverSource(behavior), 'utf8');
     await fs.link(process.execPath, runtime);
@@ -196,14 +217,41 @@ async function withFakeClaude(behavior, worker, options = {}) {
     else delete process.env.CLAUDE_CLI_MODEL;
     return await worker({ directory, rootDirectory, command, invocation });
   } finally {
+    // A restricted enterprise endpoint can deny taskkill. The production code
+    // correctly fails closed for an opaque .cmd wrapper; ask this test-only
+    // fake driver to exit cooperatively so no descendant can leak into another
+    // test or keep its temporary working directory locked.
+    try { await fs.writeFile(stopFile, '', 'utf8'); } catch {}
+    if (canStillBeDelayed) {
+      const stopDeadline = Date.now() + 750;
+      while (Date.now() < stopDeadline) {
+        try {
+          await fs.access(stopAcknowledgedFile);
+          break;
+        } catch {}
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
     await stopAllClaudeProcesses();
     process.env[pathKey] = originalPath;
     if (originalBin === undefined) delete process.env.CLAUDE_CLI_BIN;
     else process.env.CLAUDE_CLI_BIN = originalBin;
     if (originalModel === undefined) delete process.env.CLAUDE_CLI_MODEL;
     else process.env.CLAUDE_CLI_MODEL = originalModel;
-    await fs.rm(rootDirectory, { recursive: true, force: true });
+    await fs.rm(rootDirectory, {
+      recursive: true,
+      force: true,
+      maxRetries: 40,
+      retryDelay: 50,
+    });
   }
+}
+
+function matchesForcedStopError(error, expectedCode) {
+  if (error?.code === expectedCode) return true;
+  return error?.code === 'PROCESS_CLEANUP'
+    && String(error.details || '').includes(`원래 오류 (${expectedCode}):`)
+    && /\.cmd\/\.bat 래퍼/.test(String(error.details || ''));
 }
 
 async function readInvocation(file) {
@@ -331,16 +379,19 @@ test('stream-json 심층 검색 검증도 장식만 바꾼 query를 중복으로
         query,
         ...(official ? { allowed_domains: ['agency.gov'] } : {}),
       }));
+      const resultUrl = official
+        ? `https://agency.gov/fingerprint-${index + 1}`
+        : `https://example.com/fingerprint-${index + 1}`;
       events.push(userToolResult(id, {
         query,
-        content: `https://example.com/fingerprint-${index + 1}`,
+        content: resultUrl,
         structuredResult: {
           query,
           results: [{
             tool_use_id: id,
             content: [{
               title: '검색 결과',
-              url: `https://example.com/fingerprint-${index + 1}`,
+              url: resultUrl,
             }],
           }],
           searchCount: 1,
@@ -382,6 +433,332 @@ test('stream-json 심층 검색 검증도 장식만 바꾼 query를 중복으로
   );
 });
 
+test('근거 URL은 실제 structured results의 URL 필드만 검색별로 보존한다', () => {
+  const id = 'structured-grounding';
+  const events = [
+    initEvent(),
+    assistantToolUse(id, 'WebSearch', {
+      query: 'official evidence query https://query-injection.example.net/not-evidence',
+    }),
+    userToolResult(id, {
+      content: '본문에만 있는 URL https://content-injection.example.net/not-evidence',
+      structuredResult: {
+        query: 'official evidence query https://query-injection.example.net/not-evidence',
+        metadata: { url: 'https://metadata-injection.example.net/not-evidence' },
+        results: [{
+          title: '실제 결과',
+          url: 'https://agency.gov/real-rule#section',
+          metadata: { url: 'https://nested-metadata.example.net/not-evidence' },
+          content: [{
+            href: 'https://agency.gov/implementation',
+            snippet: '문자열 URL https://snippet-injection.example.net/not-evidence',
+            related: [{ url: 'https://related-injection.example.net/not-evidence' }],
+          }],
+        }],
+        searchCount: 1,
+      },
+    }),
+    successResult(),
+  ];
+  const parsed = parseClaudeStream(events.map((event) => JSON.stringify(event)).join('\n'));
+  assert.deepEqual(parsed.groundingUrls, [
+    'https://agency.gov/real-rule',
+    'https://agency.gov/implementation',
+  ]);
+  assert.deepEqual(parsed.groundingSearches, [{
+    toolUseId: id,
+    query: 'official evidence query https://query-injection.example.net/not-evidence',
+    mode: 'broad',
+    allowedDomains: [],
+    blockedDomains: [],
+    urls: [
+      'https://agency.gov/real-rule',
+      'https://agency.gov/implementation',
+    ],
+    officialUrls: [],
+  }]);
+});
+
+test('실제 결과 URL이 없거나 공식 allowed_domains와 불일치하면 검색 성공으로 세지 않는다', () => {
+  const streamFor = (input, structuredResult) => [
+    initEvent(),
+    assistantToolUse('evidence-check', 'WebSearch', input),
+    userToolResult('evidence-check', {
+      content: 'https://agency.gov/content-only',
+      structuredResult,
+    }),
+    successResult(),
+  ].map((event) => JSON.stringify(event)).join('\n');
+
+  assert.throws(
+    () => parseClaudeStream(streamFor(
+      { query: 'broad evidence query' },
+      {
+        query: 'broad evidence query',
+        results: [{ title: 'URL 없는 결과', snippet: 'https://agency.gov/snippet-only' }],
+        searchCount: 1,
+      },
+    )),
+    (error) => error.code === 'SEARCH_FAILED' && /실제 검색 결과/.test(error.details),
+  );
+
+  assert.throws(
+    () => parseClaudeStream(streamFor(
+      { query: 'official evidence query', allowed_domains: ['agency.gov'] },
+      {
+        query: 'official evidence query',
+        results: [{ title: '불일치 결과', url: 'https://news.example.com/report' }],
+        searchCount: 1,
+      },
+    ), { officialDomainAllowlist: ['agency.gov'] }),
+    (error) => error.code === 'SEARCH_FAILED' && /allowed_domains/.test(error.details),
+  );
+});
+
+test('blocked_domains 검색은 broad로 세지 않고 엄격 검색에서는 즉시 거부한다', () => {
+  const events = [
+    initEvent(),
+    assistantToolUse('blocked-search', 'WebSearch', {
+      query: 'filtered research query',
+      blocked_domains: ['blocked.example.com'],
+    }),
+    userToolResult('blocked-search', {
+      query: 'filtered research query',
+      structuredResult: {
+        query: 'filtered research query',
+        results: [{ title: '결과', url: 'https://agency.gov/result' }],
+        searchCount: 1,
+      },
+    }),
+    successResult(),
+  ];
+  const stream = events.map((event) => JSON.stringify(event)).join('\n');
+  const parsed = parseClaudeStream(stream);
+  assert.equal(parsed.toolEvidence.byName.WebSearch.broad, 0);
+  assert.equal(parsed.toolEvidence.byName.WebSearch.queries[0].mode, 'blocked');
+  assert.throws(
+    () => parseClaudeStream(stream, {
+      requireOfficialAndBroadSearch: true,
+      officialDomainAllowlist: ['agency.gov'],
+    }),
+    (error) => error.code === 'BAD_OUTPUT' && /blocked_domains/.test(error.message),
+  );
+});
+
+test('stream session_id 불일치와 허용 목록 밖 이벤트·subtype·content block을 거부한다', () => {
+  const mismatch = successfulSearchEvents();
+  mismatch[2].session_id = 'session-2';
+  assert.throws(
+    () => parseClaudeStream(mismatch.map((event) => JSON.stringify(event)).join('\n')),
+    (error) => error.code === 'SECURITY_POLICY' && /session_id/.test(error.message),
+  );
+
+  const finalMismatch = successfulSearchEvents({
+    resultOverrides: { session_id: 'session-final-mismatch' },
+  });
+  assert.throws(
+    () => parseClaudeStream(finalMismatch.map((event) => JSON.stringify(event)).join('\n')),
+    (error) => error.code === 'SECURITY_POLICY' && /session_id/.test(error.message),
+  );
+
+  for (const suspiciousEvent of [
+    { type: 'file_persist_event', path: 'report.txt', session_id: 'session-1' },
+    { type: 'telemetry_notice', state: 'active', session_id: 'session-1' },
+    { type: 'system', subtype: 'background_job_started', session_id: 'session-1' },
+    { type: 'system', subtype: 'status_update', session_id: 'session-1' },
+    { type: 'tool_invocation_delta', tool_name: 'Write', session_id: 'session-1' },
+    { type: 'filesPersisted', path: 'report.txt', session_id: 'session-1' },
+    { type: 'assistant', subtype: 'backgroundTaskStarted', session_id: 'session-1', message: { content: [] } },
+  ]) {
+    const events = successfulSearchEvents();
+    events.splice(-1, 0, suspiciousEvent);
+    assert.throws(
+      () => parseClaudeStream(events.map((event) => JSON.stringify(event)).join('\n')),
+      (error) => error.code === 'SECURITY_POLICY',
+    );
+  }
+
+  const suspiciousBlock = successfulSearchEvents();
+  suspiciousBlock[1].message.content.unshift({ type: 'file_write', path: 'report.txt' });
+  assert.throws(
+    () => parseClaudeStream(suspiciousBlock.map((event) => JSON.stringify(event)).join('\n')),
+    (error) => error.code === 'SECURITY_POLICY',
+  );
+
+  const unknownAssistantBlock = successfulSearchEvents();
+  unknownAssistantBlock[1].message.content.unshift({ type: 'citation', url: 'https://agency.gov/rule' });
+  assert.throws(
+    () => parseClaudeStream(unknownAssistantBlock.map((event) => JSON.stringify(event)).join('\n')),
+    (error) => error.code === 'SECURITY_POLICY' && /content block/.test(error.message),
+  );
+
+  const unknownUserBlock = successfulSearchEvents();
+  unknownUserBlock[2].message.content.unshift({ type: 'search_result', value: 'unexpected' });
+  assert.throws(
+    () => parseClaudeStream(unknownUserBlock.map((event) => JSON.stringify(event)).join('\n')),
+    (error) => error.code === 'SECURITY_POLICY' && /content block/.test(error.message),
+  );
+
+  const unknownResultSubtype = successfulSearchEvents({
+    resultOverrides: { subtype: 'success_with_unverified_side_effects' },
+  });
+  assert.throws(
+    () => parseClaudeStream(unknownResultSubtype.map((event) => JSON.stringify(event)).join('\n')),
+    (error) => error.code === 'SECURITY_POLICY' && /result subtype/.test(error.message),
+  );
+
+  for (const [field, value] of [
+    ['files_persisted', [{ path: 'report.txt' }]],
+    ['filesPersisted', [{ path: 'report.txt' }]],
+    ['fileChanges', [{ path: 'report.txt' }]],
+    ['backgroundTasks', [{ id: 'task-1' }]],
+    ['future_metadata', { active: true }],
+  ]) {
+    const persistedResult = successfulSearchEvents({
+      resultOverrides: { [field]: value },
+    });
+    assert.throws(
+      () => parseClaudeStream(persistedResult.map((event) => JSON.stringify(event)).join('\n')),
+      (error) => error.code === 'SECURITY_POLICY'
+        && /최종 result/.test(error.message)
+        && error.details.includes(field),
+    );
+  }
+
+  const currentOptionalMetadata = successfulSearchEvents({
+    resultOverrides: {
+      fast_mode_state: 'off',
+      origin: { kind: 'human' },
+      stop_reason: 'end_turn',
+      terminal_reason: 'completed',
+      ttft_ms: 12.5,
+    },
+  });
+  assert.doesNotThrow(
+    () => parseClaudeStream(currentOptionalMetadata.map((event) => JSON.stringify(event)).join('\n')),
+  );
+
+  for (const resultOverrides of [
+    { fast_mode_state: 'turbo' },
+    { ttft_ms: -1 },
+    { origin: { kind: 'task-notification' } },
+    { origin: { kind: 'human', server: 'unexpected' } },
+    { deferred_tool_use: { id: 'toolu-1', name: 'Write', input: {} } },
+    { stop_reason: 'tool_deferred' },
+    { terminal_reason: 'hook_stopped' },
+  ]) {
+    const unsafeMetadata = successfulSearchEvents({ resultOverrides });
+    assert.throws(
+      () => parseClaudeStream(unsafeMetadata.map((event) => JSON.stringify(event)).join('\n')),
+      (error) => ['BAD_OUTPUT', 'SECURITY_POLICY'].includes(error.code),
+    );
+  }
+});
+
+test('공식 rate_limit_event는 엄격히 검증하고 경고와 거부를 구분한다', () => {
+  const rateEvent = (status, overrides = {}) => {
+    const { rate_limit_info: infoOverrides = {}, ...eventOverrides } = overrides;
+    return {
+      type: 'rate_limit_event',
+      rate_limit_info: {
+        status,
+        resetsAt: 1_800_000_000,
+        utilization: 0.85,
+        ...infoOverrides,
+      },
+      uuid: 'rate-event-1',
+      session_id: 'session-1',
+      ...eventOverrides,
+    };
+  };
+
+  const warningEvents = successfulSearchEvents();
+  warningEvents.splice(1, 0, rateEvent('allowed_warning'));
+  const warningResult = parseClaudeStream(
+    warningEvents.map((event) => JSON.stringify(event)).join('\n'),
+  );
+  assert.match(warningResult.warnings.join('\n'), /사용량 제한 경고/);
+
+  const allowedEvents = successfulSearchEvents();
+  allowedEvents.splice(1, 0, rateEvent('allowed'));
+  assert.doesNotThrow(
+    () => parseClaudeStream(allowedEvents.map((event) => JSON.stringify(event)).join('\n')),
+  );
+
+  const rejectedEvents = successfulSearchEvents();
+  rejectedEvents.splice(1, 0, rateEvent('rejected'));
+  assert.throws(
+    () => parseClaudeStream(rejectedEvents.map((event) => JSON.stringify(event)).join('\n')),
+    (error) => error.code === 'RATE_LIMIT',
+  );
+
+  for (const invalidEvent of [
+    rateEvent('unknown'),
+    rateEvent('allowed', { rate_limit_info: { utilization: -1 } }),
+    rateEvent('allowed', { backgroundTask: true }),
+  ]) {
+    const events = successfulSearchEvents();
+    events.splice(1, 0, invalidEvent);
+    assert.throws(
+      () => parseClaudeStream(events.map((event) => JSON.stringify(event)).join('\n')),
+      (error) => ['BAD_OUTPUT', 'SECURITY_POLICY'].includes(error.code),
+    );
+  }
+});
+
+test('공개 URL과 도메인은 동일한 예약·비공개 suffix 정책을 적용한다', () => {
+  const badDomain = [
+    initEvent(),
+    assistantToolUse('bad-domain', 'WebSearch', {
+      query: 'reserved suffix query',
+      allowed_domains: ['agency.test'],
+    }),
+    successResult(),
+  ];
+  assert.throws(
+    () => parseClaudeStream(badDomain.map((event) => JSON.stringify(event)).join('\n')),
+    (error) => error.code === 'BAD_OUTPUT' && /공개 hostname/.test(error.message),
+  );
+
+  const badResult = [
+    initEvent(),
+    assistantToolUse('bad-result', 'WebSearch', { query: 'reserved result query' }),
+    userToolResult('bad-result', {
+      structuredResult: {
+        query: 'reserved result query',
+        results: [{ title: '예약 도메인', url: 'https://agency.test/rule' }],
+        searchCount: 1,
+      },
+    }),
+    successResult(),
+  ];
+  assert.throws(
+    () => parseClaudeStream(badResult.map((event) => JSON.stringify(event)).join('\n')),
+    (error) => error.code === 'SEARCH_FAILED' && /공개 HTTPS URL/.test(error.details),
+  );
+});
+
+test('민감 환경 진단은 변수 이름만 분류하고 값은 반환하지 않는다', () => {
+  const environment = {
+    ANTHROPIC_API_KEY: 'secret-api-value',
+    CLAUDE_CODE_OAUTH_TOKEN: 'secret-oauth-value',
+    ANTHROPIC_BASE_URL: 'https://enterprise.example.com',
+    HTTPS_PROXY: 'https://proxy.example.com',
+    NODE_EXTRA_CA_CERTS: 'C:\\corp\\ca.pem',
+    PATH: 'C:\\bin',
+  };
+  const names = sensitiveEnvironmentVariableNames(environment);
+  assert.deepEqual(names, [
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_BASE_URL',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'HTTPS_PROXY',
+    'NODE_EXTRA_CA_CERTS',
+  ]);
+  assert.equal(JSON.stringify(names).includes('secret-api-value'), false);
+  assert.equal(names.includes('PATH'), false);
+});
+
 test('프로세스 정리 실패 오류는 원래 오류와 정리 상태 및 PID를 보존한다', () => {
   const original = new ClaudeCliError('TIMEOUT', 'Claude 응답 제한 시간 초과', '원래 상세');
   const error = createProcessCleanupError(original, {
@@ -405,6 +782,33 @@ test('프로세스 정리 실패 오류는 원래 오류와 정리 상태 및 PI
     treeConfirmed: false,
     details: '트리 확인 실패',
   }, 4321).code, 'PROCESS_CLEANUP');
+});
+
+test('Windows native 실행 파일도 taskkill 거부 시 루트 종료만으로 트리 종료를 단정하지 않는다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const child = spawn(process.execPath, [
+    '-e',
+    'setInterval(() => {}, 1000)',
+  ], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  const startedAt = Date.now();
+  try {
+    const cleanup = await __stopProcessTreeForTest(child, process.execPath, {
+      code: 5,
+      details: 'ERROR: Access is denied.',
+    });
+    assert.equal(cleanup.closed, true);
+    assert.equal(cleanup.treeConfirmed, false);
+    assert.match(cleanup.details, /native CLI 루트 프로세스는 종료했지만 하위 프로세스 트리의 종료는 확인할 수 없/);
+    assert.ok(Date.now() - startedAt < 3000);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      try { child.kill('SIGKILL'); } catch {}
+    }
+  }
 });
 
 test('Windows stream-json 성공 응답에서 검색 증거와 근거 URL을 보존한다', {
@@ -525,14 +929,17 @@ test('카테고리 조사는 서로 다른 공식기관 3회와 일반 동향 3�
       query,
       ...(official ? { allowed_domains: [index === 0 ? 'Whitehouse.gov' : 'cbp.gov'] } : {}),
     }));
+    const resultUrl = official
+      ? `https://${index === 0 ? 'whitehouse.gov' : 'cbp.gov'}/result-${index + 1}`
+      : `https://example.com/result-${index + 1}`;
     events.push(userToolResult(id, {
       query,
-      content: `https://example.com/result-${index + 1}`,
+      content: resultUrl,
       structuredResult: {
         query,
         results: [{
           tool_use_id: id,
-          content: [{ title: '검색 결과', url: `https://example.com/result-${index + 1}` }],
+          content: [{ title: '검색 결과', url: resultUrl }],
         }],
         searchCount: 1,
       },
@@ -587,14 +994,17 @@ test('총 6회여도 공식 검색이 부족하거나 query가 중복되면 심�
         query,
         ...(official ? { allowed_domains: ['agency.gov'] } : {}),
       }));
+      const resultUrl = official
+        ? `https://agency.gov/deep-${index + 1}`
+        : `https://example.com/deep-${index + 1}`;
       events.push(userToolResult(id, {
         query,
-        content: `https://example.com/deep-${index + 1}`,
+        content: resultUrl,
         structuredResult: {
           query,
           results: [{
             tool_use_id: id,
-            content: [{ title: '검색 결과', url: `https://example.com/deep-${index + 1}` }],
+            content: [{ title: '검색 결과', url: resultUrl }],
           }],
           searchCount: 1,
         },
@@ -632,12 +1042,12 @@ test('동일 query 반복, 공식검색 누락, query 불일치와 잘못된 공
   skip: process.platform !== 'win32',
 }, async () => {
   const resultEvent = (id, query) => userToolResult(id, {
-    content: 'https://example.com/result',
+    content: 'https://agency.gov/result',
     structuredResult: {
       query,
       results: [{
         tool_use_id: id,
-        content: [{ title: '검색 결과', url: 'https://example.com/result' }],
+        content: [{ title: '검색 결과', url: 'https://agency.gov/result' }],
       }],
       searchCount: 1,
     },
@@ -1186,14 +1596,211 @@ test('사전 점검은 --version 하나로 Claude Code 버전을 확인한다', 
 }, async () => {
   await withFakeClaude({
     version: { versionText: '2.1.214 (Claude Code)' },
-  }, async ({ directory, invocation }) => {
+  }, async ({ directory, command, invocation }) => {
     const result = await preflightClaudeCli({ cwd: directory, timeoutMs: 5000 });
     assert.equal(result.version, '2.1.214');
     assert.equal(result.minimumVersion, '2.1.214');
+    assert.equal(
+      path.resolve(result.executablePath).toLocaleLowerCase('en-US'),
+      path.resolve(command).toLocaleLowerCase('en-US'),
+    );
+    assert.equal(Array.isArray(result.diagnostics.inheritedSensitiveEnvironmentNames), true);
+    assert.equal(Array.isArray(result.diagnostics.warnings), true);
+    assert.equal(typeof result.diagnostics.executableVerification, 'object');
+    assert.equal(result.diagnostics.executableVerification.absolutePathVerified, true);
+    assert.equal(
+      result.diagnostics.inheritedSensitiveEnvironmentNames.some((name) => name.includes('=')),
+      false,
+    );
     const observed = await readInvocation(invocation);
     assert.deepEqual(observed.args, ['--version']);
     assert.equal(observed.stdin, '');
   });
+});
+
+test('실행 파일 절대경로와 SHA-256 정책은 opt-in으로 검증한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const absoluteName = 'CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN';
+  const hashName = 'CLAUDE_CLI_ALLOWED_SHA256';
+  const originalAbsolute = process.env[absoluteName];
+  const originalHash = process.env[hashName];
+  try {
+    process.env[absoluteName] = '1';
+    delete process.env[hashName];
+    await withFakeClaude({ version: { versionText: '2.1.214' } }, async ({ directory }) => {
+      await assert.rejects(
+        () => preflightClaudeCli({ cwd: directory, timeoutMs: 5000 }),
+        (error) => error.code === 'CONFIG' && /절대경로/.test(error.message),
+      );
+    });
+
+    await withFakeClaude({ version: { versionText: '2.1.214' } }, async ({ directory, command }) => {
+      const wrapperHash = createHash('sha256').update(await fs.readFile(command)).digest('hex');
+      process.env[hashName] = wrapperHash.toUpperCase();
+      await assert.rejects(
+        () => preflightClaudeCli({ cwd: directory, timeoutMs: 5000 }),
+        (error) => error.code === 'SECURITY_POLICY'
+          && /native \.exe\/\.com/.test(error.message)
+          && /하위 Node\/JavaScript payload/.test(error.details),
+      );
+
+      process.env.CLAUDE_CLI_BIN = process.execPath;
+      const expected = createHash('sha256').update(await fs.readFile(process.execPath)).digest('hex');
+      process.env[hashName] = expected.toUpperCase();
+      const result = await preflightClaudeCli({ cwd: directory, timeoutMs: 5000 });
+      assert.deepEqual(result.diagnostics.executableVerification, {
+        absolutePathRequired: true,
+        absolutePathVerified: true,
+        sha256Required: true,
+        sha256Verified: true,
+      });
+
+      process.env[hashName] = '0'.repeat(64);
+      await assert.rejects(
+        () => preflightClaudeCli({ cwd: directory, timeoutMs: 5000 }),
+        (error) => error.code === 'SECURITY_POLICY' && /SHA-256/.test(error.message),
+      );
+      process.env[hashName] = 'invalid';
+      await assert.rejects(
+        () => preflightClaudeCli({ cwd: directory, timeoutMs: 5000 }),
+        (error) => error.code === 'CONFIG' && /64자리/.test(error.message),
+      );
+    }, { absoluteBin: true });
+  } finally {
+    if (originalAbsolute === undefined) delete process.env[absoluteName];
+    else process.env[absoluteName] = originalAbsolute;
+    if (originalHash === undefined) delete process.env[hashName];
+    else process.env[hashName] = originalHash;
+  }
+});
+
+test('Windows 보조 명령은 PATH와 ComSpec 대신 검증한 절대 System32 경로만 사용한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const originalComSpec = process.env.ComSpec;
+  const originalSystemRoot = process.env.SystemRoot;
+  try {
+    process.env.ComSpec = path.join(os.tmpdir(), 'untrusted-cmd.exe');
+    const [cmdPath, explorerPath, taskkillPath] = await Promise.all([
+      resolveWindowsSystemExecutable('cmd.exe'),
+      resolveWindowsSystemExecutable('explorer.exe'),
+      resolveWindowsSystemExecutable('taskkill.exe'),
+    ]);
+    for (const resolved of [cmdPath, explorerPath, taskkillPath]) {
+      assert.equal(path.win32.isAbsolute(resolved), true);
+      assert.notEqual(resolved.toLowerCase(), process.env.ComSpec.toLowerCase());
+    }
+    assert.match(cmdPath, /\\System32\\cmd\.exe$/i);
+    assert.match(taskkillPath, /\\System32\\taskkill\.exe$/i);
+    assert.match(explorerPath, /\\Windows\\explorer\.exe$/i);
+    await assert.rejects(
+      () => resolveWindowsSystemExecutable('powershell.exe'),
+      (error) => error.code === 'SECURITY_POLICY' && /허용되지 않은/.test(error.message),
+    );
+    process.env.SystemRoot = path.join(os.tmpdir(), 'FakeWindows');
+    await assert.rejects(
+      () => resolveWindowsSystemExecutable('cmd.exe'),
+      (error) => error.code === 'SECURITY_POLICY' && /표준 Windows 폴더/.test(error.message),
+    );
+  } finally {
+    if (originalComSpec === undefined) delete process.env.ComSpec;
+    else process.env.ComSpec = originalComSpec;
+    if (originalSystemRoot === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = originalSystemRoot;
+  }
+});
+
+test('준비 뒤 파일이 생긴 격리 작업 폴더에서는 CLI 실행 전에 중단한다', async () => {
+  const rootDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-workspace-mutation-'));
+  const directory = path.join(rootDirectory, 'workspace');
+  try {
+    await fs.mkdir(directory);
+    await prepareResearchWorkspace(directory);
+    await fs.writeFile(path.join(directory, 'unexpected.txt'), 'unexpected', 'utf8');
+    await assert.rejects(
+      () => preflightClaudeCli({ cwd: directory, timeoutMs: 5000 }),
+      (error) => error.code === 'SECURITY_POLICY' && /예상하지 않은 파일/.test(error.message),
+    );
+  } finally {
+    await fs.rm(rootDirectory, { recursive: true, force: true });
+  }
+});
+
+test('POSIX timeout과 abort는 분리된 프로세스 그룹의 자손까지 종료한다', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const rootDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-posix-tree-'));
+  const directory = path.join(rootDirectory, 'workspace');
+  const command = path.join(rootDirectory, 'fake-claude');
+  const pidFile = path.join(rootDirectory, 'descendant.pid');
+  const originalBin = process.env.CLAUDE_CLI_BIN;
+  const originalPidFile = process.env.FAKE_DESCENDANT_PID_FILE;
+  const originalHash = process.env.CLAUDE_CLI_ALLOWED_SHA256;
+  try {
+    await fs.mkdir(directory);
+    await fs.writeFile(command, [
+      '#!/bin/sh',
+      'sleep 60 &',
+      'descendant=$!',
+      'printf "%s\\n" "$descendant" > "$FAKE_DESCENDANT_PID_FILE"',
+      'wait "$descendant"',
+      '',
+    ].join('\n'), 'utf8');
+    await fs.chmod(command, 0o700);
+    await prepareResearchWorkspace(directory);
+    process.env.CLAUDE_CLI_BIN = command;
+    process.env.FAKE_DESCENDANT_PID_FILE = pidFile;
+    delete process.env.CLAUDE_CLI_ALLOWED_SHA256;
+
+    const processIsAlive = (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        if (error?.code === 'ESRCH') return false;
+        throw error;
+      }
+    };
+    const waitForDescendantExit = async (pid) => {
+      const deadline = Date.now() + 3000;
+      while (processIsAlive(pid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return !processIsAlive(pid);
+    };
+
+    for (const mode of ['timeout', 'abort']) {
+      await fs.rm(pidFile, { force: true });
+      const controller = new AbortController();
+      let abortTimer;
+      if (mode === 'abort') abortTimer = setTimeout(() => controller.abort(), 200);
+      try {
+        await assert.rejects(
+          () => callClaudeCli('시험', {
+            cwd: directory,
+            timeoutMs: mode === 'timeout' ? 150 : 5000,
+            signal: controller.signal,
+          }),
+          (error) => error.code === (mode === 'timeout' ? 'TIMEOUT' : 'ABORTED'),
+        );
+      } finally {
+        clearTimeout(abortTimer);
+      }
+      const descendantPid = Number.parseInt(await fs.readFile(pidFile, 'utf8'), 10);
+      assert.equal(Number.isSafeInteger(descendantPid) && descendantPid > 0, true);
+      assert.equal(await waitForDescendantExit(descendantPid), true);
+    }
+  } finally {
+    await stopAllClaudeProcesses();
+    if (originalBin === undefined) delete process.env.CLAUDE_CLI_BIN;
+    else process.env.CLAUDE_CLI_BIN = originalBin;
+    if (originalPidFile === undefined) delete process.env.FAKE_DESCENDANT_PID_FILE;
+    else process.env.FAKE_DESCENDANT_PID_FILE = originalPidFile;
+    if (originalHash === undefined) delete process.env.CLAUDE_CLI_ALLOWED_SHA256;
+    else process.env.CLAUDE_CLI_ALLOWED_SHA256 = originalHash;
+    await fs.rm(rootDirectory, { recursive: true, force: true });
+  }
 });
 
 test('사전 점검은 사내 배너의 다른 버전이 아닌 Claude Code 버전을 사용한다', {
@@ -1224,7 +1831,7 @@ test('사전 점검은 최소 버전 미만과 최소 버전의 prerelease를 �
   }
 });
 
-test('사전 점검 시작 시간 초과는 구버전이 아닌 CLI_STARTUP_TIMEOUT으로 분류한다', {
+test('사전 점검 시간 초과는 CLI_STARTUP_TIMEOUT을 보존하고 래퍼 정리는 fail-closed 처리한다', {
   skip: process.platform !== 'win32',
 }, async () => {
   await withFakeClaude({
@@ -1232,25 +1839,25 @@ test('사전 점검 시작 시간 초과는 구버전이 아닌 CLI_STARTUP_TIME
   }, async ({ directory }) => {
     await assert.rejects(
       () => preflightClaudeCli({ cwd: directory, timeoutMs: 100 }),
-      (error) => error.code === 'CLI_STARTUP_TIMEOUT',
+      (error) => matchesForcedStopError(error, 'CLI_STARTUP_TIMEOUT'),
     );
   });
 });
 
-test('Windows 시간 초과 시 Claude 프로세스 트리를 종료하고 TIMEOUT을 반환한다', {
+test('Windows 시간 초과는 TIMEOUT을 보존하고 래퍼 정리는 fail-closed 처리한다', {
   skip: process.platform !== 'win32',
 }, async () => {
   await withFakeClaude({ delayMs: 20000, events: successfulSearchEvents() }, async ({ directory }) => {
     const startedAt = Date.now();
     await assert.rejects(
       () => callClaudeCli('시험', { cwd: directory, timeoutMs: 100 }),
-      (error) => error.code === 'TIMEOUT',
+      (error) => matchesForcedStopError(error, 'TIMEOUT'),
     );
-    assert.ok(Date.now() - startedAt < 8000);
+    assert.ok(Date.now() - startedAt < 4000);
   });
 });
 
-test('중단 신호는 Claude 프로세스를 정리한 뒤 ABORTED를 반환한다', {
+test('중단 신호는 ABORTED를 보존하고 래퍼 정리는 fail-closed 처리한다', {
   skip: process.platform !== 'win32',
 }, async () => {
   await withFakeClaude({ delayMs: 20000, events: successfulSearchEvents() }, async ({ directory }) => {
@@ -1261,11 +1868,11 @@ test('중단 신호는 Claude 프로세스를 정리한 뒤 ABORTED를 반환한
       signal: controller.signal,
     });
     setTimeout(() => controller.abort(), 100);
-    await assert.rejects(call, (error) => error.code === 'ABORTED');
+    await assert.rejects(call, (error) => matchesForcedStopError(error, 'ABORTED'));
   });
 });
 
-test('활성 Claude 호출 중 전체 제한 신호가 오면 RUN_TIMEOUT 원인을 보존한다', {
+test('전체 제한 신호는 RUN_TIMEOUT을 보존하고 래퍼 정리는 fail-closed 처리한다', {
   skip: process.platform !== 'win32',
 }, async () => {
   await withFakeClaude({ delayMs: 20000, events: successfulSearchEvents() }, async ({ directory }) => {
@@ -1278,6 +1885,6 @@ test('활성 Claude 호출 중 전체 제한 신호가 오면 RUN_TIMEOUT 원인
     const reason = new Error('전체 실행 제한 시험');
     reason.code = 'RUN_TIMEOUT';
     setTimeout(() => controller.abort(reason), 100);
-    await assert.rejects(call, (error) => error.code === 'RUN_TIMEOUT');
+    await assert.rejects(call, (error) => matchesForcedStopError(error, 'RUN_TIMEOUT'));
   });
 });

@@ -14,12 +14,26 @@ export class AlreadyRunningError extends Error {
   }
 }
 
-function lockPathFor(outputFile) {
+function lockPathFor(outputFile, lockDirectory = '') {
+  if (lockDirectory) {
+    const resolved = path.resolve(outputFile);
+    // Windows 경로만 대/소문자와 슬래시가 같은 파일을 가리킨다. POSIX에서도
+    // 무조건 소문자화하면 /Reports/A.html 과 /reports/a.html 이 같은 잠금으로
+    // 충돌하므로 플랫폼의 경로 의미를 보존한다.
+    const lockIdentity = process.platform === 'win32'
+      ? resolved.replaceAll('/', '\\').toLowerCase()
+      : resolved;
+    const digest = createHash('sha256')
+      .update(lockIdentity, 'utf8')
+      .digest('hex');
+    return path.join(path.resolve(lockDirectory), `${digest}.run-lock`);
+  }
   return path.join(path.dirname(outputFile), `.${path.basename(outputFile)}.run-lock`);
 }
 
 async function windowsPipeFor(outputFile) {
   const resolvedOutput = path.resolve(outputFile);
+  await fs.mkdir(path.dirname(resolvedOutput), { recursive: true });
   const realDirectory = await fs.realpath(path.dirname(resolvedOutput));
   const canonicalPath = path.join(realDirectory, path.basename(resolvedOutput))
     .replaceAll('/', '\\')
@@ -83,15 +97,17 @@ function closeServer(server) {
 }
 
 async function acquireWindowsRunLock(outputFile, options) {
-  const lockFile = lockPathFor(outputFile);
+  const lockFile = lockPathFor(outputFile, options.lockDirectory);
   const now = options.now ?? Date.now();
   const token = randomUUID();
   const owner = {
+    app: 'trade-monitor-claude-cli',
     pid: process.pid,
     startedAt: new Date(now).toISOString(),
     outputFile: path.resolve(outputFile),
     token,
   };
+  const description = options.description || '같은 결과 파일을 만드는 모니터링';
 
   await fs.mkdir(path.dirname(lockFile), { recursive: true });
   const pipeName = await windowsPipeFor(outputFile);
@@ -103,7 +119,7 @@ async function acquireWindowsRunLock(outputFile, options) {
     const existing = await readOwner(lockFile);
     const since = existing?.startedAt ? ` (${existing.startedAt} 시작)` : '';
     throw new AlreadyRunningError(
-      `같은 결과 파일을 만드는 모니터링이 이미 실행 중입니다${since}.`,
+      `${description}이 이미 실행 중입니다${since}.`,
       existing,
     );
   }
@@ -142,16 +158,18 @@ async function acquireWindowsRunLock(outputFile, options) {
 }
 
 async function acquirePortableFileRunLock(outputFile, options) {
-  const lockFile = lockPathFor(outputFile);
+  const lockFile = lockPathFor(outputFile, options.lockDirectory);
   const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
   const now = options.now ?? Date.now();
   const token = randomUUID();
   const owner = {
+    app: 'trade-monitor-claude-cli',
     pid: process.pid,
     startedAt: new Date(now).toISOString(),
     outputFile: path.resolve(outputFile),
     token,
   };
+  const description = options.description || '같은 결과 파일을 만드는 모니터링';
 
   await fs.mkdir(path.dirname(lockFile), { recursive: true });
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -180,7 +198,7 @@ async function acquirePortableFileRunLock(outputFile, options) {
       const existing = await readOwner(lockFile);
       if (activeOwner(existing, now, staleMs)) {
         const since = existing?.startedAt ? ` (${existing.startedAt} 시작)` : '';
-        throw new AlreadyRunningError(`같은 결과 파일을 만드는 모니터링이 이미 실행 중입니다${since}.`, existing);
+        throw new AlreadyRunningError(`${description}이 이미 실행 중입니다${since}.`, existing);
       }
       throw new AlreadyRunningError(
         '비-Windows 환경에서는 오래되었거나 불완전한 실행 잠금을 안전하게 자동 회수할 수 없습니다.',

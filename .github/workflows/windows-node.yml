@@ -1,0 +1,50 @@
+name: Windows Node 검증
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} / Windows
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+
+    steps:
+      - name: 저장소 받기
+        uses: actions/checkout@v4
+
+      - name: Node.js ${{ matrix.node }} 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 구문과 자동 테스트 확인
+        shell: pwsh
+        run: |
+          node --check .\cli\run.mjs
+          npm --prefix .\cli test
+
+      - name: 목 데이터 HTML 실행 확인
+        shell: pwsh
+        run: |
+          $mockOutput = Join-Path $env:RUNNER_TEMP "mock-monitoring-node-${{ matrix.node }}.html"
+          .\run-monitoring.cmd --mock .\cli\test\fixtures\responses.json --out $mockOutput --no-open
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows 실행 래퍼가 종료 코드 $LASTEXITCODE 을 반환했습니다."
+          }
+          if (-not (Test-Path -LiteralPath $mockOutput -PathType Leaf)) {
+            throw "목 HTML 파일이 생성되지 않았습니다: $mockOutput"
+          }
+          $html = Get-Content -Raw -Encoding UTF8 -LiteralPath $mockOutput
+          if ($html -notmatch 'MOCK · 테스트 전용' -or $html -notmatch '<!DOCTYPE html>') {
+            throw "생성된 파일이 테스트 전용 HTML로 표시되지 않았습니다."
+          }

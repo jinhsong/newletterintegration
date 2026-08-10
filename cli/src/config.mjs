@@ -5,15 +5,92 @@ const PRODUCT_SCOPE = [
   '철강, 알루미늄, 플라스틱 등 전자·가전 관련 자재',
 ].join(', ');
 
-const MINIMUM_OFFICIAL_SEARCHES = 3;
-const MINIMUM_BROAD_SEARCHES = 3;
+export const RESEARCH_DEPTHS = Object.freeze(['fast', 'standard', 'deep']);
 
-export const CATEGORY_RESEARCH_POLICY = Object.freeze({
-  minimumOfficialSearches: MINIMUM_OFFICIAL_SEARCHES,
-  minimumBroadSearches: MINIMUM_BROAD_SEARCHES,
-  minimumSearchesPerCategory: MINIMUM_OFFICIAL_SEARCHES + MINIMUM_BROAD_SEARCHES,
-  maximumItemsPerCategory: 10,
+const DEPTH_POLICY = Object.freeze({
+  fast: Object.freeze({
+    minimumOfficialSearches: 2,
+    minimumBroadSearches: 2,
+    officialTargetsPerSearch: 6,
+    broadTargetsPerSearch: 8,
+    maximumOfficialSearches: 4,
+    maximumBroadSearches: 3,
+    baseMaximumItems: 6,
+    itemsPerTarget: 0.5,
+    maximumItemsCeiling: 12,
+  }),
+  standard: Object.freeze({
+    minimumOfficialSearches: 3,
+    minimumBroadSearches: 3,
+    officialTargetsPerSearch: 2,
+    broadTargetsPerSearch: 3,
+    maximumOfficialSearches: 8,
+    maximumBroadSearches: 6,
+    baseMaximumItems: 8,
+    itemsPerTarget: 1,
+    maximumItemsCeiling: 20,
+  }),
+  deep: Object.freeze({
+    minimumOfficialSearches: 4,
+    minimumBroadSearches: 4,
+    officialTargetsPerSearch: 2,
+    broadTargetsPerSearch: 3,
+    maximumOfficialSearches: 10,
+    maximumBroadSearches: 8,
+    baseMaximumItems: 12,
+    itemsPerTarget: 1.5,
+    maximumItemsCeiling: 30,
+  }),
 });
+
+// 이전 사용처를 위한 기본값이다. 실제 카테고리별 값은 researchPolicyForUnit()을 사용한다.
+export const CATEGORY_RESEARCH_POLICY = Object.freeze({
+  defaultDepth: 'standard',
+  minimumOfficialSearches: DEPTH_POLICY.standard.minimumOfficialSearches,
+  minimumBroadSearches: DEPTH_POLICY.standard.minimumBroadSearches,
+  minimumSearchesPerCategory:
+    DEPTH_POLICY.standard.minimumOfficialSearches
+    + DEPTH_POLICY.standard.minimumBroadSearches,
+  maximumItemsPerCategory: DEPTH_POLICY.standard.maximumItemsCeiling,
+});
+
+export function resolveResearchDepth(value = CATEGORY_RESEARCH_POLICY.defaultDepth) {
+  const depth = String(value || '').trim().toLocaleLowerCase('en-US');
+  if (!RESEARCH_DEPTHS.includes(depth)) {
+    throw new Error(`조사 깊이는 ${RESEARCH_DEPTHS.join(', ')} 중 하나여야 합니다.`);
+  }
+  return depth;
+}
+
+export function researchPolicyForUnit(unit, depthValue = CATEGORY_RESEARCH_POLICY.defaultDepth) {
+  const depth = resolveResearchDepth(depthValue);
+  const base = DEPTH_POLICY[depth];
+  const targetCount = Array.isArray(unit?.coverageTargets) ? unit.coverageTargets.length : 0;
+  if (targetCount < 1 || !Array.isArray(unit?.queryTerms) || unit.queryTerms.length < 1) {
+    throw new Error(`${unit?.key || '카테고리'}의 조사 대상 또는 검색어 설정이 비어 있습니다.`);
+  }
+  const minimumOfficialSearches = Math.min(
+    base.maximumOfficialSearches,
+    Math.max(base.minimumOfficialSearches, Math.ceil(targetCount / base.officialTargetsPerSearch)),
+  );
+  const minimumBroadSearches = Math.min(
+    base.maximumBroadSearches,
+    Math.max(base.minimumBroadSearches, Math.ceil(targetCount / base.broadTargetsPerSearch)),
+  );
+  const maximumItemsPerCategory = Math.min(
+    base.maximumItemsCeiling,
+    Math.ceil(base.baseMaximumItems + targetCount * base.itemsPerTarget),
+  );
+  return Object.freeze({
+    depth,
+    targetCount,
+    minimumOfficialSearches,
+    minimumBroadSearches,
+    minimumSearchesPerCategory: minimumOfficialSearches + minimumBroadSearches,
+    maximumItemsPerCategory,
+    officialTargetsPerSearch: base.officialTargetsPerSearch,
+  });
+}
 
 const COMMON_RULES = `
 [공통 정확성 규칙]
@@ -74,6 +151,203 @@ const tradeUnits = [
   ['보조금/상계관세', 'Subsidies 및 Countervailing Duties 조사·판정·재심'],
 ];
 
+function coverageTarget(label, aliases = []) {
+  return Object.freeze({
+    label,
+    aliases: Object.freeze([...new Set([label, ...aliases])]),
+  });
+}
+
+const coverageTargetCatalog = {
+  customs: {
+    북미: [coverageTarget('미국', ['United States', 'U.S.', 'US', 'USA']), coverageTarget('캐나다', ['Canada'])],
+    중남미: [
+      coverageTarget('멕시코', ['Mexico']), coverageTarget('브라질', ['Brazil']),
+      coverageTarget('콜롬비아', ['Colombia']), coverageTarget('페루', ['Peru']),
+      coverageTarget('아르헨티나', ['Argentina']), coverageTarget('칠레', ['Chile']),
+      coverageTarget('파나마', ['Panama']),
+    ],
+    인도: [coverageTarget('인도', ['India'])],
+    유럽: [
+      coverageTarget('EU', ['European Union', '유럽연합']),
+      coverageTarget('영국', ['United Kingdom', 'UK']),
+    ],
+    중동: [
+      coverageTarget('이집트', ['Egypt']), coverageTarget('사우디아라비아', ['Saudi Arabia']),
+      coverageTarget('UAE', ['United Arab Emirates', '아랍에미리트']),
+      coverageTarget('모로코', ['Morocco']), coverageTarget('튀니지', ['Tunisia']),
+      coverageTarget('요르단', ['Jordan']), coverageTarget('알제리', ['Algeria']),
+      coverageTarget('튀르키예', ['Turkey', 'Türkiye']), coverageTarget('파키스탄', ['Pakistan']),
+      coverageTarget('이스라엘', ['Israel']), coverageTarget('이라크', ['Iraq']),
+    ],
+    '동남아/오세아니아': [
+      coverageTarget('인도네시아', ['Indonesia']), coverageTarget('말레이시아', ['Malaysia']),
+      coverageTarget('태국', ['Thailand']), coverageTarget('베트남', ['Vietnam']),
+      coverageTarget('필리핀', ['Philippines']), coverageTarget('싱가포르', ['Singapore']),
+      coverageTarget('호주', ['Australia']), coverageTarget('뉴질랜드', ['New Zealand']),
+    ],
+    아프리카: [
+      coverageTarget('남아프리카공화국', ['South Africa']),
+      coverageTarget('나이지리아', ['Nigeria']), coverageTarget('케냐', ['Kenya']),
+    ],
+    CIS: [
+      coverageTarget('러시아', ['Russia']), coverageTarget('카자흐스탄', ['Kazakhstan']),
+      coverageTarget('우즈베키스탄', ['Uzbekistan']),
+    ],
+    동아시아: [
+      coverageTarget('중국', ['China']), coverageTarget('한국', ['Korea']),
+      coverageTarget('일본', ['Japan']), coverageTarget('대만', ['Taiwan']),
+      coverageTarget('홍콩', ['Hong Kong']),
+    ],
+  },
+  export: {
+    미국: [
+      coverageTarget('BIS', ['Bureau of Industry and Security']),
+      coverageTarget('OFAC', ['Office of Foreign Assets Control']),
+      coverageTarget('DDTC', ['Directorate of Defense Trade Controls']),
+      coverageTarget('백악관', ['White House']), coverageTarget('DOJ', ['Department of Justice']),
+    ],
+    한국: [
+      coverageTarget('산업통상부', ['산업통상자원부', 'MOTIE', 'MOTIR']),
+      coverageTarget('무역안보관리원', ['KOSTI']), coverageTarget('관세청', ['Korea Customs Service']),
+      coverageTarget('한국무역협회', ['KITA']),
+    ],
+    'EU/일본': [
+      coverageTarget('EU', ['European Union', 'European Commission', 'Council of the EU']),
+      coverageTarget('일본', ['Japan', 'METI']),
+    ],
+    '중국/베트남': [
+      coverageTarget('중국', ['China', 'MOFCOM', 'MIIT']),
+      coverageTarget('베트남', ['Vietnam']),
+    ],
+    '영국/캐나다/호주/인도': [
+      coverageTarget('영국', ['United Kingdom', 'UK', 'DBT', 'OFSI']),
+      coverageTarget('캐나다', ['Canada', 'Global Affairs Canada']),
+      coverageTarget('호주', ['Australia', 'DFAT']), coverageTarget('인도', ['India', 'DGFT']),
+    ],
+    'UN 및 다자체제': [
+      coverageTarget('UN', ['United Nations', 'UN Security Council']),
+      coverageTarget('Wassenaar', ['Wassenaar Arrangement']), coverageTarget('NSG', ['Nuclear Suppliers Group']),
+      coverageTarget('MTCR', ['Missile Technology Control Regime']),
+      coverageTarget('Australia Group', ['AG', '호주그룹']),
+    ],
+  },
+  trade: {
+    반덤핑: [
+      coverageTarget('미국', ['United States', 'U.S.', 'US', 'USA', 'USITC', 'ITA']),
+      coverageTarget('EU', ['European Union', 'European Commission']),
+      coverageTarget('중국', ['China', 'MOFCOM']), coverageTarget('인도', ['India', 'DGTR']),
+      coverageTarget('한국·일본', ['Korea Japan', '한국 일본']),
+      coverageTarget('WTO 회원국', ['WTO', 'WTO members', 'global anti-dumping']),
+    ],
+    세이프가드: [
+      coverageTarget('미국', ['United States', 'U.S.', 'US', 'USA', 'USITC']),
+      coverageTarget('EU', ['European Union', 'European Commission']),
+      coverageTarget('아시아 주요국', ['Asia', 'Asia India Indonesia Philippines']),
+      coverageTarget('중남미 주요국', ['Latin America', 'Latin America Brazil Mexico']),
+      coverageTarget('WTO 회원국', ['WTO', 'WTO members', 'global safeguard']),
+    ],
+    '보조금/상계관세': [
+      coverageTarget('미국', ['United States', 'U.S.', 'US', 'USA', 'USITC', 'ITA']),
+      coverageTarget('EU', ['European Union', 'European Commission']),
+      coverageTarget('중국', ['China', 'MOFCOM']), coverageTarget('인도', ['India', 'DGTR']),
+      coverageTarget('한국·일본', ['Korea Japan', '한국 일본']),
+      coverageTarget('WTO 회원국', ['WTO', 'WTO members', 'global countervailing']),
+    ],
+  },
+};
+
+function flattenedCoverageAliases(targets) {
+  return [...new Set((targets || []).flatMap((target) => target.aliases || [target.label]))];
+}
+
+// 응답 항목이 실제로 선택 카테고리에 속하는지 런타임에서 확인할 때 사용한다.
+// 검색 coverage target은 검색 분산을 위한 단위이고, item scope는 결과 필드 판정 단위다.
+const itemScopeCatalog = {
+  customs: Object.fromEntries(Object.entries(coverageTargetCatalog.customs).map(([key, targets]) => [
+    key,
+    {
+      fields: ['issuingCountry'],
+      aliases: flattenedCoverageAliases(targets),
+    },
+  ])),
+  export: {
+    미국: {
+      fields: ['issuingCountry', 'agency'],
+      aliases: ['미국', 'United States', 'U.S.', 'US', 'USA', 'BIS', 'OFAC', 'DDTC', 'White House', '백악관', 'DOJ'],
+    },
+    한국: {
+      fields: ['issuingCountry', 'agency'],
+      aliases: ['한국', '대한민국', 'Republic of Korea', 'South Korea', 'Korea', 'MOTIE', 'MOTIR', 'KOSTI', '관세청', 'KITA'],
+    },
+    'EU/일본': {
+      fields: ['issuingCountry', 'agency'],
+      aliases: ['EU', 'European Union', 'European Commission', 'Council of the EU', '일본', 'Japan', 'METI'],
+    },
+    '중국/베트남': {
+      fields: ['issuingCountry', 'agency'],
+      aliases: ['중국', 'China', 'PRC', 'MOFCOM', 'MIIT', '베트남', 'Vietnam'],
+    },
+    '영국/캐나다/호주/인도': {
+      fields: ['issuingCountry', 'agency'],
+      aliases: [
+        '영국', 'United Kingdom', 'UK', 'DBT', 'OFSI',
+        '캐나다', 'Canada', 'Global Affairs Canada',
+        '호주', 'Australia', 'DFAT',
+        '인도', 'India', 'DGFT',
+      ],
+    },
+    'UN 및 다자체제': {
+      fields: ['issuingCountry', 'agency'],
+      aliases: [
+        'UN', 'United Nations', 'Wassenaar', 'Wassenaar Arrangement', 'NSG',
+        'Nuclear Suppliers Group', 'MTCR', 'Australia Group', 'AG', '호주그룹',
+      ],
+    },
+  },
+  trade: {
+    반덤핑: {
+      fields: ['measureType', 'title', 'titleEn'],
+      aliases: ['반덤핑', 'anti-dumping', 'antidumping', 'AD'],
+    },
+    세이프가드: {
+      fields: ['measureType', 'title', 'titleEn'],
+      aliases: ['세이프가드', 'safeguard', 'SG'],
+    },
+    '보조금/상계관세': {
+      fields: ['measureType', 'title', 'titleEn'],
+      aliases: ['보조금', '상계관세', 'countervailing duty', 'countervailing', 'CVD', 'subsidy', 'subsidies'],
+    },
+  },
+};
+
+const queryTermCatalog = {
+  customs: {
+    북미: ['tariff customs notice', 'HTSUS CBP customs tariff', 'Canada customs tariff'],
+    중남미: ['arancel aduana comercio exterior', 'tarifa importación electrónica', 'customs tariff Latin America'],
+    인도: ['customs tariff notification India', 'DGFT import policy', 'CBIC customs electronics'],
+    유럽: ['EU customs tariff regulation', 'UK customs notice', 'rules of origin customs Europe'],
+    중동: ['customs tariff Middle East', 'import regulation electronics', 'GCC customs notice'],
+    '동남아/오세아니아': ['ASEAN customs tariff', 'Oceania customs notice', 'import regulation electronics Asia Pacific'],
+    아프리카: ['Africa customs tariff', 'import levy customs notice', 'electronics import regulation'],
+    CIS: ['EAEU customs tariff', 'CIS import regulation', 'customs classification electronics'],
+    동아시아: ['East Asia customs tariff', 'HS classification electronics', 'customs import regulation'],
+  },
+  export: {
+    미국: ['EAR export controls', 'Entity List BIS', 'OFAC sanctions', 'ITAR DDTC'],
+    한국: ['전략물자 수출통제', '무역안보 고시', '대외무역법 제재'],
+    'EU/일본': ['EU dual-use sanctions', 'Japan METI export control', 'catch-all control'],
+    '중국/베트남': ['China export control MOFCOM', 'critical minerals export licensing', 'Vietnam export control'],
+    '영국/캐나다/호주/인도': ['export control sanctions', 'dual-use licensing', 'strategic goods control'],
+    'UN 및 다자체제': ['multilateral export control list', 'UN sanctions committee', 'control regime plenary'],
+  },
+  trade: {
+    반덤핑: ['anti-dumping initiation', 'preliminary final determination', 'sunset administrative review'],
+    세이프가드: ['safeguard investigation', 'provisional definitive measure', 'WTO safeguard notification'],
+    '보조금/상계관세': ['countervailing duty investigation', 'subsidy determination', 'CVD review'],
+  },
+};
+
 const tradeRemedyOfficialDomains = [
   'wto.org', 'trade.gov', 'usitc.gov', 'federalregister.gov', 'europa.eu',
   'gov.uk', 'canada.ca', 'gc.ca', 'gov.in', 'gov.cn', 'go.kr', 'go.jp',
@@ -111,17 +385,97 @@ const officialDomainCatalog = {
   },
 };
 
+export const OFFICIAL_SOURCES_REVIEWED_AT = '2026-08-10';
+export const OFFICIAL_SOURCE_TIERS = Object.freeze([
+  'government',
+  'intergovernmental',
+  'trusted-association',
+]);
+
+const INTERGOVERNMENTAL_DOMAINS = new Set([
+  'wto.org', 'un.org', 'europa.eu', 'consilium.europa.eu', 'wassenaar.org',
+  'nuclearsuppliersgroup.org', 'mtcr.info', 'australiagroup.net',
+]);
+const TRUSTED_ASSOCIATION_DOMAINS = new Set(['kita.net', 'kosti.or.kr']);
+
+function officialSourceTier(hostname) {
+  if (TRUSTED_ASSOCIATION_DOMAINS.has(hostname)) return 'trusted-association';
+  if (INTERGOVERNMENTAL_DOMAINS.has(hostname)) return 'intergovernmental';
+  return 'government';
+}
+
+export function validateOfficialSources(sources, label = '공식 출처') {
+  if (!Array.isArray(sources) || sources.length === 0) {
+    throw new Error(`${label} 목록이 비어 있습니다.`);
+  }
+  const seen = new Set();
+  for (const source of sources) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+      throw new Error(`${label} 메타데이터 형식이 올바르지 않습니다.`);
+    }
+    const hostname = String(source.hostname || '').trim().toLocaleLowerCase('en-US');
+    if (!isTrustedOfficialDomain(hostname, [hostname])) {
+      throw new Error(`${label} hostname 형식이 올바르지 않습니다: ${hostname || '(빈 값)'}`);
+    }
+    if (seen.has(hostname)) throw new Error(`${label} hostname이 중복되었습니다: ${hostname}`);
+    seen.add(hostname);
+    if (!OFFICIAL_SOURCE_TIERS.includes(source.sourceTier)) {
+      throw new Error(`${label} sourceTier가 올바르지 않습니다: ${hostname}`);
+    }
+    const lastReviewed = String(source.lastReviewed || '');
+    const reviewedDate = /^\d{4}-\d{2}-\d{2}$/.test(lastReviewed)
+      ? new Date(`${lastReviewed}T00:00:00Z`)
+      : null;
+    if (!reviewedDate || Number.isNaN(reviewedDate.getTime())
+      || reviewedDate.toISOString().slice(0, 10) !== lastReviewed) {
+      throw new Error(`${label} lastReviewed가 누락되었거나 올바르지 않습니다: ${hostname}`);
+    }
+  }
+  return true;
+}
+
 function units(rows, domainKey) {
   return rows.map(([key, description]) => {
     const officialDomains = officialDomainCatalog[domainKey]?.[key];
-    if (!Array.isArray(officialDomains) || officialDomains.length === 0) {
-      throw new Error(`${domainKey}:${key}의 공식 도메인 목록이 비어 있습니다.`);
+    const coverageTargets = coverageTargetCatalog[domainKey]?.[key];
+    const queryTerms = queryTermCatalog[domainKey]?.[key];
+    const itemScope = itemScopeCatalog[domainKey]?.[key];
+    const officialSources = Array.isArray(officialDomains)
+      ? officialDomains.map((hostname) => Object.freeze({
+        hostname,
+        sourceTier: officialSourceTier(hostname),
+        lastReviewed: OFFICIAL_SOURCES_REVIEWED_AT,
+      }))
+      : [];
+    validateOfficialSources(officialSources, `${domainKey}:${key}의 공식 출처`);
+    if (!Array.isArray(coverageTargets) || coverageTargets.length === 0) {
+      throw new Error(`${domainKey}:${key}의 조사 대상 목록이 비어 있습니다.`);
+    }
+    if (!Array.isArray(queryTerms) || queryTerms.length === 0) {
+      throw new Error(`${domainKey}:${key}의 검색어 목록이 비어 있습니다.`);
+    }
+    if (
+      !itemScope
+      || !Array.isArray(itemScope.fields)
+      || itemScope.fields.length === 0
+      || !Array.isArray(itemScope.aliases)
+      || itemScope.aliases.length === 0
+    ) {
+      throw new Error(`${domainKey}:${key}의 항목 소속 판정 설정이 비어 있습니다.`);
     }
     return {
       key,
       label: key,
       description,
       officialDomains: Object.freeze([...officialDomains]),
+      officialSources: Object.freeze(officialSources),
+      lastReviewed: OFFICIAL_SOURCES_REVIEWED_AT,
+      coverageTargets: Object.freeze([...coverageTargets]),
+      queryTerms: Object.freeze([...queryTerms]),
+      itemScope: Object.freeze({
+        fields: Object.freeze([...itemScope.fields]),
+        aliases: Object.freeze([...new Set(itemScope.aliases)]),
+      }),
     };
   });
 }
@@ -201,6 +555,11 @@ export const categoryCatalog = Object.freeze(domains.flatMap((domain) => (
     unitLabel: unit.label,
     description: unit.description,
     officialDomains: unit.officialDomains,
+    officialSources: unit.officialSources,
+    lastReviewed: unit.lastReviewed,
+    coverageTargets: unit.coverageTargets,
+    queryTerms: unit.queryTerms,
+    itemScope: unit.itemScope,
   }))
 )));
 
@@ -288,19 +647,34 @@ export function scopedDomains(categorySelection = null, groupSelection = null) {
   return [{ ...selectedDomain, units: [selectedUnit] }];
 }
 
-export function buildCategoryPrompt(domain, unit, context) {
+export function buildCategoryPrompt(domain, unit, context, options = {}) {
   if (!domain?.units?.some((candidate) => candidate.key === unit?.key)) {
     throw new Error(`${domain?.label || '선택 영역'}의 조사 카테고리가 올바르지 않습니다.`);
   }
   const categoryTemplate = `    "${unit.key}": [${ITEM_SCHEMA}]`;
   const categoryScope = `- ${unit.key}: ${unit.description}`;
   const officialDomainScope = unit.officialDomains.join(', ');
+  const officialSourceScope = unit.officialSources
+    .map((source) => `${source.hostname}(${source.sourceTier})`)
+    .join(', ');
+  const queryTermScope = unit.queryTerms.join(' | ');
+  const itemScope = unit.itemScope.aliases.join(', ');
   const {
+    depth,
     minimumOfficialSearches,
     minimumBroadSearches,
     minimumSearchesPerCategory,
     maximumItemsPerCategory,
-  } = CATEGORY_RESEARCH_POLICY;
+    officialTargetsPerSearch,
+  } = researchPolicyForUnit(unit, options.depth);
+  const coverageScope = Array.from(
+    { length: Math.ceil(unit.coverageTargets.length / officialTargetsPerSearch) },
+    (_, index) => unit.coverageTargets
+      .slice(index * officialTargetsPerSearch, (index + 1) * officialTargetsPerSearch)
+      .map((target) => target.label)
+      .join(' + '),
+  ).join(', ');
+  const correctiveAppendix = String(options.correctiveAppendix || '').trim();
 
   return [
     '당신은 기업용 글로벌 통상 리서치 애널리스트다.',
@@ -310,26 +684,38 @@ export function buildCategoryPrompt(domain, unit, context) {
     '',
     `[조사 영역] ${domain.label}`,
     categoryScope,
+    `[조사 깊이] ${depth}`,
+    `[반드시 검색 query로 모두 확인할 하위 대상] ${coverageScope}`,
+    `[권장 검색어 축] ${queryTermScope}`,
+    `[응답 항목 소속 허용값] ${unit.itemScope.fields.join('·')}: ${itemScope}`,
+    `[출처 등급·최종 검토일 ${unit.lastReviewed}] ${officialSourceScope}`,
     domain.scope.trim(),
     COMMON_RULES.trim(),
-    '- 원문에 발표시각과 시간대가 명시된 경우에만 announcedAt을 기록한다. 시각을 추정하지 않고, ISO 8601의 날짜 부분은 announcedDate와 같아야 한다.',
+    '- 원문에 발표시각과 시간대가 명시된 경우에만 announcedAt을 기록한다. 시각을 추정하지 않는다. announcedAt을 KST로 변환한 달력 날짜가 announcedDate와 같아야 한다.',
     '- announcedAt이 없으면 announcedDate 기준의 KST 달력 날짜 범위로 판정된다는 점을 고려한다.',
     '- 포함하는 항목은 importance, importanceReason, measureType, title, summary, announcedDate, issuingCountry, agency, sourceName, sourceUrl을 모두 채운다.',
     '- sourceUrl은 실제로 검색에서 확인한 공개 HTTPS 원문이어야 한다. URL이 없거나 중요도가 상·중·하 중 하나가 아니면 항목을 제외한다.',
     '',
     `[필수 ${minimumSearchesPerCategory}회 다각도 심층 검색 절차]`,
     `- 이 카테고리만 조사하며 Claude WebSearch를 총 최소 ${minimumSearchesPerCategory}회 성공시킨다. 모든 query는 의미상 서로 달라야 하며 단어 순서만 바꾼 반복 검색은 금지한다.`,
-    `- 공식기관 원문 검색은 서로 다른 query로 최소 ${minimumOfficialSearches}회 실행한다. WebSearch의 allowed_domains에는 다음 신뢰 목록의 hostname 또는 그 하위 도메인만 1개 이상 넣는다: ${officialDomainScope}`,
+    `- 공식기관 원문 검색은 서로 다른 query로 최소 ${minimumOfficialSearches}회 실행한다. 각 공식 검색은 허용 도메인의 실제 원문 URL을 하나 이상 찾아야 한다. WebSearch의 allowed_domains에는 다음 신뢰 목록의 hostname 또는 그 하위 도메인만 1개 이상 넣는다: ${officialDomainScope}`,
+    `- 각 하위 대상은 실제 공식 원문 URL을 얻은 공식기관 검색 query에 최소 1회 포함한다. 공식 query 하나에는 하위 대상을 최대 ${officialTargetsPerSearch}개까지만 넣어 대상을 분산한다.`,
+    '- government·intergovernmental 원문을 법적 근거로 우선한다. trusted-association은 보조 출처이며 법령·제재·판정의 유일한 원문 근거로 사용하지 않는다.',
     '- 공식 검색 1: 최신 법령·관보·행정명령·보도자료, 공식 검색 2: 집행기관의 이행지침·통관/허가/판정, 공식 검색 3: 전자·가전·부품·반도체·AI·철강·HS 품목별 조치를 각각 탐색한다.',
     '- URL이나 경로는 넣지 않고 blocked_domains와 함께 사용하지 않는다. 목록 밖 언론·민간 도메인은 이 검색에 넣지 않는다.',
     `- 일반 동향 검색은 서로 다른 query로 최소 ${minimumBroadSearches}회 실행하며 allowed_domains를 넣지 않는다. 일반 검색 1: 주요 국제·현지 언론, 일반 검색 2: 현지어 기사·통상 전문매체·산업협회, 일반 검색 3: 한국 기업·공급망·제품 영향을 각각 넓게 탐색한다.`,
-    '- 복수 국가·기관 카테고리는 검색어마다 대상 묶음을 나누어 전체 범위를 고르게 확인하고, 한 국가나 기관만 반복 검색하지 않는다.',
+    '- 각 하위 대상은 실제 결과 URL을 얻은 성공 검색 query 중 적어도 하나에 위 표기 또는 통용 영문명으로 명시한다. 여러 대상을 한 query에 묶을 수 있지만 누락은 금지한다.',
+    '- 복수 국가·기관 카테고리는 하위 대상을 가능한 한 서로 다른 검색 query에 분산해 전체 범위를 고르게 확인하고, 한 국가나 기관만 반복 검색하지 않는다.',
+    '- 최종 항목은 응답 항목 소속 허용값 중 하나와 실제로 일치해야 한다. 다른 지역·기관·조치 유형의 항목을 이 카테고리에 넣지 않는다.',
     '- 모든 검색은 조사 기간, 대상 국가·기관, 조치 유형을 반영한다. 실패한 검색은 성공 횟수에 포함하지 말고 새로운 query로 보완한다.',
     `- 중복을 제외하고 최대 ${maximumItemsPerCategory}건. 해당 기간에 검증된 신규 동향이 없으면 빈 배열을 둔다.`,
     `- categories에는 "${unit.key}" 키를 정확히 한 번 포함한다.`,
+    correctiveAppendix ? '' : null,
+    correctiveAppendix ? '[이전 조사 오류 교정 지침]' : null,
+    correctiveAppendix || null,
     '',
     '[출력 형식]',
-    '- 설명, 마크다운, 코드 펜스 없이 아래 형태의 JSON 객체 하나만 출력한다.',
+    '- 설명, 마크다운, 코드 펜스 없이 아래 형태의 단일 JSON 객체 하나만 출력한다.',
     '- insight는 선택한 카테고리의 핵심 흐름과 기업 대응 포인트를 한국어 2~3문장으로 작성한다. 항목이 모두 없으면 빈 문자열이다.',
     '{',
     `  "domain": "${domain.key}",`,
@@ -338,16 +724,16 @@ export function buildCategoryPrompt(domain, unit, context) {
     categoryTemplate,
     '  }',
     '}',
-  ].join('\n');
+  ].filter((line) => line !== null).join('\n');
 }
 
 // 이전 import 사용처가 명확한 오류로 마이그레이션될 수 있도록 이름은 유지하되,
 // 여러 카테고리를 한 요청으로 묶는 호출은 거부한다.
-export function buildDomainPrompt(domain, context, requestedUnits = domain.units) {
+export function buildDomainPrompt(domain, context, requestedUnits = domain.units, options = {}) {
   if (!Array.isArray(requestedUnits) || requestedUnits.length !== 1) {
     throw new Error('Claude 조사 프롬프트는 카테고리 하나만 포함해야 합니다.');
   }
-  return buildCategoryPrompt(domain, requestedUnits[0], context);
+  return buildCategoryPrompt(domain, requestedUnits[0], context, options);
 }
 
 export function domainByKey(key) {

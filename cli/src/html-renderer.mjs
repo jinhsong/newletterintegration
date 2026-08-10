@@ -7,6 +7,11 @@ const IMPORTANCE_PALETTE = Object.freeze({
   중: Object.freeze({ color: '#ef6c00', background: '#fff3e0', text: '#8a4b00' }),
   하: Object.freeze({ color: '#2e7d32', background: '#e8f5e9', text: '#2e7d32' }),
 });
+const RESEARCH_DEPTH_LABELS = Object.freeze({
+  fast: '빠름',
+  standard: '표준',
+  deep: '심층',
+});
 
 function domainPaletteStyle(domain) {
   const palette = domain.palette || {};
@@ -32,6 +37,73 @@ function visibleDomains(payload) {
     ...domain,
     units: domain.units.filter((unit) => ids.has(`${domain.key}:${unit.key}`)),
   })).filter((domain) => domain.units.length > 0);
+}
+
+function categoryAnchorId(domain, unitIndex) {
+  return `category-${domain.key}-${unitIndex + 1}`;
+}
+
+function scopeLabel(payload) {
+  const selection = payload.collection?.selection;
+  if (payload.collection?.scope === 'group' && selection) {
+    return `${selection.domainLabel} 그룹`;
+  }
+  if (payload.collection?.scope === 'category' && selection) {
+    return `${selection.domainLabel} / ${selection.unitLabel}`;
+  }
+  return '전체';
+}
+
+function researchDepth(payload) {
+  const key = String(payload.collection?.depth || 'standard').toLowerCase();
+  return {
+    key,
+    label: RESEARCH_DEPTH_LABELS[key] || '사용자 지정',
+  };
+}
+
+function finiteNonNegative(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : null;
+}
+
+function firstAuditValue(sources, keys) {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    for (const key of keys) {
+      const value = finiteNonNegative(source[key]);
+      if (value !== null) return value;
+    }
+  }
+  return null;
+}
+
+function categoryAuditValue(payload, keys) {
+  let total = 0;
+  let observed = false;
+  for (const domain of visibleDomains(payload)) {
+    const statuses = payload.results?.[domain.key]?.categoryStatus;
+    if (!statuses || typeof statuses !== 'object') continue;
+    for (const unit of domain.units) {
+      const status = statuses[unit.key];
+      const value = firstAuditValue([status], keys);
+      if (value !== null) {
+        total += value;
+        observed = true;
+      }
+    }
+  }
+  return observed ? total : null;
+}
+
+function auditCounts(payload) {
+  const sources = [payload.audit, payload.stats?.audit, payload.collection?.audit];
+  const count = (keys) => firstAuditValue(sources, keys) ?? categoryAuditValue(payload, keys) ?? 0;
+  return {
+    rejected: count(['rejected', 'rejectedCount']),
+    truncated: count(['truncated', 'truncatedCount']),
+    deduped: count(['deduped', 'dedupedCount']),
+  };
 }
 
 function escapeHtml(value) {
@@ -231,13 +303,13 @@ function domainSection(domain, payload, domainIndex) {
   const domainStats = payload.stats?.byDomain?.[domain.key] || { total: 0 };
   const failure = failureForDomain(payload, domain.key);
   const state = domainState(domain, payload, result);
-  const categorySections = domain.units.map((unit) => {
+  const categorySections = domain.units.map((unit, unitIndex) => {
     const items = result.categories?.[unit.key] || [];
     const highCount = items.filter((item) => item.importance === '상').length;
     const category = categoryState(result, unit.key, failure);
     const categoryInsight = result.categoryInsights?.[unit.key] || '';
     return `
-      <section class="category">
+      <section class="category" id="${categoryAnchorId(domain, unitIndex)}">
         <div class="category-heading">
           <div class="category-title"><h3>${escapeHtml(unit.label)}</h3><div class="category-meta"><span>${items.length}건${highCount > 0 ? ` · 상 ${highCount}` : ''}</span><span class="state-chip state-${escapeHtml(category.status)}">${categoryStateLabel(category, items.length)}</span></div></div>
           ${unit.description ? `<p class="category-description">${escapeHtml(unit.description)}</p>` : ''}
@@ -246,6 +318,7 @@ function domainSection(domain, payload, domainIndex) {
         ${items.length > 0
     ? `<div class="items">${items.map((item) => itemCard(item, { unit })).join('')}</div>`
     : emptyCategoryMessage(category)}
+        <a class="back-to-top" href="#top"><span aria-hidden="true">↑</span> 맨 위로</a>
       </section>`;
   }).join('');
 
@@ -283,7 +356,8 @@ function failureBanner(payload) {
       (sum, domain) => sum + domain.units.length,
       0,
     );
-    return `<div class="status status-ok"><b>결과 생성 완료</b><span>요청한 ${escapeHtml(total)}개 카테고리의 Claude Code 다각도 심층 검색 결과를 정리했습니다. 검색 범위와 원문을 수동으로 확인하세요.</span></div>`;
+    const depth = researchDepth(payload);
+    return `<div class="status status-ok"><b>결과 생성 완료</b><span>요청한 ${escapeHtml(total)}개 카테고리의 Claude Code ${escapeHtml(depth.label)} 조사를 정리했습니다. 검색 범위와 원문을 수동으로 확인하세요.</span></div>`;
   }
   const failureItems = failures
     .map((failure) => `<li><b>${escapeHtml(failure.domainLabel)}${failure.categoryLabel ? ` / ${escapeHtml(failure.categoryLabel)}` : ''}</b> <code>${escapeHtml(failure.code)}</code> ${escapeHtml(failure.reason)}</li>`)
@@ -314,18 +388,39 @@ function failureBanner(payload) {
 
 function mockBanner(payload) {
   if (payload.collection?.mode !== 'mock') return '';
-  return '<div class="status status-mock" role="status"><b>테스트 데이터</b><span>Claude Code WebSearch를 실행하지 않은 내장 목 응답입니다. 실제 모니터링 결과로 사용하지 마세요.</span></div>';
+  return '<div class="status status-mock" role="alert"><b>MOCK · 테스트 전용</b><span>Claude Code WebSearch를 실행하지 않은 내장 목 응답입니다. 실제 모니터링 결과나 업무 판단 자료로 사용하지 마세요.</span></div>';
+}
+
+function auditSummary(payload) {
+  const audit = auditCounts(payload);
+  return `
+    <aside class="audit-summary" aria-label="검증 처리 내역">
+      <b>검증 처리</b>
+      <span class="audit-chip">검증 제외 ${audit.rejected}건</span>
+      <span class="audit-chip">표시 한도 제외 ${audit.truncated}건</span>
+      <span class="audit-chip">중복 제거 ${audit.deduped}건</span>
+    </aside>`;
 }
 
 function researchNotice(payload) {
   const dateNote = payload.context?.dateCoverageNote
     ? `<span><b>날짜 판정:</b> ${escapeHtml(payload.context.dateCoverageNote)}</span>`
     : '';
+  const lookbackLabels = {
+    manual: '사용자가 --lookback으로 지정',
+    'last-complete-run': '동일 범위·깊이의 마지막 완전 성공 시각에서 6시간 중첩',
+    'weekday-default': '이전 완전 성공 기록이 없어 요일 기본값 사용',
+  };
+  const lookbackLabel = lookbackLabels[payload.context?.lookbackSource];
+  const lookbackNote = lookbackLabel
+    ? `<span><b>기간 계산:</b> ${escapeHtml(lookbackLabel)}</span>`
+    : '';
   return `
     <aside class="research-notice" aria-label="AI 조사 결과 이용 주의">
       <b>AI 예비 조사 결과 · 원문 수동 확인 필수</b>
       <span>모델이 웹 검색 결과를 정리한 자료입니다. 링크, 발표일, 적용 대상, 수치를 원문에서 확인한 뒤 의사결정에 사용하세요.</span>
       ${dateNote}
+      ${lookbackNote}
     </aside>`;
 }
 
@@ -370,7 +465,7 @@ function highPriority(payload) {
   return `
     <section class="priority">
       <div class="section-title">
-        <div><h2>오늘의 하이라이트 · 중요도 상 ${items.length}건</h2><p class="section-help">영역별 최신 항목을 우선 포함한 뒤 발표일 최신순으로 표시합니다.</p></div>
+        <div><h2>조사 기간 하이라이트 · 중요도 상 ${items.length}건</h2><p class="section-help">영역별 최신 항목을 우선 포함한 뒤 발표일 최신순으로 표시합니다.</p></div>
         <span>${selected.length}/${items.length}건 표시</span>
       </div>
       <div class="priority-grid">
@@ -389,40 +484,57 @@ function highPriority(payload) {
 
 export function renderMonitoringHtml(payload) {
   const requestedDomains = visibleDomains(payload);
-  const nav = requestedDomains.map((domain, index) => (
+  const domainNav = requestedDomains.map((domain, index) => (
     `<a href="#domain-${escapeHtml(domain.key)}" style="${domainPaletteStyle(domain)}">${DOMAIN_CIRCLED[index] || ''} ${escapeHtml(domain.label)} <b>${payload.stats?.byDomain?.[domain.key]?.total ?? 0}</b></a>`
   )).join('');
+  const categoryNav = requestedDomains.map((domain) => `
+    <div class="category-nav-group" style="${domainPaletteStyle(domain)}">
+      <b>${escapeHtml(domain.label)}</b>
+      ${domain.units.map((unit, unitIndex) => (
+    `<a href="#${categoryAnchorId(domain, unitIndex)}">${escapeHtml(unit.label)}</a>`
+  )).join('')}
+    </div>`).join('');
   const selection = payload.collection?.selection;
   const heroSubtitle = payload.collection?.scope === 'group' && selection
     ? `선택 그룹 · ${selection.domainLabel} · ${selection.unitCount ?? requestedDomains[0]?.units.length ?? 0}개 카테고리`
     : selection
       ? `선택 조사 · ${selection.domainLabel} / ${selection.unitLabel}`
       : '관세 · 수출통제 · 무역구제 신규 동향';
+  const documentScope = scopeLabel(payload);
+  const depth = researchDepth(payload);
+  const mock = payload.collection?.mode === 'mock';
+  const completedCategories = payload.collection?.completedCategories ?? 0;
+  const totalCategories = payload.collection?.totalCategories
+    ?? requestedDomains.reduce((sum, domain) => sum + domain.units.length, 0);
+  const fullyCompletedDomains = payload.collection?.fullyCompletedDomains ?? 0;
+  const totalDomains = payload.collection?.totalDomains ?? requestedDomains.length;
+  const appVersion = payload.appVersion ? ` · v${escapeHtml(payload.appVersion)}` : '';
 
   return `<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>글로벌 통상 모니터링 ${escapeHtml(payload.context.toISO)}</title>
+  <title>${mock ? '[테스트 전용] ' : ''}글로벌 통상 모니터링 · ${escapeHtml(documentScope)} · ${escapeHtml(payload.context.toISO)}</title>
   <style>
-    :root{color-scheme:light;--ink:#1a2a4a;--body:#46566a;--muted:#7c8b9a;--line:#dde1e7;--paper:#fff;--canvas:#eef1f5;--navy:#0d1b30;--gold:#ffd54f;--high:#c62828;--high-bg:#fdecea;--mid:#ef6c00;--mid-bg:#fff3e0;--low:#2e7d32;--low-bg:#e8f5e9}
+    :root{color-scheme:light;--ink:#1a2a4a;--body:#3f4f62;--muted:#526073;--line:#d6dce4;--paper:#fff;--canvas:#eef1f5;--navy:#0d1b30;--gold:#ffd54f;--high:#c62828;--high-bg:#fdecea;--mid:#ef6c00;--mid-bg:#fff3e0;--low:#2e7d32;--low-bg:#e8f5e9}
     *{box-sizing:border-box}html{scroll-behavior:smooth;background:var(--canvas)}body{margin:0;padding:16px 8px;background:var(--canvas);color:var(--ink);font-family:"Malgun Gothic","맑은 고딕","Apple SD Gothic Neo",Arial,sans-serif;line-height:1.6;overflow-wrap:anywhere}.sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
-    a{color:inherit}a:focus-visible{outline:3px solid var(--gold);outline-offset:3px}.shell{width:100%;max-width:680px;margin:0 auto;background:var(--paper);border:1px solid var(--line)}.hero{background:var(--navy);color:#fff;padding:26px 28px}
-    .hero-top{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}.hero .eyebrow{color:#9fb4d0}.eyebrow{margin:0 0 4px;font-size:10px;font-weight:800;letter-spacing:.12em}.hero h1{margin:0;font-size:21px;letter-spacing:-.035em;line-height:1.4}.hero-sub{margin:5px 0 0;color:#9fb4d0;font-size:12px}.period{text-align:right;color:#9fb4d0;font-size:11px}.period b{display:block;color:#fff;font-size:13px}.period small{display:block;max-width:310px;margin-top:3px;color:#7088a8;font-size:10px;line-height:1.45}.quick-nav{display:flex;gap:4px 6px;flex-wrap:wrap;margin-top:14px}.quick-nav a{display:inline-block;padding:4px 11px;border-radius:14px;background:var(--domain-band);color:#fff;font-size:12px;white-space:nowrap;text-decoration:none}.quick-nav b{margin-left:4px}.hero-summary{margin:10px 0 0;color:var(--gold);font-size:12px}.hero-summary b{font-size:13px}
-    .status,.research-notice{display:flex;gap:10px;align-items:flex-start;margin:0;padding:10px 28px;border:0;border-top:3px solid;font-size:12px;line-height:1.6}.status b,.research-notice>b{flex:0 0 auto;white-space:nowrap}.status span,.research-notice span{color:inherit}.status-ok{background:#eaf6ee;border-color:#2e8b57;color:#22643c}.status-mock{background:#fdecea;border-color:#c62828;color:#9c2a20}.status-warn{display:block;background:#fff3e0;border-color:#ef6c00;color:#8a5300}.status-warn span{margin-left:8px}.status ul{margin:6px 0 0 18px;padding:0}.status code{margin:0 4px;padding:1px 4px;background:rgba(255,255,255,.75);border-radius:3px}.research-notice{background:#eef5fc;border-color:#1a4d8f;color:#315577}.research-notice>b{color:#15406f}
-    .priority{margin:0;padding:16px 28px 18px;background:#fff8f8;border-top:3px solid var(--high);border-bottom:1px solid #f0d8d8}.section-title{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.section-title h2{margin:0;color:var(--high);font-size:13px;letter-spacing:-.02em}.section-title>span{flex:0 0 auto;padding:2px 7px;border-radius:3px;background:var(--high-bg);color:var(--high);font-size:11px;font-weight:800}.section-help{margin:3px 0 0;color:var(--muted);font-size:11px}.priority-grid{display:grid;gap:7px;margin-top:8px}.priority-wrap{display:flex;gap:8px;align-items:flex-start}.priority-label{flex:0 0 auto;display:inline-block;margin-top:2px;padding:1px 7px;border-radius:3px;background:var(--domain-chip);color:#fff;font-size:11px;font-weight:800;white-space:nowrap}.priority-content{min-width:0}.priority-content h3{margin:0;color:var(--ink);font-size:13px;line-height:1.6}.priority-content>p{margin:0;color:#9aa7b4;font-size:11px}.priority-source{margin-top:2px}.priority-source .source{font-size:11px}.priority-source .source-verification{font-size:10px}
-    .domain{margin:0;border-top:18px solid var(--canvas);background:#fff}.domain-heading{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:18px 28px;background:var(--domain-band);border-left:8px solid var(--gold);color:#fff}.domain-part{margin:0;color:var(--gold);font-size:11px;font-weight:800;letter-spacing:.09em}.domain-heading h2{margin:2px 0 0;color:#fff;font-size:20px;letter-spacing:-.03em;line-height:1.3}.domain-state{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:7px 0 0;font-size:11px}.domain-state b{padding:1px 6px;border-radius:3px;background:rgba(255,255,255,.94);color:#384860}.domain-state span{color:#dbe5ef}.domain-state.state-ok b{color:#24623a}.domain-state.state-warn b{color:#8a5300}.domain-state.state-unknown b{color:#526073}.domain-count{text-align:right;color:#fff;white-space:nowrap}.domain-count strong{font-size:18px}.domain-count>span{margin-left:2px;font-size:13px}.domain-count small{display:block;color:#ffd9d9;font-size:11px}.insight{margin:0;padding:14px 28px;background:var(--domain-cat-bg);border-bottom:1px solid var(--domain-cat-bg)}.insight b{color:var(--domain-cat-text);font-size:12px}.insight p{margin:5px 0 0;color:#3a4a5a;font-size:13px;line-height:1.8}
-    .category{margin:0}.category-heading{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:9px 28px 9px 24px;background:var(--domain-cat-bg);border-left:4px solid var(--domain-cat-border)}.category-title{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}.category-heading h3{margin:0;color:var(--domain-cat-text);font-size:13px;white-space:nowrap}.category-meta{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.category-meta>span{color:#7c8b9a;font-size:11px}.category-meta .state-chip{padding:1px 6px;border-radius:3px;background:#eef1f5}.category-meta .state-success,.category-meta .state-empty{background:#e7f6ec;color:#24623a}.category-meta .state-failure{background:#fff0cf;color:#7b5200}.category-description{max-width:52%;margin:0;color:#9aa7b4;font-size:10px;line-height:1.5;text-align:right}.category-insight{margin:0;padding:9px 28px;background:#fbfcfe;border-bottom:1px solid #eef1f5;font-size:12px;color:#4a5a6a}.category-insight b{color:var(--domain-cat-text)}.category-insight p{display:inline;margin:0 0 0 7px;line-height:1.7}.items{display:block;margin:0;padding:4px 20px 14px}.item-card{margin-top:12px;padding:12px 16px;border:1px solid #e2e8f0;border-left:5px solid var(--importance-color);border-radius:0;background:#fff}.item-badges{display:flex;gap:5px;align-items:center;flex-wrap:wrap}.importance,.domain-chip,.effective-chip{display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:800;line-height:1.5}.importance{border:1px solid var(--importance-color);background:var(--importance-bg);color:var(--importance-text)}.domain-chip{background:var(--domain-chip);color:#fff}.effective-chip{border:1px solid #8fcccc;background:#e0f3f3;color:#0b6e6e}.item-heading{margin-top:9px}.item-heading h3,.item-heading h4{margin:0;color:var(--ink);font-size:14px;letter-spacing:-.02em;line-height:1.6}.title-en{margin:2px 0 0;color:#8a98a8;font-size:11px}.summary{margin:6px 0 0;color:var(--body);font-size:13px;line-height:1.75}.meta{display:flex;flex-wrap:wrap;gap:3px 13px;margin:10px 0 0;color:#7c8b9a;font-size:11px;line-height:1.9}.meta b{margin-right:3px;color:#9aa7b4;font-weight:400}.impact,.reason,.notes{margin:7px 0 0;padding-left:9px;border-left:2px solid #dde3ec;color:#667789;font-size:11px;line-height:1.7}.impact b,.reason b,.notes b{margin-right:6px;color:#46566a}.source-row{margin-top:9px}.source-block{display:flex;gap:5px 9px;align-items:center;flex-wrap:wrap}.source{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;color:#15418c;font-size:11px;font-weight:700;text-decoration:none}.source:hover .source-action{text-decoration:underline}.source-host{padding:1px 5px;border-radius:3px;background:#edf2f7;color:#526073;font-weight:500}.source-verification{padding:1px 6px;border-radius:3px;background:#fff4da;color:#735200;font-size:10px}.verification-grounded{background:#e7f6ec;color:#24623a}.verification-missing{background:#fdecec;color:#8e2f2f}.verification-unknown{background:#eef1f5;color:#526073}.source-muted{color:var(--muted);font-weight:400}.empty-category{margin:0;padding:9px 28px;border-bottom:1px solid #eef1f5;background:#fff;color:#9aa7b4;font-size:11px;font-style:italic}.empty-failed{background:#fff8ec;color:#a15c00;font-style:normal}.empty-failed b{margin-right:5px}.empty-unknown{background:#f6f8fa;color:#526073;font-style:normal}
-    .footer{margin:0;padding:14px 28px;border-top:1px solid #dde3ea;background:#f0f3f7;color:#7a8a9a;text-align:center;font-size:11px;line-height:1.7}.footer b{color:#384860}
-    @media(max-width:720px){body{padding:0}.shell{border:0}.hero{padding:22px 20px}.hero-top{display:block}.period{margin-top:14px;text-align:left}.period small{max-width:none}.status,.research-notice{display:block;padding:10px 20px}.status span,.research-notice span{display:block;margin:3px 0 0}.status-warn span{margin-left:0}.priority{padding:14px 20px 16px}.domain-heading{align-items:flex-end;padding:16px 20px;border-left-width:6px}.insight{padding:12px 20px}.category-heading{padding:9px 20px 9px 16px}.category-description{max-width:46%}.category-insight{padding:9px 20px}.items{padding:4px 12px 12px}.item-card{padding:11px 13px}.empty-category{padding:9px 20px}.footer{padding:13px 20px}}
+    a{color:inherit}a:focus-visible{outline:3px solid var(--navy);outline-offset:2px;box-shadow:0 0 0 6px var(--gold);border-radius:2px}.shell{width:100%;max-width:680px;margin:0 auto;background:var(--paper);border:1px solid var(--line)}.hero{background:var(--navy);color:#fff;padding:26px 28px}
+    .hero-top{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}.hero .eyebrow{color:#b9c9dc}.eyebrow{margin:0 0 4px;font-size:12px;font-weight:800;letter-spacing:.12em}.hero h1{margin:0;font-size:21px;letter-spacing:-.035em;line-height:1.4}.hero-sub{margin:5px 0 0;color:#b9c9dc;font-size:12px}.period{text-align:right;color:#b9c9dc;font-size:12px}.period b{display:block;color:#fff;font-size:13px}.period small{display:block;max-width:310px;margin-top:3px;color:#b9c9dc;font-size:12px;line-height:1.45}.quick-nav{display:flex;gap:4px 6px;flex-wrap:wrap;margin-top:14px}.quick-nav a{display:inline-block;padding:4px 11px;border:1px solid rgba(255,255,255,.35);border-radius:14px;background:var(--domain-band);color:#fff;font-size:12px;white-space:nowrap;text-decoration:none}.quick-nav b{margin-left:4px}.hero-summary{margin:10px 0 0;color:var(--gold);font-size:12px}.hero-summary b{font-size:13px}
+    .status,.research-notice{display:flex;gap:10px;align-items:flex-start;margin:0;padding:10px 28px;border:0;border-top:3px solid;font-size:12px;line-height:1.6}.status b,.research-notice>b{flex:0 0 auto;white-space:nowrap}.status span,.research-notice span{color:inherit}.status-ok{background:#eaf6ee;border-color:#2e8b57;color:#22643c}.status-mock{background:#fdecea;border:4px solid #c62828;color:#7d1d17;font-size:13px}.mock-output .hero{border-top:8px solid #c62828}.status-warn{display:block;background:#fff3e0;border-color:#ef6c00;color:#754700}.status-warn span{margin-left:8px}.status ul{margin:6px 0 0 18px;padding:0}.status code{margin:0 4px;padding:1px 4px;background:rgba(255,255,255,.75);border-radius:3px}.research-notice{background:#eef5fc;border-color:#1a4d8f;color:#315577}.research-notice>b{color:#15406f}
+    .audit-summary{display:flex;gap:7px;align-items:center;flex-wrap:wrap;padding:10px 28px;border-top:1px solid var(--line);background:#f7f9fb;color:#384860;font-size:12px}.audit-summary>b{margin-right:3px}.audit-chip{padding:2px 7px;border:1px solid #c9d1dc;border-radius:12px;background:#fff;color:#46566a;font-weight:700}.category-nav{padding:12px 28px;border-top:1px solid var(--line);background:#fff}.category-nav-title{display:block;margin-bottom:7px;color:#384860;font-size:12px;font-weight:800}.category-nav-group{display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin-top:6px}.category-nav-group>b{min-width:54px;color:var(--domain-cat-text);font-size:12px}.category-nav-group a{padding:2px 7px;border:1px solid var(--domain-cat-border);border-radius:11px;color:var(--domain-cat-text);font-size:12px;font-weight:700;text-decoration:none}.category-nav-group a:hover{text-decoration:underline}
+    .priority{margin:0;padding:16px 28px 18px;background:#fff8f8;border-top:3px solid var(--high);border-bottom:1px solid #f0d8d8}.section-title{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.section-title h2{margin:0;color:var(--high);font-size:14px;letter-spacing:-.02em}.section-title>span{flex:0 0 auto;padding:2px 7px;border-radius:3px;background:var(--high-bg);color:var(--high);font-size:12px;font-weight:800}.section-help{margin:3px 0 0;color:var(--muted);font-size:12px}.priority-grid{display:grid;gap:7px;margin-top:8px}.priority-wrap{display:flex;gap:8px;align-items:flex-start}.priority-label{flex:0 0 auto;display:inline-block;margin-top:2px;padding:1px 7px;border-radius:3px;background:var(--domain-chip);color:#fff;font-size:12px;font-weight:800;white-space:nowrap}.priority-content{min-width:0}.priority-content h3{margin:0;color:var(--ink);font-size:13px;line-height:1.6}.priority-content>p{margin:0;color:var(--muted);font-size:12px}.priority-source{margin-top:2px}.priority-source .source,.priority-source .source-verification{font-size:12px}
+    .domain{margin:0;border-top:18px solid var(--canvas);background:#fff;scroll-margin-top:8px}.domain-heading{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:18px 28px;background:var(--domain-band);border-left:8px solid var(--gold);color:#fff}.domain-part{margin:0;color:var(--gold);font-size:12px;font-weight:800;letter-spacing:.09em}.domain-heading h2{margin:2px 0 0;color:#fff;font-size:20px;letter-spacing:-.03em;line-height:1.3}.domain-state{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:7px 0 0;font-size:12px}.domain-state b{padding:1px 6px;border-radius:3px;background:rgba(255,255,255,.94);color:#384860}.domain-state span{color:#e7eef6}.domain-state.state-ok b{color:#24623a}.domain-state.state-warn b{color:#754700}.domain-state.state-unknown b{color:#526073}.domain-count{text-align:right;color:#fff;white-space:nowrap}.domain-count strong{font-size:18px}.domain-count>span{margin-left:2px;font-size:13px}.domain-count small{display:block;color:#ffe8e8;font-size:12px}.insight{margin:0;padding:14px 28px;background:var(--domain-cat-bg);border-bottom:1px solid var(--domain-cat-bg)}.insight b{color:var(--domain-cat-text);font-size:12px}.insight p{margin:5px 0 0;color:#3a4a5a;font-size:13px;line-height:1.8}
+    .category{margin:0;scroll-margin-top:8px}.category-heading{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:9px 28px 9px 24px;background:var(--domain-cat-bg);border-left:4px solid var(--domain-cat-border)}.category-title{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}.category-heading h3{margin:0;color:var(--domain-cat-text);font-size:14px;white-space:nowrap}.category-meta{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.category-meta>span{color:var(--muted);font-size:12px}.category-meta .state-chip{padding:1px 6px;border-radius:3px;background:#eef1f5}.category-meta .state-success,.category-meta .state-empty{background:#e7f6ec;color:#24623a}.category-meta .state-failure{background:#fff0cf;color:#754700}.category-description{max-width:52%;margin:0;color:#526073;font-size:12px;line-height:1.5;text-align:right}.category-insight{margin:0;padding:9px 28px;background:#fbfcfe;border-bottom:1px solid #eef1f5;font-size:12px;color:#4a5a6a}.category-insight b{color:var(--domain-cat-text)}.category-insight p{display:inline;margin:0 0 0 7px;line-height:1.7}.items{display:block;margin:0;padding:4px 20px 14px}.item-card{margin-top:12px;padding:12px 16px;border:1px solid #e2e8f0;border-left:5px solid var(--importance-color);border-radius:0;background:#fff}.item-badges{display:flex;gap:5px;align-items:center;flex-wrap:wrap}.importance,.domain-chip,.effective-chip{display:inline-block;padding:2px 8px;border-radius:3px;font-size:12px;font-weight:800;line-height:1.5}.importance{border:1px solid var(--importance-color);background:var(--importance-bg);color:var(--importance-text)}.domain-chip{background:var(--domain-chip);color:#fff}.effective-chip{border:1px solid #6caeae;background:#e0f3f3;color:#075d5d}.item-heading{margin-top:9px}.item-heading h3,.item-heading h4{margin:0;color:var(--ink);font-size:14px;letter-spacing:-.02em;line-height:1.6}.title-en{margin:2px 0 0;color:#526073;font-size:12px}.summary{margin:6px 0 0;color:var(--body);font-size:13px;line-height:1.75}.meta{display:flex;flex-wrap:wrap;gap:3px 13px;margin:10px 0 0;color:#526073;font-size:12px;line-height:1.9}.meta b{margin-right:3px;color:#46566a;font-weight:400}.impact,.reason,.notes{margin:7px 0 0;padding-left:9px;border-left:2px solid #cbd3de;color:#526073;font-size:12px;line-height:1.7}.impact b,.reason b,.notes b{margin-right:6px;color:#384860}.source-row{margin-top:9px}.source-block{display:flex;gap:5px 9px;align-items:center;flex-wrap:wrap}.source{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap;color:#15418c;font-size:12px;font-weight:700;text-decoration:none}.source:hover .source-action{text-decoration:underline}.source-host{padding:1px 5px;border-radius:3px;background:#e8edf3;color:#46566a;font-weight:500}.source-verification{padding:1px 6px;border-radius:3px;background:#fff1c7;color:#644700;font-size:12px}.verification-grounded{background:#e7f6ec;color:#24623a}.verification-missing{background:#fdecec;color:#7d2929}.verification-unknown{background:#e8edf3;color:#46566a}.source-muted{color:var(--muted);font-weight:400}.empty-category{margin:0;padding:9px 28px;border-bottom:1px solid #eef1f5;background:#fff;color:#526073;font-size:12px;font-style:italic}.empty-failed{background:#fff8ec;color:#8a4d00;font-style:normal}.empty-failed b{margin-right:5px}.empty-unknown{background:#f6f8fa;color:#46566a;font-style:normal}.back-to-top{display:block;width:max-content;margin:3px 28px 12px auto;color:#15418c;font-size:12px;font-weight:700;text-decoration:none}.back-to-top:hover{text-decoration:underline}
+    .footer{margin:0;padding:14px 28px;border-top:1px solid #d5dce5;background:#f0f3f7;color:#526073;text-align:center;font-size:12px;line-height:1.7}.footer b{color:#384860}
+    @media(max-width:720px){body{padding:0}.shell{border:0}.hero{padding:22px 20px}.hero-top{display:block}.period{margin-top:14px;text-align:left}.period small{max-width:none}.status,.research-notice{display:block;padding:10px 20px}.status span,.research-notice span{display:block;margin:3px 0 0}.status-warn span{margin-left:0}.audit-summary,.category-nav{padding:10px 20px}.priority{padding:14px 20px 16px}.domain-heading{align-items:flex-end;padding:16px 20px;border-left-width:6px}.insight{padding:12px 20px}.category-heading{padding:9px 20px 9px 16px}.category-description{max-width:46%}.category-insight{padding:9px 20px}.items{padding:4px 12px 12px}.item-card{padding:11px 13px}.empty-category{padding:9px 20px}.back-to-top{margin-right:20px}.footer{padding:13px 20px}}
     @media(max-width:480px){.hero-top,.section-title,.category-heading{display:block}.section-title>span{display:inline-block;margin-top:5px}.category-description{max-width:none;margin-top:3px;text-align:left}.domain-state{display:block}.domain-state span{display:block;margin-top:3px}.source-block{align-items:flex-start}.priority-wrap{gap:6px}}
     @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
-    @media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}html,body{background:#fff}body{padding:0}.shell{max-width:none;border:0}.hero{background:#fff;color:var(--ink);border-bottom:2px solid var(--navy)}.hero h1,.period b{color:var(--ink)}.hero .eyebrow,.hero-sub,.period,.period small{color:#526073}.quick-nav{display:none}.hero-summary{color:#7b5200}.domain{border-top:12px solid #fff}.domain-heading{background:#fff;color:var(--ink);border:2px solid var(--domain-band);border-left:8px solid var(--domain-band)}.domain-heading h2,.domain-count{color:var(--ink)}.domain-part,.domain-count small{color:var(--domain-cat-text)}.domain-state span{color:#526073}.priority{background:#fff}.item-card,.priority-wrap{break-inside:avoid}.category-heading{break-after:avoid}.footer{background:#fff}}
+    @media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}html,body{background:#fff}body{padding:0;font-size:11pt;orphans:3;widows:3}.shell{max-width:none;border:0}.hero{background:#fff;color:var(--ink);border:0;border-bottom:2px solid var(--navy)}.hero h1,.period b{color:var(--ink)}.hero .eyebrow,.hero-sub,.period,.period small{color:#526073}.quick-nav,.category-nav,.back-to-top{display:none}.hero-summary{color:#654600}.domain{border-top:12px solid #fff}.domain-heading{background:#fff;color:var(--ink);border:2px solid var(--domain-band);border-left:8px solid var(--domain-band)}.domain-heading h2,.domain-count{color:var(--ink)}.domain-part,.domain-count small{color:var(--domain-cat-text)}.domain-state span{color:#526073}.priority{background:#fff}.item-card,.priority-wrap,.insight,.category-insight{break-inside:avoid;page-break-inside:avoid}.domain-heading,.category-heading,h1,h2,h3,h4{break-after:avoid-page;page-break-after:avoid}.summary,.impact,.reason,.notes{orphans:3;widows:3}.source[href]::after{content:" (" attr(href) ")";color:#384860;font-size:9pt;font-weight:400;overflow-wrap:anywhere}.source-action{display:none}.footer{background:#fff}}
   </style>
 </head>
-<body>
-  <main class="shell">
+<body class="${mock ? 'mock-output' : 'live-output'}">
+  <main class="shell" id="top">
     <header class="hero">
       <div class="hero-top">
         <div>
@@ -432,15 +544,17 @@ export function renderMonitoringHtml(payload) {
         </div>
         <div class="period"><span>조사 기간</span><b>${escapeHtml(payload.context.fromStr)} ~ ${escapeHtml(payload.context.toStr)} KST</b>${payload.context.dateCoverageNote ? `<small>${escapeHtml(payload.context.dateCoverageNote)}</small>` : ''}</div>
       </div>
-      <nav class="quick-nav" aria-label="영역 바로가기">${nav}</nav>
-      <p class="hero-summary">합계 <b>${payload.stats?.total ?? 0}건</b> · 중요도 상 ${payload.stats?.high ?? 0}건 · 표시 가능 영역 ${payload.collection?.completedDomains ?? 0}/${payload.collection?.totalDomains ?? requestedDomains.length}</p>
+      <nav class="quick-nav" aria-label="영역 바로가기">${domainNav}</nav>
+      <p class="hero-summary">합계 <b>${payload.stats?.total ?? 0}건</b> · 중요도 상 ${payload.stats?.high ?? 0}건 · 조사 깊이 ${escapeHtml(depth.label)}(${escapeHtml(depth.key)}) · 완료 카테고리 ${escapeHtml(completedCategories)}/${escapeHtml(totalCategories)} · 완전 완료 영역 ${escapeHtml(fullyCompletedDomains)}/${escapeHtml(totalDomains)}</p>
     </header>
     ${mockBanner(payload)}
     ${failureBanner(payload)}
     ${researchNotice(payload)}
+    ${auditSummary(payload)}
+    <nav class="category-nav" aria-label="카테고리 바로가기"><span class="category-nav-title">카테고리 바로가기</span>${categoryNav}</nav>
     ${highPriority(payload)}
     ${requestedDomains.map((domain, index) => domainSection(domain, payload, index)).join('')}
-    <footer class="footer"><b>AI 예비 조사 · 원문 수동 확인 필수</b> · PC 로컬 HTML · 생성 ${escapeHtml(generatedLabel(payload.createdAt))} KST · 외부 저장 및 메일 발송 없음</footer>
+    <footer class="footer"><b>AI 예비 조사 · 원문 수동 확인 필수</b>${appVersion} · 자체 포함 HTML · 생성 ${escapeHtml(generatedLabel(payload.createdAt))} KST · 외부 서비스 연동 및 메일 발송 없음</footer>
   </main>
 </body>
 </html>`;

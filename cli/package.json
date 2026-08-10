@@ -1,6 +1,6 @@
 {
   "name": "trade-monitor-claude-cli",
-  "version": "5.2.0",
+  "version": "6.0.0",
   "private": true,
   "type": "module",
   "description": "회사 Claude Code CLI 기반 로컬 HTML 통상 모니터링",

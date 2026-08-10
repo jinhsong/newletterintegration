@@ -1,6 +1,7 @@
 import path from 'node:path';
 
 const LOOKBACK_VALUES = new Set(['24', '72', '168']);
+const DEPTH_VALUES = new Set(['fast', 'standard', 'deep']);
 
 function optionValue(argv, index, option) {
   const value = argv[index + 1];
@@ -11,9 +12,10 @@ function optionValue(argv, index, option) {
 }
 
 export function parseArgs(argv, cwd = process.cwd()) {
-  const options = { open: false };
+  const options = { open: false, depth: 'standard' };
   let categorySeen = false;
   let groupSeen = false;
+  let depthSeen = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--lookback') {
@@ -22,6 +24,15 @@ export function parseArgs(argv, cwd = process.cwd()) {
         throw new Error('--lookback은 24, 72, 168 중 하나여야 합니다.');
       }
       options.lookbackHours = Number(value);
+      index += 1;
+    } else if (arg === '--depth') {
+      if (depthSeen) throw new Error('--depth는 한 번만 입력할 수 있습니다.');
+      const value = optionValue(argv, index, arg).trim().toLowerCase();
+      if (!DEPTH_VALUES.has(value)) {
+        throw new Error('--depth는 fast, standard, deep 중 하나여야 합니다.');
+      }
+      options.depth = value;
+      depthSeen = true;
       index += 1;
     } else if (arg === '--out') {
       options.outputFile = path.resolve(cwd, optionValue(argv, index, arg));
@@ -49,6 +60,14 @@ export function parseArgs(argv, cwd = process.cwd()) {
       options.open = true;
     } else if (arg === '--no-open') {
       options.open = false;
+    } else if (arg === '--allow-partial-overwrite') {
+      options.allowPartialOverwrite = true;
+    } else if (arg === '--allow-parallel') {
+      options.allowParallel = true;
+    } else if (arg === '--allow-network-output') {
+      options.allowNetworkOutput = true;
+    } else if (arg === '--version') {
+      options.version = true;
     } else if (arg === '--help' || arg === '-h') {
       options.help = true;
     } else {
@@ -65,8 +84,12 @@ export function parseArgs(argv, cwd = process.cwd()) {
     options.category
     || options.group
     || options.lookbackHours
+    || depthSeen
     || options.outputFile
     || options.mockPath
+    || options.allowPartialOverwrite
+    || options.allowParallel
+    || options.allowNetworkOutput
   )) {
     const option = options.listGroups ? '--list-groups' : '--list-categories';
     throw new Error(`${option}는 다른 실행 옵션과 함께 사용할 수 없습니다.`);

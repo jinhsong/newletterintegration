@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { constants as fsConstants, createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
@@ -9,17 +11,115 @@ const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_JSONL_LINE_BYTES = 2 * 1024 * 1024;
 const MAX_TASKKILL_CAPTURE_BYTES = 64 * 1024;
 const MAX_STREAM_EVENTS = 20000;
+const MAX_GROUNDING_URLS = 500;
+const MAX_RESULT_URLS_PER_SEARCH = 100;
+const WINDOWS_TASKKILL_TIMEOUT_MS = 1000;
+const WINDOWS_TASKKILL_CONFIRM_MS = 1500;
+const WINDOWS_DIRECT_KILL_WAIT_MS = 1500;
+const WINDOWS_WRAPPER_KILL_WAIT_MS = 250;
 const DEFAULT_PREFLIGHT_TIMEOUT_MS = 60000;
 const MAX_PREFLIGHT_TIMEOUT_MS = 300000;
 const MINIMUM_CLI_VERSION = [2, 1, 214];
 const RESEARCH_TOOL = 'WebSearch';
 const SPECIAL_BUILTIN_TOOL = 'EndConversation';
+const WINDOWS_SYSTEM_EXECUTABLES = new Set(['cmd.exe', 'explorer.exe', 'taskkill.exe']);
+const ALLOWED_STREAM_EVENT_TYPES = new Set([
+  'assistant',
+  'rate_limit_event',
+  'result',
+  'system',
+  'tool_progress',
+  'user',
+]);
+const ALLOWED_SYSTEM_EVENT_SUBTYPES = new Set(['api_retry', 'init']);
+const ALLOWED_RESULT_EVENT_SUBTYPES = new Set([
+  'error_during_execution',
+  'error_max_budget_usd',
+  'error_max_structured_output_retries',
+  'error_max_turns',
+  'success',
+]);
+const ALLOWED_RESULT_EVENT_FIELDS = new Set([
+  'api_error_status',
+  'deferred_tool_use',
+  'duration_api_ms',
+  'duration_ms',
+  'errors',
+  'fast_mode_state',
+  'is_error',
+  'modelUsage',
+  'num_turns',
+  'origin',
+  'permission_denials',
+  'result',
+  'session_id',
+  'stop_reason',
+  'structured_output',
+  'subtype',
+  'terminal_reason',
+  'total_cost_usd',
+  'ttft_ms',
+  'type',
+  'usage',
+  'uuid',
+]);
+const ALLOWED_FAST_MODE_STATES = new Set(['cooldown', 'off', 'on']);
+const ALLOWED_TERMINAL_REASONS = new Set([
+  'aborted_streaming',
+  'aborted_tools',
+  'blocking_limit',
+  'completed',
+  'hook_stopped',
+  'image_error',
+  'max_turns',
+  'model_error',
+  'prompt_too_long',
+  'rapid_refill_breaker',
+  'stop_hook_prevented',
+  'tool_deferred',
+]);
+const ALLOWED_RATE_LIMIT_STATUSES = new Set(['allowed', 'allowed_warning', 'rejected']);
+const ALLOWED_RATE_LIMIT_EVENT_FIELDS = new Set([
+  'rate_limit_info',
+  'session_id',
+  'type',
+  'uuid',
+]);
+const ALLOWED_RATE_LIMIT_INFO_FIELDS = new Set(['resetsAt', 'status', 'utilization']);
+const ALLOWED_ASSISTANT_CONTENT_BLOCK_TYPES = new Set([
+  'redacted_thinking',
+  'text',
+  'thinking',
+  'tool_use',
+]);
+const ALLOWED_USER_CONTENT_BLOCK_TYPES = new Set(['text', 'tool_result']);
+const NON_PUBLIC_HOSTNAME_SUFFIXES = Object.freeze([
+  'localhost',
+  'local',
+  'internal',
+  'lan',
+  'test',
+  'invalid',
+  'example',
+  'onion',
+  'home.arpa',
+]);
+const STRUCTURED_RESULT_URL_KEYS = new Set([
+  'url',
+  'uri',
+  'href',
+  'link',
+  'source_url',
+  'sourceUrl',
+]);
 const FIXED_PROMPT = [
   'Follow the complete task provided on standard input.',
   'Use WebSearch for evidence and return only the requested JSON object.',
 ].join(' ');
 const activeChildren = new Set();
 const stoppingChildren = new WeakMap();
+const childLaunchMetadata = new WeakMap();
+const closedChildren = new WeakSet();
 const preparedWorkspaces = new Set();
 
 function positiveInt(value, fallback, maximum = Number.MAX_SAFE_INTEGER) {
@@ -42,7 +142,68 @@ function configuredCliBin() {
   if (!bin || /[\0\r\n]/.test(bin)) {
     throw new ClaudeCliError('CONFIG', 'CLAUDE_CLI_BIN 값이 비어 있거나 줄바꿈 문자를 포함합니다.');
   }
+  if (requireAbsoluteCliBin() && !path.isAbsolute(bin)) {
+    throw new ClaudeCliError(
+      'CONFIG',
+      'CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN=1이면 CLAUDE_CLI_BIN에 절대경로를 지정해야 합니다.',
+    );
+  }
   return bin;
+}
+
+function requireAbsoluteCliBin() {
+  const value = String(process.env.CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN || '').trim();
+  if (!value || value === '0') return false;
+  if (value === '1') return true;
+  throw new ClaudeCliError('CONFIG', 'CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN은 0 또는 1이어야 합니다.');
+}
+
+function configuredAllowedSha256() {
+  const value = String(process.env.CLAUDE_CLI_ALLOWED_SHA256 || '').trim().toLowerCase();
+  if (!value) return '';
+  if (!/^[a-f0-9]{64}$/.test(value)) {
+    throw new ClaudeCliError('CONFIG', 'CLAUDE_CLI_ALLOWED_SHA256는 64자리 SHA-256 16진수여야 합니다.');
+  }
+  return value;
+}
+
+function sha256File(candidate) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(candidate);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+async function verifyResolvedCliBinary(candidate) {
+  const expectedSha256 = configuredAllowedSha256();
+  if (expectedSha256) {
+    let actualSha256;
+    try {
+      actualSha256 = await sha256File(candidate);
+    } catch (error) {
+      throw new ClaudeCliError(
+        'SECURITY_POLICY',
+        'Claude CLI 실행 파일의 SHA-256을 확인하지 못했습니다.',
+        `${candidate}\n${error?.message || String(error)}`,
+      );
+    }
+    if (actualSha256 !== expectedSha256) {
+      throw new ClaudeCliError(
+        'SECURITY_POLICY',
+        'Claude CLI 실행 파일의 SHA-256이 허용 값과 일치하지 않습니다.',
+        `실행 파일: ${candidate}\n기대: ${expectedSha256}\n감지: ${actualSha256}`,
+      );
+    }
+  }
+  return {
+    absolutePathRequired: requireAbsoluteCliBin(),
+    absolutePathVerified: path.isAbsolute(candidate),
+    sha256Required: Boolean(expectedSha256),
+    sha256Verified: Boolean(expectedSha256),
+  };
 }
 
 function windowsEnvironmentValue(name, fallback = '') {
@@ -56,6 +217,55 @@ async function fileExists(candidate) {
     return (await fs.stat(candidate)).isFile();
   } catch {
     return false;
+  }
+}
+
+export async function resolveWindowsSystemExecutable(fileName) {
+  const normalizedName = String(fileName || '').toLowerCase();
+  if (!WINDOWS_SYSTEM_EXECUTABLES.has(normalizedName)) {
+    throw new ClaudeCliError('SECURITY_POLICY', '허용되지 않은 Windows 시스템 실행 파일을 요청했습니다.');
+  }
+  const systemRootValue = windowsEnvironmentValue('SystemRoot')
+    || windowsEnvironmentValue('WINDIR');
+  if (!systemRootValue || !path.win32.isAbsolute(systemRootValue) || /[\0\r\n]/.test(systemRootValue)) {
+    throw new ClaudeCliError(
+      'SECURITY_POLICY',
+      'Windows SystemRoot 절대경로를 안전하게 확인하지 못했습니다.',
+    );
+  }
+
+  const normalizedSystemRoot = path.win32.resolve(systemRootValue);
+  const expectedSystemRoot = path.win32.join(path.win32.parse(normalizedSystemRoot).root, 'Windows');
+  if (normalizedSystemRoot.toLowerCase() !== expectedSystemRoot.toLowerCase()) {
+    throw new ClaudeCliError(
+      'SECURITY_POLICY',
+      'Windows SystemRoot가 운영체제 드라이브의 표준 Windows 폴더가 아닙니다.',
+      normalizedSystemRoot,
+    );
+  }
+
+  const executableDirectory = normalizedName === 'explorer.exe'
+    ? normalizedSystemRoot
+    : path.win32.resolve(normalizedSystemRoot, 'System32');
+  const candidate = path.win32.join(executableDirectory, normalizedName);
+  try {
+    const [directoryRealPath, executableRealPath, executableStat] = await Promise.all([
+      fs.realpath(executableDirectory),
+      fs.realpath(candidate),
+      fs.lstat(candidate),
+    ]);
+    const sameDirectory = path.win32.dirname(executableRealPath).toLowerCase()
+      === directoryRealPath.toLowerCase();
+    if (!executableStat.isFile() || !path.win32.isAbsolute(executableRealPath) || !sameDirectory) {
+      throw new Error('Windows 시스템 폴더의 일반 실행 파일이 아닙니다.');
+    }
+    return executableRealPath;
+  } catch (error) {
+    throw new ClaudeCliError(
+      'SECURITY_POLICY',
+      `Windows 시스템 폴더의 ${normalizedName}을 안전하게 확인하지 못했습니다.`,
+      error?.message || String(error),
+    );
   }
 }
 
@@ -112,10 +322,32 @@ async function resolveWindowsCliBin() {
 async function resolveCliBin() {
   if (process.platform === 'win32') return resolveWindowsCliBin();
   const bin = configuredCliBin();
-  if (path.isAbsolute(bin) && !await fileExists(bin)) {
-    throw new ClaudeCliError('CLI_NOT_FOUND', `Claude CLI 실행 파일을 찾을 수 없습니다: ${bin}`);
+  if (path.isAbsolute(bin)) {
+    try {
+      await fs.access(bin, fsConstants.X_OK);
+      return path.resolve(bin);
+    } catch {
+      throw new ClaudeCliError('CLI_NOT_FOUND', `Claude CLI 실행 파일을 찾을 수 없습니다: ${bin}`);
+    }
   }
-  return bin;
+  if (/[\\/]/.test(bin)) {
+    throw new ClaudeCliError(
+      'CONFIG',
+      'CLAUDE_CLI_BIN에 폴더를 포함할 때는 절대경로를 사용해야 합니다.',
+    );
+  }
+  const directories = String(process.env.PATH || '')
+    .split(path.delimiter)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  for (const directory of directories) {
+    const candidate = path.join(directory, bin);
+    try {
+      await fs.access(candidate, fsConstants.X_OK);
+      return path.resolve(candidate);
+    } catch {}
+  }
+  throw new ClaudeCliError('CLI_NOT_FOUND', `Claude CLI 실행 파일 '${bin}'을 PATH에서 찾을 수 없습니다.`);
 }
 
 function quoteCmdToken(value, label) {
@@ -199,7 +431,7 @@ function createCapture(maximumBytes) {
 }
 
 function maxTurns() {
-  return positiveInt(process.env.CLAUDE_CLI_MAX_TURNS, 20, 50);
+  return positiveInt(process.env.CLAUDE_CLI_MAX_TURNS, 32, 50);
 }
 
 function researchArguments() {
@@ -226,13 +458,33 @@ function researchArguments() {
 
 async function launchSpec(args) {
   const bin = await resolveCliBin();
+  const executableVerification = await verifyResolvedCliBinary(bin);
   if (process.platform !== 'win32') {
-    return { command: bin, args, windowsVerbatimArguments: false };
+    return {
+      command: bin,
+      args,
+      windowsVerbatimArguments: false,
+      executablePath: bin,
+      executableVerification,
+    };
   }
 
   const extension = path.extname(bin).toLowerCase();
   if (extension === '.exe' || extension === '.com') {
-    return { command: bin, args, windowsVerbatimArguments: false };
+    return {
+      command: bin,
+      args,
+      windowsVerbatimArguments: false,
+      executablePath: bin,
+      executableVerification,
+    };
+  }
+  if (executableVerification.sha256Required) {
+    throw new ClaudeCliError(
+      'SECURITY_POLICY',
+      'SHA-256 고정은 실제 실행 payload를 직접 가리키는 native .exe/.com에만 사용할 수 있습니다.',
+      `래퍼 실행 파일은 하위 Node/JavaScript payload의 무결성을 보장하지 않습니다: ${bin}`,
+    );
   }
 
   const commandLine = [
@@ -240,9 +492,11 @@ async function launchSpec(args) {
     ...args.map((arg) => quoteCmdToken(arg, 'Claude CLI 인자')),
   ].join(' ');
   return {
-    command: process.env.ComSpec || process.env.COMSPEC || 'cmd.exe',
+    command: await resolveWindowsSystemExecutable('cmd.exe'),
     args: ['/d', '/q', '/v:off', '/s', '/c', `"${commandLine}"`],
     windowsVerbatimArguments: true,
+    executablePath: bin,
+    executableVerification,
   };
 }
 
@@ -282,6 +536,19 @@ function enterpriseEnvironment() {
   env.ENABLE_CLAUDEAI_MCP_SERVERS = 'false';
   env.NO_COLOR = '1';
   return env;
+}
+
+export function sensitiveEnvironmentVariableNames(environment = process.env) {
+  if (!environment || typeof environment !== 'object') return [];
+  return Object.keys(environment)
+    .filter((name) => name.length <= 256)
+    .filter((name) => (
+      /(?:API[_-]?KEY|AUTH[_-]?TOKEN|ACCESS[_-]?TOKEN|OAUTH[_-]?TOKEN|SESSION[_-]?TOKEN|SECRET(?:[_-]?KEY)?|PASSWORD|BASE[_-]?URL)$/i.test(name)
+      || /^(?:HTTP|HTTPS|ALL|NO)_PROXY$/i.test(name)
+      || /^(?:NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR)$/i.test(name)
+    ))
+    .sort((left, right) => left.localeCompare(right, 'en-US'))
+    .slice(0, 100);
 }
 
 function normalizedWorkspace(cwd) {
@@ -331,11 +598,19 @@ async function verifyResearchWorkspace(cwd) {
       real,
     );
   }
+  const entries = await fs.readdir(real);
+  if (entries.length > 0) {
+    throw new ClaudeCliError(
+      'SECURITY_POLICY',
+      '격리된 Claude 작업 폴더에 예상하지 않은 파일이 생겨 결과를 폐기했습니다.',
+      entries.slice(0, 20).join(', '),
+    );
+  }
   return real;
 }
 
 function waitForChildClose(child, waitMs) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  if (!child || closedChildren.has(child)) return Promise.resolve(true);
   return new Promise((resolve) => {
     let completed = false;
     let timer;
@@ -350,15 +625,62 @@ function waitForChildClose(child, waitMs) {
     child.once('close', onClose);
     timer = setTimeout(() => done(false), waitMs);
     timer.unref?.();
-    if (child.exitCode !== null || child.signalCode !== null) done(true);
+    if (closedChildren.has(child)) done(true);
   });
 }
 
-function runTaskkill(pid) {
+function posixProcessGroupState(pid) {
+  if (process.platform === 'win32' || !Number.isSafeInteger(pid) || pid <= 0) {
+    return { alive: false, error: '' };
+  }
+  try {
+    process.kill(-pid, 0);
+    return { alive: true, error: '' };
+  } catch (error) {
+    if (error?.code === 'ESRCH') return { alive: false, error: '' };
+    if (error?.code === 'EPERM') return { alive: true, error: '프로세스 그룹 상태 확인 권한이 없습니다.' };
+    return { alive: true, error: `프로세스 그룹 상태 확인 실패: ${error?.message || String(error)}` };
+  }
+}
+
+function signalPosixProcessGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+    return { sent: true, absent: false, error: '' };
+  } catch (error) {
+    if (error?.code === 'ESRCH') return { sent: false, absent: true, error: '' };
+    return {
+      sent: false,
+      absent: false,
+      error: `${signal} 프로세스 그룹 종료 실패: ${error?.message || String(error)}`,
+    };
+  }
+}
+
+async function waitForPosixProcessGroupExit(pid, waitMs) {
+  const deadline = Date.now() + waitMs;
+  let state = posixProcessGroupState(pid);
+  while (state.alive && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    state = posixProcessGroupState(pid);
+  }
+  return state;
+}
+
+async function runTaskkill(pid) {
+  let taskkillPath;
+  try {
+    taskkillPath = await resolveWindowsSystemExecutable('taskkill.exe');
+  } catch (error) {
+    return {
+      code: null,
+      details: `taskkill 시스템 경로 확인 실패: ${error?.message || String(error)}`,
+    };
+  }
   return new Promise((resolve) => {
     let killer;
     try {
-      killer = spawn('taskkill.exe', ['/pid', String(pid), '/T', '/F'], {
+      killer = spawn(taskkillPath, ['/pid', String(pid), '/T', '/F'], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });
@@ -385,18 +707,18 @@ function runTaskkill(pid) {
       resolve({ code, details: `${output || fallback}${suffix}`.trim() });
     };
     confirmationTimer = setTimeout(() => {
-      done(null, 'taskkill 종료 명령이 10초 안에 끝나지 않아 중단했습니다.');
-    }, 12000);
+      done(null, `taskkill 종료 명령이 ${WINDOWS_TASKKILL_CONFIRM_MS}ms 안에 끝나지 않아 중단했습니다.`);
+    }, WINDOWS_TASKKILL_CONFIRM_MS);
     stopTimer = setTimeout(() => {
       timedOut = true;
       try { killer.kill('SIGKILL'); } catch {}
-    }, 10000);
+    }, WINDOWS_TASKKILL_TIMEOUT_MS);
     stopTimer.unref?.();
     confirmationTimer.unref?.();
     killer.once('error', (error) => done(null, error.message));
     killer.once('close', (code, signal) => {
       if (timedOut) {
-        done(null, 'taskkill 종료 명령이 10초 안에 끝나지 않아 중단했습니다.');
+        done(null, `taskkill 종료 명령이 ${WINDOWS_TASKKILL_TIMEOUT_MS}ms 안에 끝나지 않아 중단했습니다.`);
         return;
       }
       done(code, signal ? `taskkill이 ${signal} 신호로 종료됨` : '');
@@ -404,19 +726,36 @@ function runTaskkill(pid) {
   });
 }
 
-function stopProcessTree(child) {
+function windowsLaunchKind(child) {
+  const executablePath = childLaunchMetadata.get(child)?.executablePath || '';
+  const extension = path.extname(executablePath).toLowerCase();
+  return extension === '.exe' || extension === '.com' ? 'native' : 'wrapper';
+}
+
+function appendCleanupDetail(current, detail) {
+  return [current, detail].filter(Boolean).join('\n');
+}
+
+function stopProcessTree(child, taskkillRunner = runTaskkill) {
   if (!child) {
     return Promise.resolve({ closed: true, treeConfirmed: true, details: '' });
   }
   const existing = stoppingChildren.get(child);
   if (existing) return existing;
-  if (child.exitCode !== null || child.signalCode !== null) {
-    const windowsTreeUnconfirmed = process.platform === 'win32' && Number.isSafeInteger(child.pid);
+  if (
+    closedChildren.has(child)
+    && (
+      process.platform === 'win32'
+      || !posixProcessGroupState(child.pid).alive
+    )
+  ) {
+    const windowsTreeUnconfirmed = process.platform === 'win32'
+      && windowsLaunchKind(child) !== 'native';
     return Promise.resolve({
       closed: true,
       treeConfirmed: !windowsTreeUnconfirmed,
       details: windowsTreeUnconfirmed
-        ? '부모 프로세스가 먼저 종료되어 Windows 자식 프로세스 트리 종료를 확인할 수 없습니다.'
+        ? 'Windows 배치 래퍼가 먼저 종료되어 하위 CLI 프로세스 종료를 확인할 수 없습니다.'
         : '',
     });
   }
@@ -425,23 +764,92 @@ function stopProcessTree(child) {
     let treeConfirmed = true;
     let details = '';
     if (process.platform === 'win32' && child.pid) {
-      const killed = await runTaskkill(child.pid);
+      const killed = await taskkillRunner(child.pid);
       treeConfirmed = killed.code === 0;
       details = killed.details || (treeConfirmed ? '' : `taskkill 종료 코드 ${killed.code}`);
+      if (!treeConfirmed) {
+        // Enterprise endpoint policies sometimes deny taskkill even for a process
+        // created by the current user. Terminate the process handle that Node owns
+        // immediately so a native .exe cannot linger. A .cmd/.bat launch remains
+        // fail-closed: closing cmd.exe does not prove that its CLI child exited.
+        let directKillSent = false;
+        if (child.exitCode === null && child.signalCode === null) {
+          try { directKillSent = child.kill('SIGKILL'); } catch (error) {
+            details = appendCleanupDetail(details, `직접 종료 실패: ${error?.message || String(error)}`);
+          }
+        }
+        const directWaitMs = windowsLaunchKind(child) === 'native'
+          ? WINDOWS_DIRECT_KILL_WAIT_MS
+          : WINDOWS_WRAPPER_KILL_WAIT_MS;
+        const directlyClosed = directKillSent
+          ? await waitForChildClose(child, directWaitMs)
+          : (closedChildren.has(child) || await waitForChildClose(child, directWaitMs));
+        if (windowsLaunchKind(child) === 'native' && directlyClosed) {
+          treeConfirmed = false;
+          details = appendCleanupDetail(
+            details,
+            '직접 실행한 native CLI 루트 프로세스는 종료했지만 하위 프로세스 트리의 종료는 확인할 수 없습니다.',
+          );
+        } else if (windowsLaunchKind(child) !== 'native') {
+          details = appendCleanupDetail(
+            details,
+            'CLAUDE_CLI_BIN이 .cmd/.bat 래퍼이므로 하위 CLI 프로세스가 남아 있을 수 있고 종료를 확인할 수 없습니다.',
+          );
+        }
+      }
+    } else if (Number.isSafeInteger(child.pid) && child.pid > 0) {
+      const terminated = signalPosixProcessGroup(child.pid, 'SIGTERM');
+      if (terminated.error) details = terminated.error;
+      let groupState = terminated.absent
+        ? { alive: false, error: '' }
+        : await waitForPosixProcessGroupExit(child.pid, 7000);
+      if (groupState.alive) {
+        const killed = signalPosixProcessGroup(child.pid, 'SIGKILL');
+        if (killed.error) details = [details, killed.error].filter(Boolean).join('\n');
+        groupState = killed.absent
+          ? { alive: false, error: '' }
+          : await waitForPosixProcessGroupExit(child.pid, 1500);
+      }
+      treeConfirmed = !groupState.alive;
+      if (!treeConfirmed) {
+        details = [
+          details,
+          groupState.error,
+          'POSIX 프로세스 그룹의 완전한 종료를 확인하지 못했습니다.',
+        ].filter(Boolean).join('\n');
+      }
     } else {
       try { child.kill('SIGTERM'); } catch {}
+      treeConfirmed = false;
+      details = 'POSIX 프로세스 그룹 ID를 확인하지 못해 자식 프로세스 트리 종료를 보장할 수 없습니다.';
     }
 
-    let closed = await waitForChildClose(child, 7000);
+    let closed = await waitForChildClose(child, 500);
     if (!closed && child.exitCode === null && child.signalCode === null) {
-      try { child.kill('SIGKILL'); } catch {}
+      if (process.platform === 'win32') {
+        try { child.kill('SIGKILL'); } catch {}
+      } else if (Number.isSafeInteger(child.pid) && child.pid > 0) {
+        const killed = signalPosixProcessGroup(child.pid, 'SIGKILL');
+        if (killed.error) details = [details, killed.error].filter(Boolean).join('\n');
+      } else {
+        try { child.kill('SIGKILL'); } catch {}
+      }
       closed = await waitForChildClose(child, 1500);
-      if (process.platform === 'win32') treeConfirmed = false;
+      if (process.platform === 'win32' && windowsLaunchKind(child) !== 'native') treeConfirmed = false;
     }
     return { closed, treeConfirmed, details };
   })();
   stoppingChildren.set(child, stopping);
   return stopping;
+}
+
+// Narrow test seam for proving Windows cleanup behavior when endpoint policy
+// denies taskkill. It cannot target a PID by itself: the caller must already
+// own a ChildProcess handle. Production execution always uses runTaskkill.
+export function __stopProcessTreeForTest(child, executablePath, taskkillResult) {
+  childLaunchMetadata.set(child, { executablePath: path.resolve(String(executablePath || '')) });
+  child.once('close', () => closedChildren.add(child));
+  return stopProcessTree(child, async () => ({ ...taskkillResult }));
 }
 
 export function createProcessCleanupError(originalError, cleanup = {}, pid = null) {
@@ -542,6 +950,7 @@ async function executeCli(args, options = {}) {
         shell: false,
         windowsHide: true,
         windowsVerbatimArguments: spec.windowsVerbatimArguments,
+        detached: process.platform !== 'win32',
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {
@@ -550,6 +959,8 @@ async function executeCli(args, options = {}) {
       return;
     }
 
+    childLaunchMetadata.set(child, { executablePath: spec.executablePath });
+    child.once('close', () => closedChildren.add(child));
     activeChildren.add(child);
     const stdoutCapture = createCapture(MAX_CAPTURE_BYTES);
     const stderrCapture = createCapture(MAX_CAPTURE_BYTES);
@@ -637,6 +1048,8 @@ async function executeCli(args, options = {}) {
             stderr: stderrCapture.text('Claude CLI 오류 출력'),
             exitCode,
             signalCode,
+            executablePath: spec.executablePath,
+            executableVerification: spec.executableVerification,
           });
         } catch (error) {
           reject(error);
@@ -698,6 +1111,31 @@ function normalizeWarnings(value) {
   )).filter(Boolean);
 }
 
+function publicHostname(value) {
+  const hostname = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.+$/, '');
+  const labels = hostname.split('.');
+  if (
+    !hostname
+    || hostname.length > 253
+    || !hostname.includes('.')
+    || !/^[a-z0-9.-]+$/i.test(hostname)
+    || labels.some((label) => (
+      !label
+      || label.length > 63
+      || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label)
+    ))
+    || isIP(hostname)
+    || NON_PUBLIC_HOSTNAME_SUFFIXES.some(
+      (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`),
+    )
+  ) return '';
+  return hostname;
+}
+
 function safeEvidenceUrl(value) {
   let raw = String(value || '').trim();
   raw = raw.replace(/[),.;:!?\]}]+$/g, '');
@@ -707,20 +1145,7 @@ function safeEvidenceUrl(value) {
     if (parsed.protocol !== 'https:') return '';
     if (parsed.username || parsed.password || !parsed.hostname) return '';
     if (parsed.port && parsed.port !== '443') return '';
-    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
-    if (
-      isIP(hostname)
-      || !hostname.includes('.')
-      || hostname === 'localhost'
-      || hostname.endsWith('.localhost')
-      || hostname.endsWith('.local')
-      || hostname.endsWith('.internal')
-      || hostname.endsWith('.lan')
-      || hostname.endsWith('.test')
-      || hostname.endsWith('.invalid')
-      || hostname.endsWith('.example')
-      || hostname.endsWith('.onion')
-    ) return '';
+    if (!publicHostname(parsed.hostname)) return '';
     parsed.hash = '';
     return parsed.href;
   } catch {
@@ -728,26 +1153,33 @@ function safeEvidenceUrl(value) {
   }
 }
 
-function collectUrls(value, output, seen = new Set(), depth = 0) {
-  if (depth > 12 || value === null || value === undefined) return;
-  if (typeof value === 'string') {
-    const matches = value.match(/https?:\/\/[^\s<>"'`]+/gi) || [];
-    for (const match of matches) {
-      const url = safeEvidenceUrl(match);
-      if (url && !seen.has(url) && output.length < 500) {
+function collectStructuredResultUrls(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.results)) {
+    return [];
+  }
+  const output = [];
+  const seen = new Set();
+  const collectDirect = (entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return;
+    for (const key of STRUCTURED_RESULT_URL_KEYS) {
+      const url = typeof entry[key] === 'string' ? safeEvidenceUrl(entry[key]) : '';
+      if (url && !seen.has(url) && output.length < MAX_RESULT_URLS_PER_SEARCH) {
         seen.add(url);
         output.push(url);
       }
     }
-    return;
+  };
+  for (const result of value.results) {
+    if (!result || typeof result !== 'object' || Array.isArray(result)) continue;
+    collectDirect(result);
+    // Claude Code의 현재 WebSearch 계약은 각 result의 content 배열에 실제
+    // 검색 결과 항목을 둘 수 있다. 이 한 단계만 명시적으로 허용하고
+    // metadata/related/thumbnail 등 그 아래 임의 중첩 URL은 근거로 보지 않는다.
+    if (Array.isArray(result.content)) {
+      for (const contentEntry of result.content) collectDirect(contentEntry);
+    }
   }
-  if (Array.isArray(value)) {
-    for (const item of value) collectUrls(item, output, seen, depth + 1);
-    return;
-  }
-  if (typeof value === 'object') {
-    for (const nested of Object.values(value)) collectUrls(nested, output, seen, depth + 1);
-  }
+  return output;
 }
 
 function streamError(code, message, details = '') {
@@ -840,6 +1272,170 @@ function eventContent(event) {
   return content;
 }
 
+function validateResultEventMetadata(event) {
+  if (
+    event.ttft_ms !== undefined
+    && (!Number.isFinite(event.ttft_ms) || event.ttft_ms < 0)
+  ) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result의 ttft_ms 형식이 올바르지 않습니다.');
+  }
+  if (
+    event.fast_mode_state !== undefined
+    && !ALLOWED_FAST_MODE_STATES.has(event.fast_mode_state)
+  ) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result의 fast_mode_state 형식이 올바르지 않습니다.');
+  }
+  if (
+    event.terminal_reason !== undefined
+    && !ALLOWED_TERMINAL_REASONS.has(event.terminal_reason)
+  ) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result의 terminal_reason 형식이 올바르지 않습니다.');
+  }
+  if (
+    event.stop_reason !== undefined
+    && event.stop_reason !== null
+    && typeof event.stop_reason !== 'string'
+  ) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result의 stop_reason 형식이 올바르지 않습니다.');
+  }
+  if (Object.prototype.hasOwnProperty.call(event, 'origin')) {
+    const origin = event.origin;
+    if (
+      !origin
+      || typeof origin !== 'object'
+      || Array.isArray(origin)
+      || origin.kind !== 'human'
+      || Object.keys(origin).some((field) => field !== 'kind')
+    ) {
+      throw streamError(
+        'SECURITY_POLICY',
+        '직접 실행이 아닌 Claude CLI 결과 origin이 감지되어 결과를 폐기했습니다.',
+        JSON.stringify(origin).slice(0, 1000),
+      );
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(event, 'deferred_tool_use')) {
+    throw streamError(
+      'SECURITY_POLICY',
+      'Claude CLI가 연기된 도구 호출을 반환하여 결과를 폐기했습니다.',
+      JSON.stringify(event.deferred_tool_use).slice(0, 1000),
+    );
+  }
+  if (event.stop_reason === 'tool_deferred' || event.terminal_reason === 'tool_deferred') {
+    throw streamError('SECURITY_POLICY', 'Claude CLI의 연기된 도구 실행 흔적이 감지되었습니다.');
+  }
+  if (event.subtype === 'success' && event.terminal_reason !== undefined
+    && event.terminal_reason !== 'completed') {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude CLI 성공 result의 종료 사유가 completed가 아닙니다.',
+      event.terminal_reason,
+    );
+  }
+}
+
+function validateRateLimitEvent(event) {
+  const unknownFields = Object.keys(event)
+    .filter((field) => !ALLOWED_RATE_LIMIT_EVENT_FIELDS.has(field));
+  if (unknownFields.length > 0) {
+    throw streamError(
+      'SECURITY_POLICY',
+      'Claude CLI rate_limit_event에 허용 목록 밖 필드가 있습니다.',
+      unknownFields.join(', '),
+    );
+  }
+  if (typeof event.uuid !== 'string' || !event.uuid.trim()
+    || typeof event.session_id !== 'string' || !event.session_id.trim()) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI rate_limit_event 식별자 형식이 올바르지 않습니다.');
+  }
+  const info = event.rate_limit_info;
+  if (!info || typeof info !== 'object' || Array.isArray(info)) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI rate_limit_info 형식이 올바르지 않습니다.');
+  }
+  const unknownInfoFields = Object.keys(info)
+    .filter((field) => !ALLOWED_RATE_LIMIT_INFO_FIELDS.has(field));
+  if (unknownInfoFields.length > 0 || !ALLOWED_RATE_LIMIT_STATUSES.has(info.status)) {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude CLI rate_limit_info에 알 수 없는 필드 또는 상태가 있습니다.',
+      [...unknownInfoFields, String(info.status || '(상태 없음)')].join(', '),
+    );
+  }
+  for (const field of ['resetsAt', 'utilization']) {
+    if (info[field] !== undefined && (!Number.isFinite(info[field]) || info[field] < 0)) {
+      throw streamError('BAD_OUTPUT', `Claude CLI rate_limit_info.${field} 형식이 올바르지 않습니다.`);
+    }
+  }
+}
+
+function validateKnownStreamEvent(event) {
+  if (!ALLOWED_STREAM_EVENT_TYPES.has(event.type)) {
+    throw streamError(
+      'SECURITY_POLICY',
+      '허용 목록에 없는 Claude CLI top-level 이벤트가 감지되었습니다.',
+      String(event.type || '(형식 없음)'),
+    );
+  }
+  if (event.type === 'system') {
+    if (!ALLOWED_SYSTEM_EVENT_SUBTYPES.has(event.subtype)) {
+      throw streamError(
+        'SECURITY_POLICY',
+        '허용 목록에 없는 Claude CLI system subtype이 감지되었습니다.',
+        String(event.subtype || '(없음)'),
+      );
+    }
+    return;
+  }
+  if (event.type === 'result') {
+    if (!ALLOWED_RESULT_EVENT_SUBTYPES.has(event.subtype)) {
+      throw streamError(
+        'SECURITY_POLICY',
+        '허용 목록에 없는 Claude CLI result subtype이 감지되었습니다.',
+        String(event.subtype || '(없음)'),
+      );
+    }
+    const unknownFields = Object.keys(event)
+      .filter((field) => !ALLOWED_RESULT_EVENT_FIELDS.has(field));
+    if (unknownFields.length > 0) {
+      throw streamError(
+        'SECURITY_POLICY',
+        'Claude CLI 최종 result에 허용 목록 밖 필드가 감지되어 결과를 폐기했습니다.',
+        unknownFields.join(', '),
+      );
+    }
+    validateResultEventMetadata(event);
+    return;
+  }
+  if (event.type === 'rate_limit_event') {
+    validateRateLimitEvent(event);
+    return;
+  }
+  if (Object.prototype.hasOwnProperty.call(event, 'subtype')) {
+    throw streamError(
+      'SECURITY_POLICY',
+      'subtype을 사용하지 않는 Claude CLI 이벤트에 subtype이 포함되었습니다.',
+      `${event.type}/${String(event.subtype || '(없음)')}`,
+    );
+  }
+}
+
+function validateKnownContentBlock(block, role) {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) {
+    throw streamError('BAD_OUTPUT', `Claude ${role} content block 형식이 올바르지 않습니다.`);
+  }
+  const type = typeof block.type === 'string' ? block.type : '';
+  const allowed = role === 'assistant'
+    ? ALLOWED_ASSISTANT_CONTENT_BLOCK_TYPES
+    : ALLOWED_USER_CONTENT_BLOCK_TYPES;
+  if (!allowed.has(type)) {
+    throw streamError(
+      'SECURITY_POLICY',
+      `허용 목록에 없는 Claude ${role} content block이 감지되었습니다.`,
+      `${type || '(형식 없음)'}${block.name ? `: ${String(block.name)}` : ''}`,
+    );
+  }
+}
+
 function resultIsError(event, block) {
   if (block?.is_error === true) return true;
   if (event?.tool_use_result && typeof event.tool_use_result === 'object') {
@@ -930,33 +1526,20 @@ function webSearchDomains(input, key) {
   }
   const domains = [];
   for (const raw of input[key]) {
-    const hostname = String(raw || '').trim().toLowerCase().replace(/\.$/, '');
-    const labels = hostname.split('.');
-    if (
-      !hostname
-      || hostname.length > 253
-      || !hostname.includes('.')
-      || !/^[a-z0-9.-]+$/i.test(hostname)
-      || labels.some((label) => (
-        !label
-        || label.length > 63
-        || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label)
-      ))
-      || hostname === 'localhost'
-      || hostname.endsWith('.localhost')
-      || hostname.endsWith('.local')
-      || hostname.endsWith('.internal')
-      || hostname.endsWith('.lan')
-      || isIP(hostname)
-    ) {
-      throw streamError('BAD_OUTPUT', `Claude WebSearch ${key}에 공개 hostname이 아닌 값이 있습니다.`, hostname);
+    const hostname = publicHostname(raw);
+    if (!hostname) {
+      throw streamError(
+        'BAD_OUTPUT',
+        `Claude WebSearch ${key}에 공개 hostname이 아닌 값이 있습니다.`,
+        String(raw || '').trim().slice(0, 500),
+      );
     }
     if (!domains.includes(hostname)) domains.push(hostname);
   }
   return domains;
 }
 
-function webSearchRequest(block, officialDomainAllowlist = []) {
+function webSearchRequest(block, officialDomainAllowlist = [], strictSearchPolicy = false) {
   const input = block?.input;
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw streamError('BAD_OUTPUT', 'Claude WebSearch 입력 형식이 올바르지 않습니다.');
@@ -974,6 +1557,13 @@ function webSearchRequest(block, officialDomainAllowlist = []) {
       'Claude WebSearch는 allowed_domains와 blocked_domains를 함께 사용할 수 없습니다.',
     );
   }
+  if (strictSearchPolicy && blockedDomains.length > 0) {
+    throw streamError(
+      'BAD_OUTPUT',
+      '엄격 검색 모드에서는 blocked_domains WebSearch를 사용할 수 없습니다.',
+      blockedDomains.join(', '),
+    );
+  }
   const untrustedDomains = allowedDomains.filter(
     (hostname) => !isTrustedOfficialDomain(hostname, officialDomainAllowlist),
   );
@@ -989,32 +1579,60 @@ function webSearchRequest(block, officialDomainAllowlist = []) {
     normalizedQuery,
     allowedDomains,
     blockedDomains,
-    mode: allowedDomains.length > 0 ? 'official' : 'broad',
+    mode: allowedDomains.length > 0
+      ? 'official'
+      : (blockedDomains.length > 0 ? 'blocked' : 'broad'),
   };
 }
 
-function webSearchResultError(event, block) {
-  if (resultIsError(event, block)) return resultErrorDetails(event, block);
+function inspectWebSearchResult(event, block, search) {
+  if (resultIsError(event, block)) {
+    return { error: resultErrorDetails(event, block), urls: [], officialUrls: [] };
+  }
   const value = event?.tool_use_result;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return '구조화된 WebSearch 결과가 없습니다.';
+    return { error: '구조화된 WebSearch 결과가 없습니다.', urls: [], officialUrls: [] };
   }
   if (typeof value.query !== 'string' || !value.query.trim()) {
-    return 'WebSearch 결과에 실행된 query가 없습니다.';
+    return { error: 'WebSearch 결과에 실행된 query가 없습니다.', urls: [], officialUrls: [] };
   }
   if (!Array.isArray(value.results) || value.results.length === 0) {
-    return 'WebSearch results가 비어 있습니다.';
+    return { error: 'WebSearch results가 비어 있습니다.', urls: [], officialUrls: [] };
   }
   if (value.searchCount !== undefined
     && (!Number.isSafeInteger(value.searchCount) || value.searchCount < 1)) {
-    return `WebSearch searchCount가 올바르지 않습니다: ${String(value.searchCount)}`;
+    return {
+      error: `WebSearch searchCount가 올바르지 않습니다: ${String(value.searchCount)}`,
+      urls: [],
+      officialUrls: [],
+    };
   }
-  return '';
+  const urls = collectStructuredResultUrls(value);
+  if (urls.length === 0) {
+    return { error: 'WebSearch 실제 검색 결과에 공개 HTTPS URL이 없습니다.', urls, officialUrls: [] };
+  }
+  const officialUrls = search.mode === 'official'
+    ? urls.filter((url) => isTrustedOfficialDomain(new URL(url).hostname, search.allowedDomains))
+    : [];
+  if (search.mode === 'official' && officialUrls.length === 0) {
+    return {
+      error: 'WebSearch 공식기관 검색 결과 URL이 요청한 allowed_domains와 일치하지 않습니다.',
+      urls,
+      officialUrls,
+    };
+  }
+  return { error: '', urls, officialUrls };
 }
 
 function isUnexpectedToolBlock(block) {
   const type = String(block?.type || '');
   return type !== 'tool_use' && /tool/i.test(type);
+}
+
+function isSuspiciousRuntimeFamily(value) {
+  const normalized = String(value || '').replace(/([a-z0-9])([A-Z])/g, '$1_$2');
+  return /(?:^|[\s_-])(?:tools?|files?|persist(?:ed|ence|ent|ing)?|background|tasks?|memory|agent|shell|command|write|edit|hook|plugin|mcp|skill)(?:[\s_-]|$)/i
+    .test(normalized);
 }
 
 function classifyResultFailure(event) {
@@ -1088,6 +1706,7 @@ export function parseClaudeStream(output, options = {}) {
   const urlSet = new Set();
   const warnings = [];
   let eventIndex = 0;
+  let streamSessionId = null;
 
   for (const line of lines) {
     eventIndex += 1;
@@ -1107,6 +1726,19 @@ export function parseClaudeStream(output, options = {}) {
     if (!event || typeof event !== 'object' || Array.isArray(event) || typeof event.type !== 'string') {
       throw streamError('BAD_OUTPUT', `Claude CLI JSONL ${eventIndex}번째 이벤트 형식이 올바르지 않습니다.`);
     }
+    if (Object.prototype.hasOwnProperty.call(event, 'session_id')) {
+      if (typeof event.session_id !== 'string' || !event.session_id.trim()) {
+        throw streamError('BAD_OUTPUT', 'Claude CLI 이벤트의 session_id 형식이 올바르지 않습니다.');
+      }
+      if (streamSessionId && event.session_id !== streamSessionId) {
+        throw streamError(
+          'SECURITY_POLICY',
+          'Claude CLI stream-json에서 서로 다른 session_id가 감지되었습니다.',
+          `기대: ${streamSessionId}\n감지: ${event.session_id}`,
+        );
+      }
+      streamSessionId = event.session_id;
+    }
     if (
       /^hook_/.test(String(event.type))
       || (event.type === 'system' && /^hook_/.test(String(event.subtype)))
@@ -1117,6 +1749,7 @@ export function parseClaudeStream(output, options = {}) {
         `${event.hook_event || ''} ${event.hook_name || ''}`.trim(),
       );
     }
+    validateKnownStreamEvent(event);
     if (finalResult) {
       throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result 뒤에 추가 이벤트가 있습니다.');
     }
@@ -1140,8 +1773,32 @@ export function parseClaudeStream(output, options = {}) {
       warnings.push(`Claude API 재시도 ${metric(event.attempt)}/${metric(event.max_retries)}`);
       continue;
     }
+    if (event.type === 'rate_limit_event') {
+      const { status, resetsAt, utilization } = event.rate_limit_info;
+      if (status === 'rejected') {
+        throw streamError(
+          'RATE_LIMIT',
+          'Claude CLI 사용량 제한으로 조사가 거부되었습니다.',
+          `resetsAt=${resetsAt ?? '(없음)'}, utilization=${utilization ?? '(없음)'}`,
+        );
+      }
+      if (status === 'allowed_warning') {
+        warnings.push(
+          `Claude 사용량 제한 경고: resetsAt=${resetsAt ?? '(없음)'}, `
+          + `utilization=${utilization ?? '(없음)'}`,
+        );
+      }
+      continue;
+    }
     if (event.type === 'system' && /^(?:task_|files_persisted|memory_)/.test(String(event.subtype))) {
       throw streamError('SECURITY_POLICY', '허용되지 않은 Claude 백그라운드 또는 저장 이벤트가 감지되었습니다.');
+    }
+    if (isSuspiciousRuntimeFamily(event.subtype)) {
+      throw streamError(
+        'SECURITY_POLICY',
+        '알려지지 않은 Claude 도구·파일·저장·백그라운드 하위 이벤트가 감지되었습니다.',
+        String(event.subtype),
+      );
     }
     if (event.type === 'tool_progress') {
       if (event.tool_name !== RESEARCH_TOOL || event.parent_tool_use_id) {
@@ -1158,12 +1815,19 @@ export function parseClaudeStream(output, options = {}) {
         throw streamError('SECURITY_POLICY', 'Claude 하위 에이전트 메시지가 감지되어 결과를 폐기했습니다.');
       }
       for (const block of eventContent(event)) {
-        if (!block || typeof block !== 'object') continue;
+        validateKnownContentBlock(block, 'assistant');
         if (isUnexpectedToolBlock(block)) {
           throw streamError(
             'SECURITY_POLICY',
             '허용되지 않은 Claude 서버 또는 확장 도구 블록이 감지되어 결과를 폐기했습니다.',
             `${String(block.type || '(형식 없음)')}: ${String(block.name || '(이름 없음)')}`,
+          );
+        }
+        if (block.type !== 'tool_use' && isSuspiciousRuntimeFamily(block.type)) {
+          throw streamError(
+            'SECURITY_POLICY',
+            '알려지지 않은 Claude 파일·저장·백그라운드 블록이 감지되었습니다.',
+            String(block.type || '(형식 없음)'),
           );
         }
         if (block.type !== 'tool_use') continue;
@@ -1181,7 +1845,11 @@ export function parseClaudeStream(output, options = {}) {
         }
         searches.set(id, {
           status: 'pending',
-          ...webSearchRequest(block, officialDomainAllowlist),
+          ...webSearchRequest(
+            block,
+            officialDomainAllowlist,
+            options.requireOfficialAndBroadSearch === true,
+          ),
         });
       }
       continue;
@@ -1191,11 +1859,18 @@ export function parseClaudeStream(output, options = {}) {
         throw streamError('SECURITY_POLICY', 'Claude 하위 에이전트 도구 결과가 감지되어 결과를 폐기했습니다.');
       }
       for (const block of eventContent(event)) {
-        if (!block || typeof block !== 'object') continue;
+        validateKnownContentBlock(block, 'user');
         if (block.type !== 'tool_result' && /tool/i.test(String(block.type || ''))) {
           throw streamError(
             'SECURITY_POLICY',
             '허용되지 않은 Claude 서버 또는 확장 도구 결과가 감지되어 결과를 폐기했습니다.',
+            String(block.type || '(형식 없음)'),
+          );
+        }
+        if (block.type !== 'tool_result' && isSuspiciousRuntimeFamily(block.type)) {
+          throw streamError(
+            'SECURITY_POLICY',
+            '알려지지 않은 Claude 파일·저장·백그라운드 결과 블록이 감지되었습니다.',
             String(block.type || '(형식 없음)'),
           );
         }
@@ -1219,20 +1894,36 @@ export function parseClaudeStream(output, options = {}) {
             `요청: ${search.query}\n결과: ${resultQuery}`,
           );
         }
-        const searchError = webSearchResultError(event, block);
-        if (searchError) {
+        const inspected = inspectWebSearchResult(event, block, search);
+        if (inspected.error) {
           search.status = 'failed';
-          warnings.push(`WebSearch 실패: ${searchError}`);
+          search.resultUrls = [];
+          search.officialResultUrls = [];
+          warnings.push(`WebSearch 실패: ${inspected.error}`);
         } else {
           search.status = 'success';
-          collectUrls(block.content, groundingUrls, urlSet);
-          collectUrls(event.tool_use_result, groundingUrls, urlSet);
+          search.resultUrls = inspected.urls;
+          search.officialResultUrls = inspected.officialUrls;
+          for (const url of inspected.urls) {
+            if (!urlSet.has(url) && groundingUrls.length < MAX_GROUNDING_URLS) {
+              urlSet.add(url);
+              groundingUrls.push(url);
+            }
+          }
         }
       }
       continue;
     }
     if (event.type === 'result') {
       finalResult = event;
+      continue;
+    }
+    if (isSuspiciousRuntimeFamily(`${event.type} ${event.subtype || ''}`)) {
+      throw streamError(
+        'SECURITY_POLICY',
+        '알려지지 않은 Claude 도구·파일·저장·백그라운드 이벤트가 감지되었습니다.',
+        `${event.type}${event.subtype ? `/${event.subtype}` : ''}`,
+      );
     }
   }
 
@@ -1324,6 +2015,17 @@ export function parseClaudeStream(output, options = {}) {
       },
     },
   };
+  const groundingSearches = [...searches.entries()]
+    .filter(([, search]) => search.status === 'success')
+    .map(([toolUseId, search]) => ({
+      toolUseId,
+      query: search.query,
+      mode: search.mode,
+      allowedDomains: [...search.allowedDomains],
+      blockedDomains: [...search.blockedDomains],
+      urls: [...search.resultUrls],
+      officialUrls: [...search.officialResultUrls],
+    }));
   return {
     response: finalResult.result,
     stats: {
@@ -1339,9 +2041,8 @@ export function parseClaudeStream(output, options = {}) {
     warnings: normalizeWarnings(warnings),
     toolEvidence,
     groundingUrls,
-    sessionId: typeof finalResult.session_id === 'string'
-      ? finalResult.session_id
-      : (typeof init.session_id === 'string' ? init.session_id : null),
+    groundingSearches,
+    sessionId: streamSessionId,
   };
 }
 
@@ -1380,6 +2081,7 @@ export async function preflightClaudeCli(options = {}) {
     timeoutCode: 'CLI_STARTUP_TIMEOUT',
     timeoutMessage: `Claude CLI 시작 확인이 ${Math.max(1, Math.round(timeout / 1000))}초 안에 끝나지 않았습니다.`,
   });
+  await verifyResearchWorkspace(cwd);
   if (result.exitCode !== 0) throw exitFailure(result, 'Claude CLI 사전 점검 오류');
 
   const versionOutput = `${result.stdout}\n${result.stderr}`.trim();
@@ -1399,7 +2101,19 @@ export async function preflightClaudeCli(options = {}) {
       `감지된 버전: ${versionText}\n필요한 최소 버전: ${MINIMUM_CLI_VERSION.join('.')}`,
     );
   }
-  return { version: versionText, minimumVersion: MINIMUM_CLI_VERSION.join('.') };
+  const inheritedSensitiveEnvironmentNames = sensitiveEnvironmentVariableNames(enterpriseEnvironment());
+  return {
+    version: versionText,
+    minimumVersion: MINIMUM_CLI_VERSION.join('.'),
+    executablePath: result.executablePath,
+    diagnostics: {
+      inheritedSensitiveEnvironmentNames,
+      executableVerification: result.executableVerification,
+      warnings: inheritedSensitiveEnvironmentNames.length > 0
+        ? ['Claude CLI에 인증·라우팅 관련 환경변수가 상속됩니다. 진단에는 이름만 표시하며 값은 표시하지 않습니다.']
+        : [],
+    },
+  };
 }
 
 export async function callClaudeCli(prompt, options = {}) {
@@ -1412,6 +2126,7 @@ export async function callClaudeCli(prompt, options = {}) {
     input: prompt,
     heartbeat: true,
   });
+  await verifyResearchWorkspace(cwd);
 
   let envelope;
   try {

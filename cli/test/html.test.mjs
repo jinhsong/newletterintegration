@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { domains, researchPolicyForUnit } from '../src/config.mjs';
 import { renderMonitoringHtml } from '../src/html-renderer.mjs';
 import { saveHtmlOutput } from '../src/output-store.mjs';
 import { collectMonitoring } from '../src/pipeline.mjs';
@@ -56,10 +57,32 @@ test('HTML은 자체 포함 CSS와 세 영역을 가지며 외부 리소스와 �
   assert.ok(html.indexOf('>수출통제<') < html.indexOf('>무역구제<'));
   assert.match(html, /target="_blank" rel="noopener noreferrer"/);
   assert.match(html, /AI 예비 조사 결과 · 원문 수동 확인 필수/);
-  assert.match(html, /테스트 데이터/);
-  assert.match(html, /실제 모니터링 결과로 사용하지 마세요/);
+  assert.match(html, /<title>\[테스트 전용\] 글로벌 통상 모니터링 · 전체 · 2026-07-29<\/title>/);
+  assert.match(html, /<body class="mock-output">/);
+  assert.match(html, /MOCK · 테스트 전용/);
+  assert.match(html, /실제 모니터링 결과나 업무 판단 자료로 사용하지 마세요/);
+  assert.match(html, /자체 포함 HTML/);
+  assert.match(html, /외부 서비스 연동 및 메일 발송 없음/);
+  assert.doesNotMatch(html, /PC 로컬 HTML/);
   assert.match(html, /발표시각이 확인된 항목은 정확한 시각/);
   assert.match(html, /<span class="sr-only">\(새 창\)<\/span>/);
+  assert.match(html, /완료 카테고리 18\/18 · 완전 완료 영역 3\/3/);
+  assert.match(html, /검증 처리/);
+  assert.match(html, /검증 제외 0건/);
+  assert.match(html, /표시 한도 제외 0건/);
+  assert.match(html, /중복 제거 0건/);
+  assert.match(html, /aria-label="카테고리 바로가기"/);
+  assert.match(html, /id="category-customs-1"/);
+  assert.match(html, /href="#category-customs-1"/);
+  assert.match(html, /class="back-to-top" href="#top"/);
+  assert.equal([...html.matchAll(/id="category-[^"]+"/g)].length, 18);
+  assert.equal([...html.matchAll(/class="back-to-top"/g)].length, 18);
+  assert.match(html, /조사 기간 하이라이트/);
+  assert.match(html, /a:focus-visible\{outline:3px solid var\(--navy\);outline-offset:2px;box-shadow:0 0 0 6px var\(--gold\)/);
+  assert.match(html, /\.source\[href\]::after\{content:" \(" attr\(href\) "\)"/);
+  assert.match(html, /break-after:avoid-page;page-break-after:avoid/);
+  assert.doesNotMatch(html, /--muted:#7c8b9a/);
+  assert.doesNotMatch(html, /color:#9aa7b4/);
   assert.doesNotMatch(html, /정상적으로 완료/);
 });
 
@@ -82,8 +105,11 @@ test('단일 카테고리 HTML은 선택 범위만 표시하고 미선택 17개�
   payload.results.export.coverage.webSearchSuccesses = 6;
   payload.results.export.categoryStatus.미국.webSearchSuccesses = 6;
   const html = renderMonitoringHtml(payload);
+  assert.match(html, /<title>글로벌 통상 모니터링 · 수출통제 \/ 미국 · 2026-07-29<\/title>/);
+  assert.match(html, /<body class="live-output">/);
   assert.match(html, /선택 조사 · 수출통제 \/ 미국/);
-  assert.match(html, /요청한 1개 카테고리의 Claude Code 다각도 심층 검색 결과/);
+  assert.match(html, /요청한 1개 카테고리의 Claude Code 표준 조사를 정리했습니다/);
+  assert.match(html, /조사 깊이 표준\(standard\)/);
   assert.match(html, /카테고리 1\/1 · 웹 검색 6회 성공/);
   assert.match(html, /--domain-band:#7a1f1f/);
   assert.doesNotMatch(html, /--domain-band:#13335f/);
@@ -106,17 +132,23 @@ test('그룹 HTML은 선택한 영역의 전체 카테고리만 표시한다', a
     lookbackHours: 24,
   });
   payload.collection.mode = 'live';
-  payload.results.customs.coverage.webSearchSuccesses = 54;
-  for (const status of Object.values(payload.results.customs.categoryStatus)) {
-    status.webSearchSuccesses = 6;
+  const customs = domains.find((domain) => domain.key === 'customs');
+  let expectedSearches = 0;
+  for (const unit of customs.units) {
+    const searches = researchPolicyForUnit(unit, 'standard').minimumSearchesPerCategory;
+    payload.results.customs.categoryStatus[unit.key].webSearchSuccesses = searches;
+    expectedSearches += searches;
   }
+  payload.results.customs.coverage.webSearchSuccesses = expectedSearches;
+  assert.equal(expectedSearches, 60);
   const html = renderMonitoringHtml(payload);
   assert.equal(payload.collection.scope, 'group');
   assert.equal(payload.collection.totalCategories, 9);
   assert.ok(payload.collection.requestedCategoryIds.every((id) => id.startsWith('customs:')));
   assert.match(html, /선택 그룹 · 관세 · 9개 카테고리/);
-  assert.match(html, /요청한 9개 카테고리의 Claude Code 다각도 심층 검색 결과/);
-  assert.match(html, /카테고리 9\/9 · 웹 검색 54회 성공/);
+  assert.match(html, /<title>글로벌 통상 모니터링 · 관세 그룹 · 2026-07-29<\/title>/);
+  assert.match(html, /요청한 9개 카테고리의 Claude Code 표준 조사를 정리했습니다/);
+  assert.match(html, /카테고리 9\/9 · 웹 검색 60회 성공/);
   assert.match(html, /id="domain-customs"/);
   assert.doesNotMatch(html, /id="domain-export"/);
   assert.doesNotMatch(html, /id="domain-trade"/);
@@ -130,11 +162,13 @@ test('그룹 HTML은 선택한 영역의 전체 카테고리만 표시한다', a
 
 test('조사 기간 근처에 발표일의 시각·날짜 정밀도 한계를 표시한다', async () => {
   const payload = await mockPayload();
+  payload.context.lookbackSource = 'last-complete-run';
   const html = renderMonitoringHtml(payload);
   const periodStart = html.indexOf('<div class="period">');
   const periodEnd = html.indexOf('</div>', periodStart);
   const period = html.slice(periodStart, periodEnd);
   assert.match(period, /발표시각이 확인된 항목은 정확한 시각, 나머지는 KST 달력 날짜 기준/);
+  assert.match(html, /기간 계산:<\/b> 동일 범위·깊이의 마지막 완전 성공 시각에서 6시간 중첩/);
 });
 
 test('모델 텍스트는 한 번만 HTML escape되고 위험한 URL은 링크가 되지 않는다', async () => {
@@ -192,6 +226,31 @@ test('웹 검색 성공 기록이 0이면 완료 배너로 과장하지 않는�
   assert.match(html, /웹 검색 성공 기록 없음/);
   assert.match(html, /검색 상태 정보 없음/);
   assert.doesNotMatch(html, /세 영역의 Claude Code 조사 결과를 정리했습니다/);
+});
+
+test('검증 제외·표시 한도 제외·중복 제거 건수를 감사 칩으로 표시한다', async () => {
+  const payload = await mockPayload();
+  Object.assign(payload.results.customs.categoryStatus.북미, {
+    rejectedCount: 3,
+    truncatedCount: 2,
+    dedupedCount: 1,
+  });
+  Object.assign(payload.results.export.categoryStatus.미국, {
+    rejectedCount: 4,
+    truncatedCount: 1,
+    dedupedCount: 2,
+  });
+
+  const html = renderMonitoringHtml(payload);
+  assert.match(html, /검증 제외 7건/);
+  assert.match(html, /표시 한도 제외 3건/);
+  assert.match(html, /중복 제거 3건/);
+
+  payload.audit = { rejected: 10, truncated: 8, deduped: 6 };
+  const explicitAuditHtml = renderMonitoringHtml(payload);
+  assert.match(explicitAuditHtml, /검증 제외 10건/);
+  assert.match(explicitAuditHtml, /표시 한도 제외 8건/);
+  assert.match(explicitAuditHtml, /중복 제거 6건/);
 });
 
 test('부분 실패, 확인 불가, 검색 후 0건을 영역과 카테고리에서 구분한다', async () => {
@@ -287,7 +346,9 @@ test('run.mjs mock 실행은 HTML 한 파일만 만든다', async () => {
       '--lookback', '24',
     ], { cwd: cliDir, encoding: 'utf8' });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.match(await fs.readFile(output, 'utf8'), /글로벌 통상 모니터링/);
+    const html = await fs.readFile(output, 'utf8');
+    assert.match(html, /글로벌 통상 모니터링/);
+    assert.match(html, /AI 예비 조사 · 원문 수동 확인 필수<\/b> · v6\.0\.0/);
     assert.deepEqual(await fs.readdir(path.dirname(output)), ['monitoring.html']);
   });
 });

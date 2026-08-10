@@ -59,7 +59,7 @@ claude auth login --sso
 원하는 상위 폴더로 이동한 다음 아래 명령을 한 번만 실행합니다.
 
 ```powershell
-git clone --branch agent/claude-cli-category-deep-scan https://github.com/jinhsong/newletterintegration.git
+git clone --branch agent/claude-cli-full-review-improvements https://github.com/jinhsong/newletterintegration.git
 cd .\newletterintegration
 ```
 
@@ -68,8 +68,8 @@ cd .\newletterintegration
 ```powershell
 cd C:\Users\jinh.song\newletterintegration
 git fetch origin
-git switch agent/claude-cli-category-deep-scan
-git pull --ff-only origin agent/claude-cli-category-deep-scan
+git switch agent/claude-cli-full-review-improvements
+git pull --ff-only origin agent/claude-cli-full-review-improvements
 ```
 
 경로가 다르면 첫 번째 줄만 실제 저장 위치로 바꾸세요.
@@ -85,19 +85,27 @@ git pull --ff-only origin agent/claude-cli-category-deep-scan
 프로그램은 다음 순서로 동작합니다.
 
 1. Claude Code 버전을 확인합니다.
-2. 18개 카테고리를 하나씩 순서대로 조사합니다.
-3. 각 카테고리에서 서로 다른 검색어로 신뢰 공식기관 검색 3회와 일반 동향 검색 3회를
-   실행합니다. 법령·집행지침·품목, 주요 언론·현지어/업계·한국 공급망 관점을 나눠 봅니다.
+2. 기본 `standard` 깊이로 18개 카테고리를 하나씩 조사합니다.
+3. 각 카테고리의 국가·기관 등 조사 대상 수에 맞춰 공식기관 검색과 일반 동향 검색 횟수를
+   자동으로 늘립니다. 법령·집행지침·품목, 주요 언론·현지어/업계·한국 공급망 관점을
+   나눠 확인합니다.
 4. 결과를 `cli\output\monitoring.html`에 안전하게 교체 저장합니다.
 5. 저장된 HTML을 기본 브라우저로 엽니다.
 
-메일, 예약 작업, 외부 저장은 실행하지 않습니다. 다음 실행 때는 clone이나 로그인 명령을
+메일, 예약 작업, 외부 서비스 저장은 실행하지 않습니다. 다음 실행 때는 clone이나 로그인 명령을
 반복할 필요 없이 저장소 폴더에서 `.\run-monitoring.cmd`만 실행하면 됩니다.
 
-정상 실행 기준으로 Claude 조사 호출은 18회이고, 성공한 WebSearch는 최소 108회입니다.
-중복 제거 후 카테고리별로 최대 10건을 HTML에 담습니다.
+정상 전체 실행의 Claude 조사 호출은 18회입니다. 현재 `standard` 설정은 카테고리당
+6~10회의 WebSearch를 확인해 전체 114회이며, 국가·기관이 많은 카테고리는 검색 횟수와
+항목 한도를 자동으로 늘립니다.
 회사 네트워크와 Claude 응답 속도에 따라 시간이 걸릴 수 있으므로 실행 중에는 같은 결과를
 대상으로 다른 모니터링을 시작하지 마세요.
+
+현재 프로그램 버전만 확인하려면 다음을 실행합니다. Claude에는 접속하지 않습니다.
+
+```powershell
+.\run-monitoring.cmd --version
+```
 
 ### 관세·수출통제·무역구제 그룹 하나만 조사하기
 
@@ -116,12 +124,12 @@ git pull --ff-only origin agent/claude-cli-category-deep-scan
 ```
 
 영문으로는 각각 `customs`, `export`, `trade`입니다. 그룹 실행도 여러 카테고리를 한 번의
-Claude 요청으로 합치지 않습니다. 현재의 심층 조사 품질을 유지하기 위해 그룹 안의 각
-카테고리를 하나씩 조사합니다.
+Claude 요청으로 합치지 않습니다. 각 카테고리의 조사 근거와 실패 여부를 분리하기 위해
+그룹 안의 카테고리를 하나씩 조사합니다.
 
-| 선택 그룹 | 카테고리 | 기본 Claude 조사 호출 | 최소 WebSearch | 기본 결과 파일 |
+| 선택 그룹 | 카테고리 | 기본 Claude 조사 호출 | standard 최소 WebSearch | 기본 결과 파일 |
 |---|---:|---:|---:|---|
-| 관세 | 9개 | 9회 | 54회 | `cli\output\monitoring-customs.html` |
+| 관세 | 9개 | 9회 | 60회 | `cli\output\monitoring-customs.html` |
 | 수출통제 | 6개 | 6회 | 36회 | `cli\output\monitoring-export.html` |
 | 무역구제 | 3개 | 3회 | 18회 | `cli\output\monitoring-trade.html` |
 
@@ -161,9 +169,17 @@ Claude 요청으로 합치지 않습니다. 현재의 심층 조사 품질을 �
 ```
 
 단일 실행은 사전 버전 확인을 제외하고 선택한 카테고리에 대해서만 Claude 조사 호출을
-1회 수행하며, 공식기관 검색 3회와 일반 동향 검색 3회를 모두 확인합니다. 결과는 기본적으로
-`cli\output\monitoring-category.html`에 저장되므로 전체 결과인 `monitoring.html`을
-덮어쓰지 않습니다. 조사 기간을 함께 지정할 수도 있습니다.
+1회 수행합니다. `standard`에서는 공식기관 검색과 일반 동향 검색을 각각 최소 3회
+확인하고, 조사 대상이 많으면 횟수를 자동으로 늘립니다. 결과 파일명에는 영역과
+카테고리가 들어가므로 다른 단일 결과를 덮어쓰지 않습니다.
+
+예를 들어 위 명령의 기본 결과는 다음과 같습니다.
+
+```text
+cli\output\monitoring-customs-북미.html
+```
+
+조사 기간을 직접 지정할 수도 있습니다.
 
 ```powershell
 .\run-monitoring.cmd --category "customs:북미" --lookback 72
@@ -178,24 +194,97 @@ Claude 요청으로 합치지 않습니다. 현재의 심층 조사 품질을 �
 브라우저를 자동으로 열지 않으려면 다음을 사용합니다.
 
 ```powershell
-node .\cli\run.mjs --no-open
+.\run-monitoring.cmd --no-open
 ```
 
 최근 3일 또는 7일을 조사하려면 다음과 같이 실행합니다.
 
 ```powershell
-node .\cli\run.mjs --lookback 72 --open
-node .\cli\run.mjs --lookback 168 --open
+.\run-monitoring.cmd --lookback 72
+.\run-monitoring.cmd --lookback 168
 ```
 
 다른 위치에 저장하려면 전체 파일 경로를 지정합니다.
 
 ```powershell
-node .\cli\run.mjs --out "C:\Users\jinh.song\Documents\통상동향.html" --open
+.\run-monitoring.cmd --out "C:\Users\jinh.song\Documents\통상동향.html"
 ```
 
-`--lookback`은 `24`, `72`, `168` 중 하나만 허용합니다. 월요일 기본 실행은 주말을
-포함해 72시간, 나머지 요일은 24시간입니다.
+`--lookback`은 `24`, `72`, `168` 중 하나만 허용하며 자동 기간 계산을 그 실행에 한해
+재정의합니다. 지정하지 않으면 동일한 전체·그룹·카테고리 범위와 동일한 조사 깊이의
+마지막 완전 성공 시각에서 6시간을 겹쳐 다시 조사합니다. 자동 범위는 최대 168시간입니다.
+기록이 없는 첫 실행만 월요일 72시간, 나머지 요일 24시간을 사용합니다.
+
+완전 성공 시각은 `cli\output\.trade-monitor-state\state.json`에 PC 로컬로만 기록됩니다.
+부분 결과와 목 테스트는 이 시각을 갱신하지 않습니다. 다음 조사 범위가 잘못될 수 있으므로
+실행 중 이 상태 파일을 직접 수정하거나 삭제하지 마세요.
+
+### 조사 깊이 선택하기
+
+기본값은 `standard`입니다. 실행 시간보다 범위가 중요하면 `deep`, 빠른 확인이 목적이면
+`fast`를 선택합니다.
+
+```powershell
+.\run-monitoring.cmd --depth fast --category "customs:북미"
+.\run-monitoring.cmd --depth standard --group "수출통제"
+.\run-monitoring.cmd --depth deep --group "관세"
+```
+
+| 깊이 | 카테고리별 필수 WebSearch | 카테고리별 최대 표시 한도 | 전체 실행 기본 제한 | 용도 |
+|---|---:|---:|---:|---|
+| `fast` | 4회 | 최대 12건 | 60분 | 연결 확인, 빠른 일일 점검 |
+| `standard` | 6~10회 | 최대 20건 | 120분 | 기본 업무 조사 |
+| `deep` | 8~10회 | 최대 30건 | 240분 | 국가가 많은 범위, 주간 심층 조사 |
+
+위 검색 횟수는 현재 18개 카테고리 설정 기준입니다. 검색 횟수와 표시 한도는 카테고리의
+조사 대상 수에 따라 결정되므로 대상 목록이 바뀌면 함께 달라질 수 있습니다. `deep`은
+누락 가능성을 낮추지만 실행 시간과 회사 계정 사용량이 크게 늘 수 있습니다.
+
+`CLAUDE_RUN_TIMEOUT_MS`를 PowerShell이나 `cli\.env`에 설정하면 깊이별 기본값 대신 그
+값을 모든 실행에 사용합니다. `.env.example`의 `7200000`은 `standard` 기본인 120분입니다.
+깊이별 자동 제한을 사용하려면 복사한 `.env`에서 해당 줄 전체를 지우세요. 빈 값은 유효한
+정수 설정이 아니므로 사용할 수 없습니다.
+
+조사 깊이가 다르면 마지막 성공 시각도 별도로 기록합니다. 예를 들어 `standard` 그룹
+실행 기록을 `deep` 실행의 자동 시작 시각으로 사용하지 않습니다.
+
+### 부분 결과가 생겼을 때
+
+일부 카테고리만 완료되면 기존 대표 HTML을 덮지 않고 다음처럼 시각이 붙은 별도 파일에
+저장합니다.
+
+```text
+monitoring-customs.partial-20260810T012345678Z.html
+```
+
+이 경우 PowerShell에는 "부분 HTML 별도 저장 완료"가 표시되고 프로그램 종료 코드는
+`2`입니다. 파일 상단에서 완료 카테고리와 실패 범위를 확인하세요. 자동화에서 종료 코드
+`2`는 완전 실패인 `1`과 구분해야 합니다.
+
+부분 결과로 대표 파일을 교체해야 한다는 판단이 명확한 경우에만 다음 옵션을 사용합니다.
+
+```powershell
+.\run-monitoring.cmd --group "관세" --allow-partial-overwrite
+```
+
+이 옵션으로 대표 파일을 교체해도 조사가 완전하지 않다는 사실은 바뀌지 않으므로 종료
+코드는 계속 `2`입니다.
+
+### 동시 실행과 네트워크 공유 경로
+
+기본적으로 전체·그룹·단일 조사는 전역 잠금으로 동시에 실행되지 않습니다. 회사 계정의
+검색 제한을 확인했고 동시 실행이 꼭 필요한 경우에만 `--allow-parallel`을 사용하세요.
+각 실행의 출력 파일은 서로 달라야 합니다.
+
+UNC 네트워크 공유 경로는 PC 로컬 저장 원칙 때문에 기본 차단됩니다. 회사 정책상 허용된
+공유 폴더임을 확인한 경우에만 명시적으로 허용합니다.
+
+```powershell
+.\run-monitoring.cmd --group "관세" --out "\\server\team\관세.html" --allow-network-output
+```
+
+네트워크 공유 파일의 잠금은 PC마다 독립적입니다. 여러 PC에서 같은 HTML 경로를 동시에
+실행하면 서로 덮어쓸 수 있으므로, 공유 경로 하나는 한 번에 한 PC에서만 생성하세요.
 
 ## 실제 조사 전에 연결만 짧게 확인하기
 
@@ -214,11 +303,12 @@ claude --safe-mode --no-chrome --disable-slash-commands --strict-mcp-config --di
 Claude Code에 접속하지 않고 화면과 저장 기능만 확인할 수 있습니다.
 
 ```powershell
-node .\cli\run.mjs --mock .\cli\test\fixtures\responses.json --open
+.\run-monitoring.cmd --mock .\cli\test\fixtures\responses.json
 ```
 
-결과는 `cli\output\mock-monitoring.html`에 저장되고, 문서 상단에 테스트 데이터라고
-표시됩니다. 실제 동향 자료로 사용하면 안 됩니다.
+결과는 `cli\output\mock-monitoring.html`에 저장됩니다. 브라우저 탭 제목, 문서 상단과
+빨간 테두리에 `MOCK · 테스트 전용`이라고 표시되므로 실제 동향 자료와 구분할 수 있습니다.
+실제 업무 판단 자료로 사용하면 안 됩니다.
 
 ## 선택 설정
 
@@ -236,7 +326,8 @@ CLAUDE_CLI_BIN=claude
 CLAUDE_CLI_PREFLIGHT_TIMEOUT_MS=60000
 CLAUDE_CLI_TIMEOUT_MS=600000
 CLAUDE_CLI_RETRY_MAX=2
-CLAUDE_RUN_TIMEOUT_MS=5400000
+CLAUDE_CLI_MAX_TURNS=32
+CLAUDE_RUN_TIMEOUT_MS=7200000
 LOCAL_OUTPUT_FILE=
 ```
 
@@ -245,6 +336,31 @@ LOCAL_OUTPUT_FILE=
 ```dotenv
 CLAUDE_CLI_BIN=C:\Program Files\Company Claude\claude.exe
 ```
+
+PATH에서 이름이 같은 다른 프로그램이 실행되는 위험을 줄이려면 회사 IT가 승인한 절대경로를
+고정할 수 있습니다.
+
+```dotenv
+CLAUDE_CLI_BIN=C:\Program Files\Company Claude\claude.exe
+CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN=1
+```
+
+IT가 승인 실행 파일의 SHA-256도 관리하는 경우에만 다음 값을 추가합니다. 현재 파일의
+해시는 PowerShell에서 확인할 수 있지만, 어떤 값을 승인할지는 사용자가 아니라 IT가
+결정해야 합니다. 이 기능은 실제 payload인 네이티브 `.exe` 또는 `.com`에만 사용할 수
+있습니다. npm의 `.cmd`·`.bat` 래퍼 해시는 그 아래 Node/JavaScript 파일을 보장하지 못하므로
+설정하면 안전상 실행을 거부합니다.
+
+```powershell
+Get-FileHash "C:\Program Files\Company Claude\claude.exe" -Algorithm SHA256
+```
+
+```dotenv
+CLAUDE_CLI_ALLOWED_SHA256=IT에서_확인한_64자리_SHA256
+```
+
+Claude Code가 업데이트되면 SHA-256이 달라져 실행이 차단됩니다. 이때 검사를 끄는 대신
+IT가 새 버전과 해시를 승인했는지 확인한 뒤 값을 갱신하세요.
 
 특정 모델을 회사에서 지정하라고 안내받은 경우에만 다음 줄을 추가합니다.
 
@@ -260,6 +376,8 @@ CLAUDE_CLI_MODEL=sonnet
 
 실제 조사 호출은 비어 있는 임시 폴더에서 다음 경계를 동시에 적용합니다.
 
+- OS 임시 폴더가 로컬 일반 폴더인지 확인하고, 각 정상 호출 전후와 다음 호출 직전에
+  작업 폴더가 비어 있는지 다시 검사합니다. 예상하지 않은 파일이 생기면 결과를 폐기합니다.
 - `--safe-mode`: 사용자·프로젝트의 지침, skills, plugins, hooks, MCP, auto-memory를
   로드하지 않습니다. 인증, 모델 선택, 회사 관리 정책은 유지됩니다.
 - `--tools WebSearch`: Claude에게 보이는 일반 도구를 WebSearch로 제한합니다.
@@ -270,11 +388,18 @@ CLAUDE_CLI_MODEL=sonnet
 - `--no-session-persistence`: 조사 대화와 prompt history를 저장하지 않습니다.
 - `--no-chrome`: Chrome 연동을 사용하지 않습니다.
 - `stream-json`: 실제 `WebSearch` 호출과 대응하는 성공 결과를 ID와 검색어로 확인합니다.
-- 카테고리마다 서로 다른 검색어 6개, 해당 카테고리의 신뢰 목록 안에서만
-  `allowed_domains`를 사용한 공식기관 검색 3회, 도메인 제한이 없는 일반 동향 검색 3회를
-  확인한 결과만 채택합니다. 목록 밖 도메인을 공식 검색으로 사용하면 결과를 폐기합니다.
-- 필수 6회가 모두 성공한 뒤 시도한 추가 검색만 실패한 경우에는 실패를 경고로 남기고
+  근거 URL은 구조화된 각 검색 결과 또는 그 바로 아래 `content` 항목의 URL만 인정하며,
+  metadata·related·thumbnail 같은 임의 중첩 URL은 제외합니다. 최종 결과는 공식 스키마의
+  메타데이터 필드와 직접 입력(`origin: human`)만 허용하며, 연기된 도구·백그라운드 후속
+  실행 또는 알 수 없는 필드가 있으면 폐기합니다.
+- 선택한 `--depth`와 카테고리 조사 대상 수에 맞춘 서로 다른 검색어를 요구합니다.
+  해당 카테고리의 신뢰 목록 안에서만 `allowed_domains`를 사용한 공식기관 검색과 도메인
+  제한이 없는 일반 동향 검색이 각각 정책상 최소 횟수를 충족한 결과만 채택합니다. 목록 밖
+  도메인을 공식 검색으로 사용하면 결과를 폐기합니다.
+- 해당 카테고리의 필수 검색이 모두 성공한 뒤 시도한 추가 검색만 실패한 경우에는 경고를 남기고
   검증된 결과는 보존합니다.
+- 알려진 init·assistant·user·WebSearch 진행·result 이벤트와 허용 content block 외의 새
+  이벤트 형식이 나타나면 조용히 무시하지 않고 보안 오류로 중단합니다.
 
 `--allowedTools`가 지정 도구를 사전 승인하고 권한 규칙이 권한 모드 위에 함께 적용되는
 방식은 [Claude Code 공식 권한 문서](https://code.claude.com/docs/en/permissions)에서
@@ -299,10 +424,16 @@ hook 이벤트가 감지되면 프로그램은 결과를 폐기하며, 관리 ho
 
 HTML은 다음 상태를 구분합니다.
 
-- `검색 6회 · 0건`: 공식기관·일반 동향 검색은 성공했지만 기간과 기준을 충족한 신규
+- `검색 N회 · 0건`: 선택한 깊이가 요구한 공식기관·일반 동향 검색은 성공했지만 신규
   동향이 없음
 - `확인 불가`: 조사 호출, 검색 또는 응답 검증 실패
 - `검색 상태 정보 없음`: 검색 성공 증거를 확인할 수 없음
+
+상단에는 완료 카테고리 수, 완전 완료 영역 수와 함께 다음 검증 처리 건수를 표시합니다.
+
+- `검증 제외`: 필수 필드·날짜·출처 근거 검증을 통과하지 못한 원시 항목
+- `표시 한도 제외`: 조사에는 포함됐지만 선택한 깊이의 카테고리 표시 한도를 넘은 항목
+- `중복 제거`: 같은 사건으로 판정되어 대표 항목 하나로 합쳐진 항목
 
 모든 항목은 AI 예비 조사입니다. 링크, 발표일, 적용 대상, 수치와 실제 시행 여부를 원문에서
 다시 확인한 뒤 업무에 사용하세요.
@@ -383,16 +514,28 @@ Get-ChildItem Env:CLAUDE_CODE_SUBPROCESS_ENV_SCRUB -ErrorAction SilentlyContinue
 
 ### `TIMEOUT` 또는 `TURN_LIMIT`
 
-조사 호출 한 번은 기본 10분, 전체 실행은 108회 심층 검색을 고려해 기본 90분으로
-제한됩니다. `TIMEOUT`은 같은 카테고리를 반복 실행하지 않습니다. 회사 네트워크가
-정상인데 응답만 느린 경우에 한해
-다음처럼 늘릴 수 있습니다.
+조사 호출 한 번은 기본 10분입니다. 전체 실행 제한은 `fast` 60분, `standard` 120분,
+`deep` 240분을 자동 적용합니다. `TIMEOUT`은 시간
+제한이고 `TURN_LIMIT`은 한 호출에서 허용한 Claude 진행 단계 수를 모두 사용했다는
+의미이므로 서로 다른 설정을 사용합니다. 회사 네트워크가 정상인데 응답만 느린 경우에만
+시간 제한을 늘립니다.
 
 ```powershell
 $env:CLAUDE_CLI_TIMEOUT_MS = "900000"
-$env:CLAUDE_RUN_TIMEOUT_MS = "7200000"
+$env:CLAUDE_RUN_TIMEOUT_MS = "14400000"
 .\run-monitoring.cmd
 ```
+
+`TURN_LIMIT`이 반복되며 상세 로그에서 WebSearch가 정상적으로 진행된 경우에만 turn 수를
+기본 32에서 늘립니다. 허용 범위는 1~50입니다.
+
+```powershell
+$env:CLAUDE_CLI_MAX_TURNS = "40"
+.\run-monitoring.cmd --category "customs:북미"
+```
+
+`TURN_LIMIT`에 `CLAUDE_CLI_TIMEOUT_MS`만 늘려도 해결되지 않습니다. `deep`은 검색 횟수가
+많아 turn도 더 사용할 수 있으므로 먼저 단일 카테고리에서 확인하세요.
 
 한 카테고리만 확인하려면 전체 제한 시간을 늘리기 전에 `--category` 실행으로 연결과 검색
 성능을 먼저 확인하는 편이 좋습니다.
@@ -402,7 +545,20 @@ $env:CLAUDE_RUN_TIMEOUT_MS = "7200000"
 시간초과나 중단 뒤 Windows가 Claude 프로세스 트리 종료를 확인하지 못했습니다. 이 상태로
 새 조사 프로세스를 계속 만들지 않고 즉시 전체 실행을 중단합니다. 작업 관리자에서 이번
 실행과 연결된 Claude 프로세스가 남아 있는지 확인하고, 회사 정책이 `taskkill /T /F`를
-차단하는 경우 IT 담당자에게 문의하세요.
+차단하는 경우 IT 담당자에게 문의하세요. 실행기는 `taskkill`이 제한되면 기다림을 짧게
+끝내고 직접 소유한 루트 프로세스 종료도 시도하지만, 네이티브 `.exe`와 `.cmd`·`.bat`
+래퍼 모두 하위 프로세스 트리 종료까지 증명할 수는 없습니다. 따라서 결과를 성공으로
+간주하지 않고 `PROCESS_CLEANUP`으로 중단합니다.
+
+현재 어떤 실행 파일을 쓰는지 확인하려면 다음을 실행합니다.
+
+```powershell
+where.exe claude
+Get-Command claude -All
+```
+
+`.cmd`만 나오고 같은 오류가 반복되면 파일 확장자만 바꾸지 말고, 회사 승인 네이티브
+`claude.exe` 설치 경로나 프로세스 트리 종료 정책을 IT 담당자에게 요청하세요.
 
 ### `ALREADY_RUNNING`
 
@@ -422,7 +578,7 @@ Claude 응답 스트림이 손상됐거나 해당 카테고리의 신뢰 공식 
 저장소 폴더에서 다음 명령으로 업데이트한 뒤 북미만 다시 실행하세요.
 
 ```powershell
-git pull --ff-only origin agent/claude-cli-category-deep-scan
+git pull --ff-only origin agent/claude-cli-full-review-improvements
 .\run-monitoring.cmd --category "customs:북미"
 ```
 
@@ -437,6 +593,7 @@ node .\cli\run.mjs --mock .\cli\test\fixtures\responses.json --out .\cli\output\
 ```
 
 테스트는 Windows의 가짜 `claude.cmd`를 실제 자식 프로세스로 실행해 버전, 고정 보안
-인수, stdin, stream-json, 카테고리별 6회 다각도 WebSearch 증거, 18개 순차 조사, 그룹별 조사,
-단일 카테고리 조사, timeout·중단·프로세스 정리와 HTML 저장을 검증합니다. 실제 회사 인증과 회사
-WebSearch 연결은 회사 PC의 짧은 연결 확인을 별도로 통과해야 합니다.
+인수, stdin, stream-json, 깊이·대상 수에 따라 달라지는 다각도 WebSearch 증거, 18개 조사,
+그룹별 조사, 단일 카테고리 조사, timeout·중단·프로세스 정리와 HTML 저장을 검증합니다.
+GitHub Actions도 Windows에서 Node 20·22·24의 테스트와 목 HTML 생성을 확인합니다. 실제
+회사 인증과 회사 WebSearch 연결은 회사 PC의 짧은 연결 확인을 별도로 통과해야 합니다.
