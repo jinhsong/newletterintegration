@@ -367,7 +367,10 @@ test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 6회 �
     assert.match(execution.stdout, /\[18\/18\] 관세 \/ 동아시아 조사 시작/);
     assert.match(execution.stdout, /HTML 저장 완료/);
     assert.match(execution.stdout, /메일 발송, 예약 실행, 외부 서비스 저장은 수행하지 않았습니다/);
-    assert.equal(execution.stderr, '');
+    assert.match(
+      execution.stderr,
+      /^(?:실행 환경 주의: Claude CLI에 인증·라우팅 관련 환경변수가 상속됩니다\. 진단에는 이름만 표시하며 값은 표시하지 않습니다\.\r?\n)?$/,
+    );
 
     const invocations = await readInvocations(fake.invocationFile);
     assert.equal(invocations.length, 19);

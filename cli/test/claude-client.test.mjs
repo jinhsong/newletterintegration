@@ -848,7 +848,14 @@ test('Windows Claude 실행은 정확한 검색 전용 인자를 사용하고 �
     const observed = await readInvocation(invocation);
     assert.deepEqual(observed.args, REQUIRED_RESEARCH_ARGS);
     assert.equal(observed.stdin, prompt);
-    assert.equal(path.resolve(observed.cwd), path.resolve(directory));
+    const [observedCwd, expectedCwd] = await Promise.all([
+      fs.realpath(observed.cwd),
+      fs.realpath(directory),
+    ]);
+    assert.equal(
+      path.normalize(observedCwd).toLowerCase(),
+      path.normalize(expectedCwd).toLowerCase(),
+    );
     assert.equal(observed.args.includes('--dangerously-skip-permissions'), false);
     assert.equal(observed.args.includes('--add-dir'), false);
     assert.equal(observed.args.includes('--chrome'), false);
