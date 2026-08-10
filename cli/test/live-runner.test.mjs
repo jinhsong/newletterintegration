@@ -232,6 +232,15 @@ async function readInvocations(file) {
   return text.trim().split(/\r?\n/).map((line) => JSON.parse(line));
 }
 
+async function removeTestDirectory(directory) {
+  await fs.rm(directory, {
+    recursive: true,
+    force: true,
+    maxRetries: 4,
+    retryDelay: 100,
+  });
+}
+
 test('--version은 Claude 사전 점검 없이 앱 버전을 출력한다', () => {
   const execution = spawnSync(process.execPath, [runFile, '--version'], {
     cwd: cliDir,
@@ -436,7 +445,7 @@ test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 6회 �
     assert.match(html, /<\/html>\s*$/i);
     assert.deepEqual(await fs.readdir(outputDirectory), ['monitoring.html']);
   } finally {
-    await fs.rm(directory, { recursive: true, force: true });
+    await removeTestDirectory(directory);
   }
 });
 
@@ -489,7 +498,7 @@ test('run.mjs 단일 카테고리 모드는 선택 범위만 한 번 조사해 �
     assert.doesNotMatch(html, />수출통제</);
     assert.doesNotMatch(html, />무역구제</);
   } finally {
-    await fs.rm(directory, { recursive: true, force: true });
+    await removeTestDirectory(directory);
   }
 });
 
@@ -548,7 +557,7 @@ test('run.mjs 그룹 모드는 선택한 영역의 카테고리만 각각 조사
     assert.doesNotMatch(html, /id="domain-customs"|id="domain-export"/);
     assert.doesNotMatch(html, /undefined/);
   } finally {
-    await fs.rm(directory, { recursive: true, force: true });
+    await removeTestDirectory(directory);
   }
 });
 
@@ -603,6 +612,6 @@ test('부분 결과는 기본 별도 저장하고 명시적 대표 파일 교체
     assert.match(replacedHtml, /^<!DOCTYPE html>/);
     assert.match(replacedHtml, /일부 범위 조사 실패/);
   } finally {
-    await fs.rm(directory, { recursive: true, force: true });
+    await removeTestDirectory(directory);
   }
 });
