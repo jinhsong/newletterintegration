@@ -31,30 +31,32 @@ jobs:
         shell: pwsh
         run: node --check .\cli\run.mjs
 
+      # Run each test file directly. The outer `node --test` worker/IPC layer can
+      # hang or corrupt serialized events around Windows child-process tests.
       - name: Claude CLI 경계 테스트
         shell: pwsh
         timeout-minutes: 3
-        run: node --test --test-concurrency=1 .\cli\test\claude-client.test.mjs
+        run: node --test-reporter=dot .\cli\test\claude-client.test.mjs
 
       - name: HTML 렌더링 테스트
         shell: pwsh
         timeout-minutes: 3
-        run: node --test --test-concurrency=1 .\cli\test\html.test.mjs
+        run: node --test-reporter=dot .\cli\test\html.test.mjs
 
       - name: Windows 실행기 통합 테스트
         shell: pwsh
         timeout-minutes: 3
-        run: node --test --test-concurrency=1 .\cli\test\live-runner.test.mjs
+        run: node --test-reporter=dot .\cli\test\live-runner.test.mjs
 
       - name: 모니터링 파이프라인 테스트
         shell: pwsh
         timeout-minutes: 3
-        run: node --test --test-concurrency=1 .\cli\test\runner.test.mjs
+        run: node --test-reporter=dot .\cli\test\runner.test.mjs
 
       - name: 잠금과 저장 복구 테스트
         shell: pwsh
         timeout-minutes: 3
-        run: node --test --test-concurrency=1 .\cli\test\runtime-support.test.mjs
+        run: node --test-reporter=dot .\cli\test\runtime-support.test.mjs
 
       - name: 목 데이터 HTML 실행 확인
         shell: pwsh
