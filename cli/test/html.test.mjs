@@ -98,6 +98,36 @@ test('단일 카테고리 HTML은 선택 범위만 표시하고 미선택 17개�
   assert.doesNotMatch(html, /17개 카테고리/);
 });
 
+test('그룹 HTML은 선택한 영역의 전체 카테고리만 표시한다', async () => {
+  const payload = await collectMonitoring({
+    mockPath: fixture,
+    group: '관세',
+    now: new Date('2026-07-29T00:00:00Z'),
+    lookbackHours: 24,
+  });
+  payload.collection.mode = 'live';
+  payload.results.customs.coverage.webSearchSuccesses = 54;
+  for (const status of Object.values(payload.results.customs.categoryStatus)) {
+    status.webSearchSuccesses = 6;
+  }
+  const html = renderMonitoringHtml(payload);
+  assert.equal(payload.collection.scope, 'group');
+  assert.equal(payload.collection.totalCategories, 9);
+  assert.ok(payload.collection.requestedCategoryIds.every((id) => id.startsWith('customs:')));
+  assert.match(html, /선택 그룹 · 관세 · 9개 카테고리/);
+  assert.match(html, /요청한 9개 카테고리의 Claude Code 다각도 심층 검색 결과/);
+  assert.match(html, /카테고리 9\/9 · 웹 검색 54회 성공/);
+  assert.match(html, /id="domain-customs"/);
+  assert.doesNotMatch(html, /id="domain-export"/);
+  assert.doesNotMatch(html, /id="domain-trade"/);
+  assert.match(html, /--domain-band:#13335f/);
+  assert.doesNotMatch(html, /--domain-band:#7a1f1f/);
+  assert.doesNotMatch(html, /--domain-band:#1b5e3b/);
+  assert.match(html, /PART 1/);
+  assert.doesNotMatch(html, /PART 2/);
+  assert.doesNotMatch(html, /undefined/);
+});
+
 test('조사 기간 근처에 발표일의 시각·날짜 정밀도 한계를 표시한다', async () => {
   const payload = await mockPayload();
   const html = renderMonitoringHtml(payload);
@@ -311,6 +341,35 @@ test('선택한 단일 카테고리가 실패하면 기존 단일 HTML을 보존
     assert.deepEqual(
       (await fs.readdir(directory)).sort(),
       ['failed-category.json', 'monitoring-category.html'],
+    );
+  });
+});
+
+test('선택한 그룹 전체가 실패하면 기존 그룹 HTML을 보존한다', async () => {
+  await withTempDir(async (directory) => {
+    const output = path.join(directory, 'monitoring-customs.html');
+    const failedFixture = path.join(directory, 'failed-group.json');
+    await fs.writeFile(output, 'previous-group-result', 'utf8');
+    await fs.writeFile(failedFixture, JSON.stringify({
+      domains: {
+        customs: { __error: { code: 'TIMEOUT', message: '그룹 조사 시간 초과' } },
+      },
+    }), 'utf8');
+
+    const result = spawnSync(process.execPath, [
+      path.join(cliDir, 'run.mjs'),
+      '--mock', failedFixture,
+      '--group', '관세',
+      '--out', output,
+      '--lookback', '24',
+    ], { cwd: cliDir, encoding: 'utf8' });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /선택한 관세 그룹이 실패/);
+    assert.equal(await fs.readFile(output, 'utf8'), 'previous-group-result');
+    assert.deepEqual(
+      (await fs.readdir(directory)).sort(),
+      ['failed-group.json', 'monitoring-customs.html'],
     );
   });
 });

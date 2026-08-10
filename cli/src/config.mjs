@@ -204,6 +204,13 @@ export const categoryCatalog = Object.freeze(domains.flatMap((domain) => (
   }))
 )));
 
+export const groupCatalog = Object.freeze(domains.map((domain) => Object.freeze({
+  id: domain.key,
+  domainKey: domain.key,
+  domainLabel: domain.label,
+  unitCount: domain.units.length,
+})));
+
 export function isTrustedOfficialDomain(value, allowedDomains) {
   const hostname = String(value || '').trim().toLowerCase().replace(/\.$/, '');
   const labels = hostname.split('.');
@@ -249,7 +256,29 @@ export function resolveCategorySelector(value) {
   throw new Error(`알 수 없는 카테고리: ${selector}. --list-categories로 목록을 확인하세요.`);
 }
 
-export function scopedDomains(categorySelection = null) {
+export function resolveGroupSelector(value) {
+  const selector = String(value || '').trim();
+  if (!selector) throw new Error('--group 뒤에 그룹을 입력해야 합니다.');
+  const normalized = selector.toLocaleLowerCase('ko-KR');
+  const match = groupCatalog.find((entry) => (
+    entry.id.toLocaleLowerCase('ko-KR') === normalized
+    || entry.domainLabel.toLocaleLowerCase('ko-KR') === normalized
+  ));
+  if (match) return match;
+  throw new Error(`알 수 없는 그룹: ${selector}. --list-groups로 목록을 확인하세요.`);
+}
+
+export function scopedDomains(categorySelection = null, groupSelection = null) {
+  if (categorySelection && groupSelection) {
+    throw new Error('--category와 --group은 함께 사용할 수 없습니다.');
+  }
+  if (groupSelection) {
+    const selectedDomain = domains.find((domain) => domain.key === groupSelection.domainKey);
+    if (!selectedDomain) {
+      throw new Error('선택한 그룹이 현재 설정에 없습니다. --list-groups로 목록을 확인하세요.');
+    }
+    return [selectedDomain];
+  }
   if (!categorySelection) return domains;
   const selectedDomain = domains.find((domain) => domain.key === categorySelection.domainKey);
   const selectedUnit = selectedDomain?.units.find((unit) => unit.key === categorySelection.unitKey);

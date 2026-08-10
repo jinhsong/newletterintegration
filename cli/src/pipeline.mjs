@@ -6,6 +6,7 @@ import {
   domains,
   isTrustedOfficialDomain,
   resolveCategorySelector,
+  resolveGroupSelector,
   scopedDomains,
 } from './config.mjs';
 import {
@@ -929,12 +930,21 @@ function failureRecord(domain, error, unit = null) {
 
 export async function collectMonitoring(options = {}) {
   const context = createContext(options.now || new Date(), options.lookbackHours);
-  const mock = await loadMock(options.mockPath);
+  const hasCategoryInput = options.categorySelection != null || options.category != null;
+  const hasGroupInput = options.groupSelection != null || options.group != null;
+  if (hasCategoryInput && hasGroupInput) {
+    throw new ClaudeCliError('CONFIG', '--category와 --group은 함께 사용할 수 없습니다.');
+  }
   const selectionValue = options.categorySelection
     ? `${options.categorySelection.domainKey}:${options.categorySelection.unitKey}`
     : options.category;
-  const categorySelection = selectionValue ? resolveCategorySelector(selectionValue) : null;
-  const requestedDomains = scopedDomains(categorySelection);
+  const groupValue = options.groupSelection
+    ? options.groupSelection.domainKey
+    : options.group;
+  const categorySelection = hasCategoryInput ? resolveCategorySelector(selectionValue) : null;
+  const groupSelection = hasGroupInput ? resolveGroupSelector(groupValue) : null;
+  const requestedDomains = scopedDomains(categorySelection, groupSelection);
+  const mock = await loadMock(options.mockPath);
   const targets = requestedDomains.flatMap((domain) => (
     domain.units.map((unit) => ({ domain, unit }))
   ));
@@ -1026,13 +1036,20 @@ export async function collectMonitoring(options = {}) {
     failures,
     collection: {
       mode: mock ? 'mock' : 'live',
-      scope: categorySelection ? 'category' : 'all',
+      scope: categorySelection ? 'category' : groupSelection ? 'group' : 'all',
       selection: categorySelection ? {
+        type: 'category',
         id: categorySelection.id,
         domainKey: categorySelection.domainKey,
         domainLabel: categorySelection.domainLabel,
         unitKey: categorySelection.unitKey,
         unitLabel: categorySelection.unitLabel,
+      } : groupSelection ? {
+        type: 'group',
+        id: groupSelection.id,
+        domainKey: groupSelection.domainKey,
+        domainLabel: groupSelection.domainLabel,
+        unitCount: groupSelection.unitCount,
       } : null,
       requestedCategoryIds: targets.map(({ domain, unit }) => `${domain.key}:${unit.key}`),
       totalDomains: requestedDomains.length,

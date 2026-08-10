@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from './src/cli-args.mjs';
 import {
   categoryCatalog,
+  groupCatalog,
   resolveCategorySelector,
+  resolveGroupSelector,
 } from './src/config.mjs';
 import {
   prepareResearchWorkspace,
@@ -61,7 +63,8 @@ loadEnvFile(path.join(cliDir, '.env'));
 function help() {
   console.log(`
 사용법:
-  node run.mjs [--lookback 24|72|168] [--category CATEGORY] [--out FILE] [--open|--no-open]
+  node run.mjs [--lookback 24|72|168] [--group GROUP | --category CATEGORY] [--out FILE] [--open|--no-open]
+  node run.mjs --list-groups
   node run.mjs --list-categories
   node run.mjs --mock test/fixtures/responses.json [--out FILE]
 
@@ -69,9 +72,19 @@ function help() {
 PC에 HTML 파일 하나만 저장합니다.
 
 기본 결과: cli/output/monitoring.html
+그룹별 기본 결과: cli/output/monitoring-customs.html | monitoring-export.html | monitoring-trade.html
 단일 카테고리 기본 결과: cli/output/monitoring-category.html
 목 테스트 기본 결과: cli/output/mock-monitoring.html
 `);
+}
+
+function listGroups() {
+  console.log('사용 가능한 그룹(--group 값):');
+  for (const entry of groupCatalog) {
+    console.log(`  ${entry.id} 또는 ${entry.domainLabel}  (${entry.unitCount}개 카테고리)`);
+  }
+  console.log('');
+  console.log('예: .\\run-monitoring.cmd --group "관세"');
 }
 
 function listCategories() {
@@ -138,6 +151,10 @@ async function main() {
     throw new Error(`Node.js 20 이상이 필요합니다. 현재 버전: ${process.versions.node}`);
   }
   const options = parseArgs(process.argv.slice(2));
+  if (options.listGroups) {
+    listGroups();
+    return;
+  }
   if (options.listCategories) {
     listCategories();
     return;
@@ -149,10 +166,13 @@ async function main() {
   const categorySelection = options.category
     ? resolveCategorySelector(options.category)
     : null;
+  const groupSelection = options.group
+    ? resolveGroupSelector(options.group)
+    : null;
 
   const outputFile = resolveMonitoringOutputFile(
     cliDir,
-    { ...options, categorySelection },
+    { ...options, categorySelection, groupSelection },
     process.env.LOCAL_OUTPUT_FILE,
   );
   const controller = new AbortController();
@@ -191,15 +211,18 @@ async function main() {
       cwd: researchWorkspace || repoRoot,
       lookbackHours: options.lookbackHours,
       categorySelection,
+      groupSelection,
       mockPath: options.mockPath,
       signal: controller.signal,
     });
     throwIfAborted(controller.signal);
     if (payload.collection.completedDomains === 0) {
-      const scope = categorySelection
-        ? `선택한 ${categorySelection.domainLabel} / ${categorySelection.unitLabel} 카테고리`
-        : '전체 조사 범위';
-      const error = new Error(`${scope}가 실패하여 기존 HTML을 덮어쓰지 않았습니다. 위 오류 코드를 확인하세요.`);
+      const subject = categorySelection
+        ? `선택한 ${categorySelection.domainLabel} / ${categorySelection.unitLabel} 카테고리가`
+        : groupSelection
+          ? `선택한 ${groupSelection.domainLabel} 그룹이`
+          : '전체 조사 범위가';
+      const error = new Error(`${subject} 실패하여 기존 HTML을 덮어쓰지 않았습니다. 위 오류 코드를 확인하세요.`);
       if (payload.failures.some((failure) => failure.code === 'RUN_TIMEOUT')) error.code = 'RUN_TIMEOUT';
       throw error;
     }

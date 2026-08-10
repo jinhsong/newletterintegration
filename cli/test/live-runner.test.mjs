@@ -216,6 +216,22 @@ test('--list-categories는 Claude 사전 점검 없이 복사 가능한 18개 ID
   assert.doesNotMatch(execution.stdout, /Claude Code .*확인/);
 });
 
+test('--list-groups는 Claude 사전 점검 없이 영문·한글 그룹 이름을 출력한다', () => {
+  const execution = spawnSync(process.execPath, [runFile, '--list-groups'], {
+    cwd: cliDir,
+    env: { ...process.env, CLAUDE_CLI_BIN: 'definitely-missing-claude' },
+    encoding: 'utf8',
+    timeout: 5000,
+    windowsHide: true,
+  });
+  assert.equal(execution.error, undefined, execution.error?.message);
+  assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+  assert.match(execution.stdout, /customs 또는 관세  \(9개 카테고리\)/);
+  assert.match(execution.stdout, /export 또는 수출통제  \(6개 카테고리\)/);
+  assert.match(execution.stdout, /trade 또는 무역구제  \(3개 카테고리\)/);
+  assert.doesNotMatch(execution.stdout, /Claude Code .*확인/);
+});
+
 test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 6회 심층 검색 후 HTML 하나를 저장한다', {
   skip: process.platform !== 'win32',
 }, async () => {
@@ -370,6 +386,65 @@ test('run.mjs 단일 카테고리 모드는 선택 범위만 한 번 조사해 �
     assert.doesNotMatch(html, />중남미</);
     assert.doesNotMatch(html, />수출통제</);
     assert.doesNotMatch(html, />무역구제</);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('run.mjs 그룹 모드는 선택한 영역의 카테고리만 각각 조사해 HTML 하나를 만든다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'trade-monitor-live-group-'));
+  try {
+    const fake = await installFakeClaude(directory);
+    const outputFile = path.join(directory, 'monitoring-trade.html');
+    const execution = spawnSync(process.execPath, [
+      runFile,
+      '--group', '무역구제',
+      '--out', outputFile,
+      '--lookback', '24',
+      '--no-open',
+    ], {
+      cwd: cliDir,
+      env: {
+        ...process.env,
+        CLAUDE_CLI_BIN: fake.command,
+        CLAUDE_CLI_PREFLIGHT_TIMEOUT_MS: '5000',
+        CLAUDE_CLI_RETRY_MAX: '1',
+        CLAUDE_CLI_TIMEOUT_MS: '5000',
+        CLAUDE_RUN_TIMEOUT_MS: '60000',
+        CLAUDE_CLI_MODEL: '',
+        LOCAL_OUTPUT_FILE: '',
+        NO_COLOR: '1',
+      },
+      encoding: 'utf8',
+      timeout: 30000,
+      windowsHide: true,
+    });
+
+    assert.equal(execution.error, undefined, execution.error?.message);
+    assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+    assert.match(execution.stdout, /\[1\/3\] 무역구제 \/ 반덤핑 조사 시작/);
+    assert.match(execution.stdout, /\[3\/3\] 무역구제 \/ 보조금\/상계관세 조사 시작/);
+    const invocations = await readInvocations(fake.invocationFile);
+    assert.equal(invocations.length, 4);
+    assert.deepEqual(invocations[0].args, ['--version']);
+    const expectedCategories = ['반덤핑', '세이프가드', '보조금/상계관세'];
+    for (const [index, invocation] of invocations.slice(1).entries()) {
+      assert.match(invocation.stdin, /\[조사 영역\] 무역구제/);
+      assert.ok(invocation.stdin.includes(`"${expectedCategories[index]}": [`));
+      for (const other of expectedCategories.filter((value) => value !== expectedCategories[index])) {
+        assert.equal(invocation.stdin.includes(`"${other}": [`), false);
+      }
+    }
+
+    const html = await fs.readFile(outputFile, 'utf8');
+    assert.match(html, /선택 그룹 · 무역구제 · 3개 카테고리/);
+    assert.match(html, /요청한 3개 카테고리의 Claude Code 다각도 심층 검색 결과/);
+    assert.match(html, /카테고리 3\/3 · 웹 검색 18회 성공/);
+    assert.match(html, /id="domain-trade"/);
+    assert.doesNotMatch(html, /id="domain-customs"|id="domain-export"/);
+    assert.doesNotMatch(html, /undefined/);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

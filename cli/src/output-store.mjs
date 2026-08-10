@@ -4,6 +4,11 @@ import path from 'node:path';
 
 const WINDOWS_REPLACE_ERRORS = new Set(['EEXIST', 'EPERM', 'EBUSY']);
 const STALE_TEMP_MS = 60 * 60 * 1000;
+const GROUP_OUTPUT_FILES = Object.freeze({
+  customs: 'monitoring-customs.html',
+  export: 'monitoring-export.html',
+  trade: 'monitoring-trade.html',
+});
 
 export function resolveOutputFile(cliDir, configuredFile, optionFile) {
   const selected = optionFile || configuredFile;
@@ -17,11 +22,22 @@ export function resolveOutputFile(cliDir, configuredFile, optionFile) {
 }
 
 export function resolveMonitoringOutputFile(cliDir, options = {}, configuredFile = '') {
+  if (options.categorySelection && options.groupSelection) {
+    throw new Error('--category와 --group은 함께 사용할 수 없습니다.');
+  }
   if (options.mockPath && !options.outputFile) {
     return resolveOutputFile(cliDir, '', path.join(cliDir, 'output', 'mock-monitoring.html'));
   }
   if (options.categorySelection && !options.outputFile) {
     return resolveOutputFile(cliDir, '', path.join(cliDir, 'output', 'monitoring-category.html'));
+  }
+  if (options.groupSelection && !options.outputFile) {
+    const groupKey = String(options.groupSelection.domainKey || '');
+    const fileName = Object.hasOwn(GROUP_OUTPUT_FILES, groupKey)
+      ? GROUP_OUTPUT_FILES[groupKey]
+      : '';
+    if (!fileName) throw new Error('선택한 그룹의 기본 출력 파일을 결정할 수 없습니다.');
+    return resolveOutputFile(cliDir, '', path.join(cliDir, 'output', fileName));
   }
   return resolveOutputFile(cliDir, configuredFile, options.outputFile);
 }

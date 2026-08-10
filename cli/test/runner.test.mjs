@@ -8,8 +8,10 @@ import {
   CATEGORY_RESEARCH_POLICY,
   categoryCatalog,
   domains,
+  groupCatalog,
   isTrustedOfficialDomain,
   resolveCategorySelector,
+  resolveGroupSelector,
   scopedDomains,
   unitCount,
 } from '../src/config.mjs';
@@ -160,6 +162,23 @@ test('순수 Node 설정에 글로벌 3개 영역과 18개 카테고리가 있�
   assert.equal(resolveCategorySelector('북미').id, 'customs:북미');
   assert.deepEqual(scopedDomains(resolveCategorySelector('trade:반덤핑'))[0].units.map((unit) => unit.key), ['반덤핑']);
   assert.throws(() => resolveCategorySelector('없는범위'), /--list-categories/);
+  assert.deepEqual(groupCatalog.map((entry) => [entry.id, entry.domainLabel, entry.unitCount]), [
+    ['customs', '관세', 9],
+    ['export', '수출통제', 6],
+    ['trade', '무역구제', 3],
+  ]);
+  assert.equal(resolveGroupSelector('CUSTOMS').domainLabel, '관세');
+  assert.equal(resolveGroupSelector(' 수출통제 ').id, 'export');
+  assert.equal(resolveGroupSelector('trade').domainLabel, '무역구제');
+  assert.deepEqual(
+    scopedDomains(null, resolveGroupSelector('관세'))[0].units.map((unit) => unit.key),
+    domains[0].units.map((unit) => unit.key),
+  );
+  assert.throws(() => resolveGroupSelector('북미'), /--list-groups/);
+  assert.throws(
+    () => scopedDomains(resolveCategorySelector('customs:북미'), resolveGroupSelector('관세')),
+    /함께 사용할 수 없습니다/,
+  );
 });
 
 test('카테고리 프롬프트는 한 범위와 공식기관·일반 동향 6회 심층 검색을 요구한다', () => {
@@ -688,6 +707,81 @@ test('단일 카테고리 선택은 해당 범위만 한 번 호출하고 1/1 �
   assert.deepEqual(Object.keys(payload.results), ['customs']);
   assert.deepEqual(Object.keys(payload.results.customs.categories), ['북미']);
   assert.equal(payload.stats.total, 1);
+});
+
+test('그룹 선택은 해당 영역의 카테고리만 각각 조사하고 그룹 통계를 만든다', async () => {
+  const cases = [
+    { selector: 'CUSTOMS', domainKey: 'customs', count: 9 },
+    { selector: '수출통제', domainKey: 'export', count: 6 },
+    { selector: 'trade', domainKey: 'trade', count: 3 },
+  ];
+  for (const selected of cases) {
+    const requested = [];
+    const callClaude = async (prompt) => {
+      const { domain, units } = promptDomainAndUnits(prompt);
+      assert.equal(domain.key, selected.domainKey);
+      assert.equal(units.length, 1);
+      requested.push(`${domain.key}:${units[0].key}`);
+      return searchedEnvelope(responseFor(domain, units));
+    };
+    const payload = await collectMonitoring({
+      callClaude,
+      group: selected.selector,
+      now,
+      lookbackHours: 24,
+    });
+    const expected = categoryCatalog
+      .filter((entry) => entry.domainKey === selected.domainKey)
+      .map((entry) => entry.id);
+    assert.deepEqual(requested, expected);
+    assert.equal(requested.length, selected.count);
+    assert.equal(payload.collection.scope, 'group');
+    assert.equal(payload.collection.selection.type, 'group');
+    assert.equal(payload.collection.selection.id, selected.domainKey);
+    assert.equal(payload.collection.selection.unitCount, selected.count);
+    assert.deepEqual(payload.collection.requestedCategoryIds, expected);
+    assert.equal(payload.collection.totalDomains, 1);
+    assert.equal(payload.collection.completedDomains, 1);
+    assert.equal(payload.collection.totalCategories, selected.count);
+    assert.equal(payload.collection.completedCategories, selected.count);
+    assert.deepEqual(Object.keys(payload.results), [selected.domainKey]);
+    assert.deepEqual(Object.keys(payload.stats.byDomain), [selected.domainKey]);
+  }
+});
+
+test('그룹 일부 카테고리 실패는 나머지 결과를 보존하고 category·group 동시 지정은 거부한다', async () => {
+  let calls = 0;
+  const payload = await collectMonitoring({
+    group: '무역구제',
+    now,
+    lookbackHours: 24,
+    callClaude: async (prompt) => {
+      calls += 1;
+      const { domain, units } = promptDomainAndUnits(prompt);
+      if (calls === 1) throw new ClaudeCliError('TIMEOUT', '그룹 일부 시간초과');
+      return searchedEnvelope(responseFor(domain, units));
+    },
+  });
+  assert.equal(calls, 3);
+  assert.equal(payload.collection.scope, 'group');
+  assert.equal(payload.collection.completedDomains, 1);
+  assert.equal(payload.collection.fullyCompletedDomains, 0);
+  assert.equal(payload.collection.completedCategories, 2);
+  assert.equal(payload.failures.length, 1);
+  assert.equal(payload.failures[0].categoryKey, '반덤핑');
+
+  await assert.rejects(
+    () => collectMonitoring({ category: 'customs:북미', group: '관세', now }),
+    (error) => error.code === 'CONFIG' && /함께 사용할 수 없습니다/.test(error.message),
+  );
+  await assert.rejects(
+    () => collectMonitoring({ groupSelection: {}, now }),
+    /--group 뒤에 그룹/,
+  );
+  await assert.rejects(
+    () => collectMonitoring({ group: '', now }),
+    /--group 뒤에 그룹/,
+  );
 });
 
 test('한 카테고리 시간초과 시 해당 카테고리는 재호출하지 않고 나머지 범위를 계속한다', async () => {

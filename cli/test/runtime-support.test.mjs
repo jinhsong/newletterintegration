@@ -24,7 +24,7 @@ async function withTempDir(worker) {
   }
 }
 
-test('CLI 인자는 lookback·단일 카테고리·값이 있는 경로만 받는다', () => {
+test('CLI 인자는 lookback·그룹·단일 카테고리·값이 있는 경로만 받는다', () => {
   const cwd = path.resolve('example-root');
   const parsed = parseArgs([
     '--lookback', '72',
@@ -38,24 +38,44 @@ test('CLI 인자는 lookback·단일 카테고리·값이 있는 경로만 받�
   assert.equal(parsed.open, true);
 
   assert.equal(parseArgs(['--category', 'UN 및 다자체제'], cwd).category, 'UN 및 다자체제');
+  assert.equal(parseArgs(['--group', '관세'], cwd).group, '관세');
   assert.equal(parseArgs(['--list-categories', '--open'], cwd).listCategories, true);
+  assert.equal(parseArgs(['--list-groups', '--open'], cwd).listGroups, true);
   assert.throws(() => parseArgs(['--lookback', 'abc'], cwd), /24, 72, 168/);
   assert.throws(() => parseArgs(['--lookback'], cwd), /값을 입력/);
   assert.throws(() => parseArgs(['--category'], cwd), /값을 입력/);
   assert.throws(() => parseArgs(['--category', '   '], cwd), /값을 입력/);
+  assert.throws(() => parseArgs(['--group'], cwd), /값을 입력/);
+  assert.throws(() => parseArgs(['--group', '   '], cwd), /값을 입력/);
   assert.throws(
     () => parseArgs(['--category', '북미', '--category', '미국'], cwd),
     /한 번만/,
   );
   assert.throws(
+    () => parseArgs(['--group', '관세', '--group', '수출통제'], cwd),
+    /한 번만/,
+  );
+  assert.throws(
+    () => parseArgs(['--group', '관세', '--category', 'customs:북미'], cwd),
+    /함께 사용할 수 없습니다/,
+  );
+  assert.throws(
     () => parseArgs(['--list-categories', '--lookback', '24'], cwd),
     /다른 실행 옵션/,
+  );
+  assert.throws(
+    () => parseArgs(['--list-groups', '--group', '관세'], cwd),
+    /다른 실행 옵션/,
+  );
+  assert.throws(
+    () => parseArgs(['--list-groups', '--list-categories'], cwd),
+    /함께 사용할 수 없습니다/,
   );
   assert.throws(() => parseArgs(['--out', '--open'], cwd), /값을 입력/);
   assert.throws(() => parseArgs(['--unknown'], cwd), /알 수 없는 인자/);
 });
 
-test('전체·목·단일 카테고리 기본 결과 경로를 분리하고 명시한 --out을 우선한다', () => {
+test('전체·목·그룹·단일 카테고리 기본 결과 경로를 분리하고 명시한 --out을 우선한다', () => {
   const cliDir = path.resolve('example-cli');
   const configured = '.\\company\\full.html';
   const explicit = path.resolve('chosen.html');
@@ -72,12 +92,44 @@ test('전체·목·단일 카테고리 기본 결과 경로를 분리하고 명�
     resolveMonitoringOutputFile(cliDir, { categorySelection: { id: 'customs:북미' } }, configured),
     path.join(cliDir, 'output', 'monitoring-category.html'),
   );
+  for (const [domainKey, fileName] of [
+    ['customs', 'monitoring-customs.html'],
+    ['export', 'monitoring-export.html'],
+    ['trade', 'monitoring-trade.html'],
+  ]) {
+    assert.equal(
+      resolveMonitoringOutputFile(cliDir, { groupSelection: { domainKey } }, configured),
+      path.join(cliDir, 'output', fileName),
+    );
+  }
   assert.equal(
     resolveMonitoringOutputFile(cliDir, {
       categorySelection: { id: 'customs:북미' },
       outputFile: explicit,
     }, configured),
     explicit,
+  );
+  assert.equal(
+    resolveMonitoringOutputFile(cliDir, {
+      groupSelection: { domainKey: 'customs' },
+      outputFile: explicit,
+    }, configured),
+    explicit,
+  );
+  assert.throws(
+    () => resolveMonitoringOutputFile(cliDir, { groupSelection: { domainKey: '../escape' } }, configured),
+    /결정할 수 없습니다/,
+  );
+  assert.throws(
+    () => resolveMonitoringOutputFile(cliDir, { groupSelection: { domainKey: 'constructor' } }, configured),
+    /결정할 수 없습니다/,
+  );
+  assert.throws(
+    () => resolveMonitoringOutputFile(cliDir, {
+      categorySelection: { id: 'customs:북미' },
+      groupSelection: { domainKey: 'customs' },
+    }, configured),
+    /함께 사용할 수 없습니다/,
   );
 });
 

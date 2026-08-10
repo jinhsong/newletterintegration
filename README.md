@@ -99,6 +99,44 @@ git pull --ff-only origin agent/claude-cli-category-deep-scan
 회사 네트워크와 Claude 응답 속도에 따라 시간이 걸릴 수 있으므로 실행 중에는 같은 결과를
 대상으로 다른 모니터링을 시작하지 마세요.
 
+### 관세·수출통제·무역구제 그룹 하나만 조사하기
+
+먼저 선택할 수 있는 그룹을 확인합니다. 이 명령은 Claude에 접속하지 않습니다.
+
+```powershell
+.\run-monitoring.cmd --list-groups
+```
+
+그룹 이름은 한글과 영문을 모두 사용할 수 있습니다.
+
+```powershell
+.\run-monitoring.cmd --group "관세"
+.\run-monitoring.cmd --group "수출통제"
+.\run-monitoring.cmd --group "무역구제"
+```
+
+영문으로는 각각 `customs`, `export`, `trade`입니다. 그룹 실행도 여러 카테고리를 한 번의
+Claude 요청으로 합치지 않습니다. 현재의 심층 조사 품질을 유지하기 위해 그룹 안의 각
+카테고리를 하나씩 조사합니다.
+
+| 선택 그룹 | 카테고리 | 기본 Claude 조사 호출 | 최소 WebSearch | 기본 결과 파일 |
+|---|---:|---:|---:|---|
+| 관세 | 9개 | 9회 | 54회 | `cli\output\monitoring-customs.html` |
+| 수출통제 | 6개 | 6회 | 36회 | `cli\output\monitoring-export.html` |
+| 무역구제 | 3개 | 3회 | 18회 | `cli\output\monitoring-trade.html` |
+
+응답 검증에 실패해 재조사가 필요한 카테고리는 한 번 더 호출될 수 있으므로 실제 호출 수와
+실행 시간은 표보다 늘어날 수 있습니다.
+
+따라서 세 그룹 결과는 서로 덮어쓰지 않으며, 전체 결과인 `monitoring.html`도 그대로
+보존됩니다. 원하는 파일명을 직접 지정하려면 `--out`을 함께 사용하세요.
+
+```powershell
+.\run-monitoring.cmd --group "관세" --out "C:\Users\jinh.song\Documents\관세동향.html"
+```
+
+`--group`과 `--category`는 동시에 사용할 수 없습니다.
+
 ### 카테고리 하나만 조사하기
 
 먼저 선택할 수 있는 18개 카테고리 이름을 확인합니다. 이 명령은 Claude에 접속하지
@@ -251,8 +289,9 @@ hook 이벤트가 감지되면 프로그램은 결과를 폐기하며, 관리 ho
 
 ## HTML 결과 읽기
 
-전체 실행의 모니터링 범위는 18개 카테고리입니다. `--category` 실행의 HTML에는 선택한
-카테고리 하나만 표시됩니다.
+전체 실행의 모니터링 범위는 18개 카테고리입니다. `--group` 실행의 HTML에는 선택한
+영역의 9개·6개·3개 카테고리만 표시되고, `--category` 실행의 HTML에는 선택한 카테고리
+하나만 표시됩니다.
 
 - 관세 9개 지역
 - 수출통제 6개 국가·다자 범위
@@ -398,6 +437,6 @@ node .\cli\run.mjs --mock .\cli\test\fixtures\responses.json --out .\cli\output\
 ```
 
 테스트는 Windows의 가짜 `claude.cmd`를 실제 자식 프로세스로 실행해 버전, 고정 보안
-인수, stdin, stream-json, 카테고리별 6회 다각도 WebSearch 증거, 18개 순차 조사, 단일 카테고리
-조사, timeout·중단·프로세스 정리와 HTML 저장을 검증합니다. 실제 회사 인증과 회사
+인수, stdin, stream-json, 카테고리별 6회 다각도 WebSearch 증거, 18개 순차 조사, 그룹별 조사,
+단일 카테고리 조사, timeout·중단·프로세스 정리와 HTML 저장을 검증합니다. 실제 회사 인증과 회사
 WebSearch 연결은 회사 PC의 짧은 연결 확인을 별도로 통과해야 합니다.

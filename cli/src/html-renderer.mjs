@@ -393,9 +393,11 @@ export function renderMonitoringHtml(payload) {
     `<a href="#domain-${escapeHtml(domain.key)}" style="${domainPaletteStyle(domain)}">${DOMAIN_CIRCLED[index] || ''} ${escapeHtml(domain.label)} <b>${payload.stats?.byDomain?.[domain.key]?.total ?? 0}</b></a>`
   )).join('');
   const selection = payload.collection?.selection;
-  const heroSubtitle = selection
-    ? `선택 조사 · ${selection.domainLabel} / ${selection.unitLabel}`
-    : '관세 · 수출통제 · 무역구제 신규 동향';
+  const heroSubtitle = payload.collection?.scope === 'group' && selection
+    ? `선택 그룹 · ${selection.domainLabel} · ${selection.unitCount ?? requestedDomains[0]?.units.length ?? 0}개 카테고리`
+    : selection
+      ? `선택 조사 · ${selection.domainLabel} / ${selection.unitLabel}`
+      : '관세 · 수출통제 · 무역구제 신규 동향';
 
   return `<!DOCTYPE html>
 <html lang="ko">
