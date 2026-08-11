@@ -814,6 +814,55 @@ test('종료되지 않는 taskkill은 자체 핸들을 분리하고 제한 시�
   assert.equal(unrefCount, 1);
 });
 
+test('close 없는 taskkill error도 파이프와 프로세스 핸들을 즉시 분리한다', async () => {
+  const killer = new EventEmitter();
+  killer.stdout = new PassThrough();
+  killer.stderr = new PassThrough();
+  killer.kill = () => true;
+  let unrefCount = 0;
+  killer.unref = () => { unrefCount += 1; };
+
+  const resultPromise = __runTaskkillForTest(4321, {
+    resolveExecutable: async () => 'C:\\Windows\\System32\\taskkill.exe',
+    spawnProcess: () => killer,
+    stopAfterMs: 50,
+    abandonAfterMs: 100,
+    unrefTimers: false,
+  });
+  setTimeout(() => killer.emit('error', new Error('simulated policy denial')), 5);
+  const result = await resultPromise;
+
+  assert.equal(result.code, null);
+  assert.match(result.details, /taskkill 실행 오류: simulated policy denial/);
+  assert.equal(killer.stdout.destroyed, true);
+  assert.equal(killer.stderr.destroyed, true);
+  assert.equal(unrefCount, 1);
+});
+
+test('taskkill 경로 확인 중 대상이 종료되면 PID 실행을 시작하지 않는다', async () => {
+  let targetExited = false;
+  let spawnCalls = 0;
+  const result = await __runTaskkillForTest(4321, {
+    resolveExecutable: async () => {
+      targetExited = true;
+      return 'C:\\Windows\\System32\\taskkill.exe';
+    },
+    spawnProcess: () => {
+      spawnCalls += 1;
+      throw new Error('spawn must not run');
+    },
+    isTargetExited: () => targetExited,
+  });
+
+  assert.equal(spawnCalls, 0);
+  assert.equal(result.code, null);
+  assert.match(result.details, /PID 재사용 위험/);
+  assert.throws(
+    () => __runTaskkillForTest(4321),
+    /resolveExecutable과 spawnProcess가 모두 필요/,
+  );
+});
+
 test('실행 중 프로세스의 정리 예외는 캐시하지 않고 다음 정리를 재시도한다', {
   skip: process.platform !== 'win32',
 }, async () => {
@@ -855,7 +904,9 @@ test('실행 중 프로세스의 정리 예외는 캐시하지 않고 다음 정
 
 test('미종료 프로세스 정리는 부모 핸들을 분리한 뒤 다음 정리를 재시도할 수 있다', {
   skip: process.platform !== 'win32',
-}, async () => {
+}, async (t) => {
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
   const child = new EventEmitter();
   child.pid = 424242;
   child.exitCode = null;
@@ -893,7 +944,9 @@ test('미종료 프로세스 정리는 부모 핸들을 분리한 뒤 다음 정
 
 test('exit가 확인된 Windows 프로세스 PID에는 taskkill을 다시 실행하지 않는다', {
   skip: process.platform !== 'win32',
-}, async () => {
+}, async (t) => {
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
   const child = new EventEmitter();
   child.pid = 424243;
   child.exitCode = 0;

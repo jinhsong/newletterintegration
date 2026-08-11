@@ -689,6 +689,21 @@ async function runTaskkill(pid, dependencies = {}) {
       details: `taskkill 시스템 경로 확인 실패: ${error?.message || String(error)}`,
     };
   }
+  if (typeof dependencies.isTargetExited === 'function') {
+    try {
+      if (dependencies.isTargetExited()) {
+        return {
+          code: null,
+          details: 'Claude 루트 프로세스가 taskkill 시작 전에 종료되어 PID 재사용 위험을 피하도록 중단했습니다.',
+        };
+      }
+    } catch (error) {
+      return {
+        code: null,
+        details: `Claude 루트 프로세스 상태 재확인 실패로 taskkill을 중단했습니다: ${error?.message || String(error)}`,
+      };
+    }
+  }
   return new Promise((resolve) => {
     let killer;
     try {
@@ -706,6 +721,7 @@ async function runTaskkill(pid, dependencies = {}) {
     let truncated = false;
     let stopTimer;
     let confirmationTimer;
+    let forcedKillFailure = '';
     killer.stdout?.on('data', (chunk) => { if (!capture.append(chunk)) truncated = true; });
     killer.stderr?.on('data', (chunk) => { if (!capture.append(chunk)) truncated = true; });
     const done = (code = null, fallback = '') => {
@@ -716,27 +732,52 @@ async function runTaskkill(pid, dependencies = {}) {
       const suffix = truncated ? ' (출력 일부 생략)' : '';
       let output = '';
       try { output = capture.text('taskkill 출력').trim(); } catch {}
-      resolve({ code, details: `${output || fallback}${suffix}`.trim() });
+      const details = [output, fallback].filter(Boolean).join('\n');
+      resolve({ code, details: `${details}${suffix}`.trim() });
+    };
+    const requestForcedKill = () => {
+      try {
+        if (killer.kill('SIGKILL') === false) {
+          forcedKillFailure = 'taskkill에 강제 종료 신호를 전달하지 못했습니다.';
+        }
+      } catch (error) {
+        forcedKillFailure = `taskkill 강제 종료 실패: ${error?.message || String(error)}`;
+      }
+    };
+    const detachKiller = () => {
+      // If endpoint security keeps taskkill itself from emitting `close`, do
+      // not let its process or captured pipes keep this Node process alive.
+      try {
+        killer.stdout?.once('error', () => {});
+        killer.stdout?.destroy();
+      } catch {}
+      try {
+        killer.stderr?.once('error', () => {});
+        killer.stderr?.destroy();
+      } catch {}
+      try { killer.unref(); } catch {}
     };
     confirmationTimer = setTimeout(() => {
       timedOut = true;
-      try { killer.kill('SIGKILL'); } catch {}
-      // If endpoint security keeps taskkill itself from emitting `close`, do
-      // not let its process or captured pipes keep this Node process alive.
-      try { killer.stdout?.destroy(); } catch {}
-      try { killer.stderr?.destroy(); } catch {}
-      try { killer.unref(); } catch {}
-      done(null, `taskkill 종료 명령이 ${abandonAfterMs}ms 안에 끝나지 않아 중단했습니다.`);
+      requestForcedKill();
+      detachKiller();
+      done(null, [
+        `taskkill 종료 명령이 ${abandonAfterMs}ms 안에 끝나지 않아 중단했습니다.`,
+        forcedKillFailure,
+      ].filter(Boolean).join('\n'));
     }, abandonAfterMs);
     stopTimer = setTimeout(() => {
       timedOut = true;
-      try { killer.kill('SIGKILL'); } catch {}
+      requestForcedKill();
     }, stopAfterMs);
     if (dependencies.unrefTimers !== false) {
       stopTimer.unref?.();
       confirmationTimer.unref?.();
     }
-    killer.once('error', (error) => done(null, error.message));
+    killer.once('error', (error) => {
+      detachKiller();
+      done(null, `taskkill 실행 오류: ${error?.message || String(error)}`);
+    });
     killer.once('close', (code, signal) => {
       if (timedOut) {
         done(null, `taskkill 종료 명령이 ${stopAfterMs}ms 안에 끝나지 않아 중단했습니다.`);
@@ -748,6 +789,12 @@ async function runTaskkill(pid, dependencies = {}) {
 }
 
 export function __runTaskkillForTest(pid, dependencies) {
+  if (
+    typeof dependencies?.resolveExecutable !== 'function'
+    || typeof dependencies?.spawnProcess !== 'function'
+  ) {
+    throw new TypeError('테스트용 taskkill 실행에는 resolveExecutable과 spawnProcess가 모두 필요합니다.');
+  }
   return runTaskkill(pid, dependencies);
 }
 
@@ -761,7 +808,7 @@ function appendCleanupDetail(current, detail) {
   return [current, detail].filter(Boolean).join('\n');
 }
 
-function stopProcessTree(child, taskkillRunner = runTaskkill) {
+function stopProcessTree(child, taskkillRunner = null) {
   if (!child) {
     return Promise.resolve({ closed: true, treeConfirmed: true, details: '' });
   }
@@ -793,7 +840,11 @@ function stopProcessTree(child, taskkillRunner = runTaskkill) {
       treeConfirmed = false;
       details = 'Claude 루트 프로세스가 이미 종료되어 PID 재사용 위험을 피하도록 taskkill을 생략했습니다.';
     } else if (process.platform === 'win32' && child.pid) {
-      const killed = await taskkillRunner(child.pid);
+      const killed = taskkillRunner
+        ? await taskkillRunner(child.pid)
+        : await runTaskkill(child.pid, {
+          isTargetExited: () => child.exitCode !== null || child.signalCode !== null,
+        });
       treeConfirmed = killed.code === 0;
       details = killed.details || (treeConfirmed ? '' : `taskkill 종료 코드 ${killed.code}`);
       if (!treeConfirmed) {
@@ -869,9 +920,18 @@ function stopProcessTree(child, taskkillRunner = runTaskkill) {
     if (!closed) {
       // Keep the fail-closed result, but release this parent's pipe/process
       // handles so an uncooperative endpoint cannot keep the runner alive.
-      try { child.stdin?.destroy(); } catch {}
-      try { child.stdout?.destroy(); } catch {}
-      try { child.stderr?.destroy(); } catch {}
+      try {
+        child.stdin?.once('error', () => {});
+        child.stdin?.destroy();
+      } catch {}
+      try {
+        child.stdout?.once('error', () => {});
+        child.stdout?.destroy();
+      } catch {}
+      try {
+        child.stderr?.once('error', () => {});
+        child.stderr?.destroy();
+      } catch {}
       try { child.unref(); } catch {}
       details = appendCleanupDetail(
         details,
@@ -895,11 +955,7 @@ function stopProcessTree(child, taskkillRunner = runTaskkill) {
       return result;
     },
     (error) => {
-      if (
-        child.exitCode === null
-        && child.signalCode === null
-        && stoppingChildren.get(child) === tracked
-      ) stoppingChildren.delete(child);
+      if (stoppingChildren.get(child) === tracked) stoppingChildren.delete(child);
       throw error;
     },
   );
