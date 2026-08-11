@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { EventEmitter, once } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import {
+  __runTaskkillForTest,
   __stopProcessTreeForTest,
   ClaudeCliError,
   callClaudeCli,
@@ -191,7 +194,6 @@ async function withFakeClaude(behavior, worker, options = {}) {
   await fs.mkdir(directory);
   const command = path.join(binDirectory, 'fake-claude.cmd');
   const driver = path.join(binDirectory, 'fake-claude.mjs');
-  const runtime = path.join(binDirectory, 'node.exe');
   const invocation = path.join(binDirectory, 'invocation.json');
   const stopFile = path.join(binDirectory, 'stop-requested');
   const stopAcknowledgedFile = path.join(binDirectory, 'stop-acknowledged');
@@ -204,10 +206,10 @@ async function withFakeClaude(behavior, worker, options = {}) {
   );
   try {
     await fs.writeFile(driver, fakeDriverSource(behavior), 'utf8');
-    await fs.link(process.execPath, runtime);
+    const batchNodePath = process.execPath.replace(/%/g, '%%');
     await fs.writeFile(
       command,
-      '@echo off\r\n"%~dp0node.exe" "%~dp0fake-claude.mjs" %*\r\n',
+      `@echo off\r\n"${batchNodePath}" "%~dp0fake-claude.mjs" %*\r\n`,
       'utf8',
     );
     await prepareResearchWorkspace(directory);
@@ -241,7 +243,7 @@ async function withFakeClaude(behavior, worker, options = {}) {
     await fs.rm(rootDirectory, {
       recursive: true,
       force: true,
-      maxRetries: 40,
+      maxRetries: 8,
       retryDelay: 50,
     });
   }
@@ -784,6 +786,111 @@ test('프로세스 정리 실패 오류는 원래 오류와 정리 상태 및 PI
   }, 4321).code, 'PROCESS_CLEANUP');
 });
 
+test('종료되지 않는 taskkill은 자체 핸들을 분리하고 제한 시간 안에 반환한다', async () => {
+  const killer = new EventEmitter();
+  killer.stdout = new PassThrough();
+  killer.stderr = new PassThrough();
+  const killSignals = [];
+  let unrefCount = 0;
+  killer.kill = (signal) => {
+    killSignals.push(signal);
+    return false;
+  };
+  killer.unref = () => { unrefCount += 1; };
+
+  const result = await __runTaskkillForTest(4321, {
+    resolveExecutable: async () => 'C:\\Windows\\System32\\taskkill.exe',
+    spawnProcess: () => killer,
+    stopAfterMs: 5,
+    abandonAfterMs: 10,
+    unrefTimers: false,
+  });
+
+  assert.equal(result.code, null);
+  assert.match(result.details, /10ms/);
+  assert.deepEqual(killSignals, ['SIGKILL', 'SIGKILL']);
+  assert.equal(killer.stdout.destroyed, true);
+  assert.equal(killer.stderr.destroyed, true);
+  assert.equal(unrefCount, 1);
+});
+
+test('실행 중 프로세스의 정리 예외는 캐시하지 않고 다음 정리를 재시도한다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  let closed = false;
+  child.once('close', () => { closed = true; });
+  const rejectedTaskkill = new Proxy({}, {
+    ownKeys() { throw new Error('simulated taskkill failure'); },
+  });
+  let closeTimer;
+  try {
+    await assert.rejects(
+      __stopProcessTreeForTest(child, process.execPath, rejectedTaskkill),
+      /simulated taskkill failure/,
+    );
+    closeTimer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+    }, 25);
+    const cleanup = await __stopProcessTreeForTest(child, process.execPath, {
+      code: 0,
+      details: '',
+    });
+    assert.equal(cleanup.closed, true);
+    assert.equal(cleanup.treeConfirmed, true);
+  } finally {
+    clearTimeout(closeTimer);
+    if (!closed) {
+      try { child.kill('SIGKILL'); } catch {}
+      await Promise.race([
+        once(child, 'close'),
+        new Promise((resolve) => setTimeout(resolve, 1000)),
+      ]);
+    }
+  }
+});
+
+test('미종료 프로세스 정리는 부모 핸들을 분리한 뒤 다음 정리를 재시도할 수 있다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const child = new EventEmitter();
+  child.pid = 424242;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => false;
+  let unrefCount = 0;
+  child.unref = () => { unrefCount += 1; };
+
+  const first = await __stopProcessTreeForTest(child, 'C:\\fake\\claude.cmd', {
+    code: 5,
+    details: 'Access is denied.',
+  });
+  assert.equal(first.closed, false);
+  assert.equal(first.treeConfirmed, false);
+  assert.match(first.details, /부모 측 핸들을 분리/);
+  assert.equal(child.stdin.destroyed, true);
+  assert.equal(child.stdout.destroyed, true);
+  assert.equal(child.stderr.destroyed, true);
+  assert.equal(unrefCount, 1);
+
+  let retryCalls = 0;
+  const second = await __stopProcessTreeForTest(child, 'C:\\fake\\claude.cmd', async () => {
+    retryCalls += 1;
+    child.exitCode = 0;
+    child.emit('close', 0, null);
+    return { code: 0, details: '' };
+  });
+  assert.equal(retryCalls, 1);
+  assert.equal(second.closed, true);
+  assert.equal(second.treeConfirmed, true);
+});
+
 test('Windows native 실행 파일도 taskkill 거부 시 루트 종료만으로 트리 종료를 단정하지 않는다', {
   skip: process.platform !== 'win32',
 }, async () => {
@@ -814,7 +921,11 @@ test('Windows native 실행 파일도 taskkill 거부 시 루트 종료만으로
 test('Windows stream-json 성공 응답에서 검색 증거와 근거 URL을 보존한다', {
   skip: process.platform !== 'win32',
 }, async () => {
-  await withFakeClaude({ events: successfulSearchEvents() }, async ({ directory }) => {
+  await withFakeClaude({ events: successfulSearchEvents() }, async ({ directory, rootDirectory }) => {
+    await assert.rejects(
+      fs.access(path.join(rootDirectory, 'bin', 'node.exe')),
+      (error) => error?.code === 'ENOENT',
+    );
     const result = await callClaudeCli('시험 프롬프트', { cwd: directory, timeoutMs: 5000 });
     assert.equal(result.response, DOMAIN_JSON);
     assert.equal(result.sessionId, 'session-1');

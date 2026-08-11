@@ -208,20 +208,15 @@ async function installFakeClaude(rootDirectory) {
   await fs.mkdir(binDirectory, { recursive: true });
   const command = path.join(binDirectory, 'claude.cmd');
   const driver = path.join(binDirectory, 'fake-claude.mjs');
-  const runtime = path.join(binDirectory, 'node.exe');
   await fs.writeFile(driver, fakeClaudeDriver(), 'utf8');
-  try {
-    await fs.link(process.execPath, runtime);
-  } catch (error) {
-    if (!['EACCES', 'EPERM', 'EXDEV'].includes(error?.code)) throw error;
-    await fs.copyFile(process.execPath, runtime);
-  }
+  const batchNodePath = process.execPath.replace(/%/g, '%%');
   await fs.writeFile(
     command,
-    '@echo off\r\n"%~dp0node.exe" "%~dp0fake-claude.mjs" %*\r\n',
+    `@echo off\r\n"${batchNodePath}" "%~dp0fake-claude.mjs" %*\r\n`,
     'utf8',
   );
   return {
+    binDirectory,
     command,
     invocationFile: path.join(binDirectory, 'invocations.jsonl'),
   };
@@ -341,6 +336,10 @@ test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 6회 �
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'trade-monitor-live-e2e-'));
   try {
     const fake = await installFakeClaude(directory);
+    await assert.rejects(
+      fs.access(path.join(fake.binDirectory, 'node.exe')),
+      (error) => error?.code === 'ENOENT',
+    );
     const outputDirectory = path.join(directory, '회사 결과');
     const outputFile = path.join(outputDirectory, 'monitoring.html');
     const env = {

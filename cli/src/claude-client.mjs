@@ -667,10 +667,19 @@ async function waitForPosixProcessGroupExit(pid, waitMs) {
   return state;
 }
 
-async function runTaskkill(pid) {
+async function runTaskkill(pid, dependencies = {}) {
+  const resolveExecutable = dependencies.resolveExecutable || resolveWindowsSystemExecutable;
+  const spawnProcess = dependencies.spawnProcess || spawn;
+  const stopAfterMs = Number.isSafeInteger(dependencies.stopAfterMs) && dependencies.stopAfterMs > 0
+    ? dependencies.stopAfterMs
+    : WINDOWS_TASKKILL_TIMEOUT_MS;
+  const abandonAfterMs = Number.isSafeInteger(dependencies.abandonAfterMs)
+    && dependencies.abandonAfterMs > stopAfterMs
+    ? dependencies.abandonAfterMs
+    : WINDOWS_TASKKILL_CONFIRM_MS;
   let taskkillPath;
   try {
-    taskkillPath = await resolveWindowsSystemExecutable('taskkill.exe');
+    taskkillPath = await resolveExecutable('taskkill.exe');
   } catch (error) {
     return {
       code: null,
@@ -680,7 +689,7 @@ async function runTaskkill(pid) {
   return new Promise((resolve) => {
     let killer;
     try {
-      killer = spawn(taskkillPath, ['/pid', String(pid), '/T', '/F'], {
+      killer = spawnProcess(taskkillPath, ['/pid', String(pid), '/T', '/F'], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });
@@ -707,23 +716,36 @@ async function runTaskkill(pid) {
       resolve({ code, details: `${output || fallback}${suffix}`.trim() });
     };
     confirmationTimer = setTimeout(() => {
-      done(null, `taskkill 종료 명령이 ${WINDOWS_TASKKILL_CONFIRM_MS}ms 안에 끝나지 않아 중단했습니다.`);
-    }, WINDOWS_TASKKILL_CONFIRM_MS);
+      timedOut = true;
+      try { killer.kill('SIGKILL'); } catch {}
+      // If endpoint security keeps taskkill itself from emitting `close`, do
+      // not let its process or captured pipes keep this Node process alive.
+      try { killer.stdout?.destroy(); } catch {}
+      try { killer.stderr?.destroy(); } catch {}
+      try { killer.unref(); } catch {}
+      done(null, `taskkill 종료 명령이 ${abandonAfterMs}ms 안에 끝나지 않아 중단했습니다.`);
+    }, abandonAfterMs);
     stopTimer = setTimeout(() => {
       timedOut = true;
       try { killer.kill('SIGKILL'); } catch {}
-    }, WINDOWS_TASKKILL_TIMEOUT_MS);
-    stopTimer.unref?.();
-    confirmationTimer.unref?.();
+    }, stopAfterMs);
+    if (dependencies.unrefTimers !== false) {
+      stopTimer.unref?.();
+      confirmationTimer.unref?.();
+    }
     killer.once('error', (error) => done(null, error.message));
     killer.once('close', (code, signal) => {
       if (timedOut) {
-        done(null, `taskkill 종료 명령이 ${WINDOWS_TASKKILL_TIMEOUT_MS}ms 안에 끝나지 않아 중단했습니다.`);
+        done(null, `taskkill 종료 명령이 ${stopAfterMs}ms 안에 끝나지 않아 중단했습니다.`);
         return;
       }
       done(code, signal ? `taskkill이 ${signal} 신호로 종료됨` : '');
     });
   });
+}
+
+export function __runTaskkillForTest(pid, dependencies) {
+  return runTaskkill(pid, dependencies);
 }
 
 function windowsLaunchKind(child) {
@@ -837,10 +859,45 @@ function stopProcessTree(child, taskkillRunner = runTaskkill) {
       closed = await waitForChildClose(child, 1500);
       if (process.platform === 'win32' && windowsLaunchKind(child) !== 'native') treeConfirmed = false;
     }
+    if (!closed) {
+      // Keep the fail-closed result, but release this parent's pipe/process
+      // handles so an uncooperative endpoint cannot keep the runner alive.
+      try { child.stdin?.destroy(); } catch {}
+      try { child.stdout?.destroy(); } catch {}
+      try { child.stderr?.destroy(); } catch {}
+      try { child.unref(); } catch {}
+      details = appendCleanupDetail(
+        details,
+        '종료되지 않은 Claude 프로세스의 부모 측 핸들을 분리했습니다. 프로세스 트리 종료는 확인되지 않았습니다.',
+      );
+    }
     return { closed, treeConfirmed, details };
   })();
-  stoppingChildren.set(child, stopping);
-  return stopping;
+  const tracked = stopping.then(
+    (result) => {
+      // A process that is still open may become stoppable after a transient
+      // endpoint-policy or OS error. Do not cache that failed attempt forever.
+      if (
+        !result.closed
+        && child.exitCode === null
+        && child.signalCode === null
+        && stoppingChildren.get(child) === tracked
+      ) {
+        stoppingChildren.delete(child);
+      }
+      return result;
+    },
+    (error) => {
+      if (
+        child.exitCode === null
+        && child.signalCode === null
+        && stoppingChildren.get(child) === tracked
+      ) stoppingChildren.delete(child);
+      throw error;
+    },
+  );
+  stoppingChildren.set(child, tracked);
+  return tracked;
 }
 
 // Narrow test seam for proving Windows cleanup behavior when endpoint policy
@@ -849,7 +906,10 @@ function stopProcessTree(child, taskkillRunner = runTaskkill) {
 export function __stopProcessTreeForTest(child, executablePath, taskkillResult) {
   childLaunchMetadata.set(child, { executablePath: path.resolve(String(executablePath || '')) });
   child.once('close', () => closedChildren.add(child));
-  return stopProcessTree(child, async () => ({ ...taskkillResult }));
+  const taskkillRunner = typeof taskkillResult === 'function'
+    ? taskkillResult
+    : async () => ({ ...taskkillResult });
+  return stopProcessTree(child, taskkillRunner);
 }
 
 export function createProcessCleanupError(originalError, cleanup = {}, pid = null) {
@@ -960,7 +1020,10 @@ async function executeCli(args, options = {}) {
     }
 
     childLaunchMetadata.set(child, { executablePath: spec.executablePath });
-    child.once('close', () => closedChildren.add(child));
+    child.once('close', () => {
+      closedChildren.add(child);
+      activeChildren.delete(child);
+    });
     activeChildren.add(child);
     const stdoutCapture = createCapture(MAX_CAPTURE_BYTES);
     const stderrCapture = createCapture(MAX_CAPTURE_BYTES);
@@ -976,7 +1039,6 @@ async function executeCli(args, options = {}) {
       if (timer) clearTimeout(timer);
       if (heartbeat) clearInterval(heartbeat);
       options.signal?.removeEventListener('abort', onAbort);
-      activeChildren.delete(child);
       worker();
     };
 
@@ -1037,7 +1099,13 @@ async function executeCli(args, options = {}) {
     child.on('error', (error) => {
       if (forcedError) return;
       const code = error?.code === 'ENOENT' ? 'CLI_NOT_FOUND' : classifyError(error.message);
-      finish(() => reject(new ClaudeCliError(code, `Claude CLI 실행 오류: ${error.message}`)));
+      const cliError = new ClaudeCliError(code, `Claude CLI 실행 오류: ${error.message}`);
+      if (Number.isSafeInteger(child.pid) && child.pid > 0) {
+        void forceStop(cliError);
+        return;
+      }
+      activeChildren.delete(child);
+      finish(() => reject(cliError));
     });
     child.on('close', (exitCode, signalCode) => {
       if (forcedError) return;
