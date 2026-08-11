@@ -670,13 +670,16 @@ async function waitForPosixProcessGroupExit(pid, waitMs) {
 async function runTaskkill(pid, dependencies = {}) {
   const resolveExecutable = dependencies.resolveExecutable || resolveWindowsSystemExecutable;
   const spawnProcess = dependencies.spawnProcess || spawn;
-  const stopAfterMs = Number.isSafeInteger(dependencies.stopAfterMs) && dependencies.stopAfterMs > 0
+  const stopAfterMs = Number.isSafeInteger(dependencies.stopAfterMs)
+    && dependencies.stopAfterMs > 0
+    && dependencies.stopAfterMs <= 60000
     ? dependencies.stopAfterMs
     : WINDOWS_TASKKILL_TIMEOUT_MS;
   const abandonAfterMs = Number.isSafeInteger(dependencies.abandonAfterMs)
     && dependencies.abandonAfterMs > stopAfterMs
+    && dependencies.abandonAfterMs <= 60500
     ? dependencies.abandonAfterMs
-    : WINDOWS_TASKKILL_CONFIRM_MS;
+    : Math.max(WINDOWS_TASKKILL_CONFIRM_MS, stopAfterMs + 500);
   let taskkillPath;
   try {
     taskkillPath = await resolveExecutable('taskkill.exe');
@@ -785,7 +788,11 @@ function stopProcessTree(child, taskkillRunner = runTaskkill) {
   const stopping = (async () => {
     let treeConfirmed = true;
     let details = '';
-    if (process.platform === 'win32' && child.pid) {
+    const rootAlreadyExited = child.exitCode !== null || child.signalCode !== null;
+    if (process.platform === 'win32' && rootAlreadyExited) {
+      treeConfirmed = false;
+      details = 'Claude 루트 프로세스가 이미 종료되어 PID 재사용 위험을 피하도록 taskkill을 생략했습니다.';
+    } else if (process.platform === 'win32' && child.pid) {
       const killed = await taskkillRunner(child.pid);
       treeConfirmed = killed.code === 0;
       details = killed.details || (treeConfirmed ? '' : `taskkill 종료 코드 ${killed.code}`);

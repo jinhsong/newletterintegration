@@ -891,6 +891,35 @@ test('미종료 프로세스 정리는 부모 핸들을 분리한 뒤 다음 정
   assert.equal(second.treeConfirmed, true);
 });
 
+test('exit가 확인된 Windows 프로세스 PID에는 taskkill을 다시 실행하지 않는다', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const child = new EventEmitter();
+  child.pid = 424243;
+  child.exitCode = 0;
+  child.signalCode = null;
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  let unrefCount = 0;
+  child.unref = () => { unrefCount += 1; };
+  let taskkillCalls = 0;
+
+  const cleanup = await __stopProcessTreeForTest(child, 'C:\\fake\\claude.exe', async () => {
+    taskkillCalls += 1;
+    return { code: 0, details: '' };
+  });
+
+  assert.equal(taskkillCalls, 0);
+  assert.equal(cleanup.closed, false);
+  assert.equal(cleanup.treeConfirmed, false);
+  assert.match(cleanup.details, /PID 재사용 위험/);
+  assert.equal(child.stdin.destroyed, true);
+  assert.equal(child.stdout.destroyed, true);
+  assert.equal(child.stderr.destroyed, true);
+  assert.equal(unrefCount, 1);
+});
+
 test('Windows native 실행 파일도 taskkill 거부 시 루트 종료만으로 트리 종료를 단정하지 않는다', {
   skip: process.platform !== 'win32',
 }, async () => {
