@@ -94,7 +94,7 @@ export function researchPolicyForUnit(unit, depthValue = CATEGORY_RESEARCH_POLIC
 
 const COMMON_RULES = `
 [공통 정확성 규칙]
-- 반드시 Claude Code의 내장 WebSearch를 사용해 최신 정보를 확인한다.
+- 반드시 선택된 CLI의 내장 웹 검색 도구를 사용해 최신 정보를 확인한다.
 - 정부·국제기구의 원문, 관보, 신뢰도 높은 주요 언론만 사용한다.
 - 발표일은 시행일이나 재게시일이 아니라 해당 조치가 최초 공표된 날짜다.
 - 발표일 또는 원문을 확인할 수 없으면 포함하지 않는다. URL을 추측하지 않는다.
@@ -675,6 +675,31 @@ export function buildCategoryPrompt(domain, unit, context, options = {}) {
       .join(' + '),
   ).join(', ');
   const correctiveAppendix = String(options.correctiveAppendix || '').trim();
+  const provider = ['claude', 'gemini', 'chatgpt'].includes(options.provider)
+    ? options.provider
+    : 'claude';
+  const providerName = provider === 'gemini'
+    ? 'Gemini CLI'
+    : provider === 'chatgpt'
+      ? 'ChatGPT(Codex CLI)'
+      : 'Claude Code';
+  const searchToolName = provider === 'gemini'
+    ? 'google_web_search'
+    : provider === 'chatgpt'
+      ? 'web_search'
+      : 'WebSearch';
+  const officialSearchInstruction = provider === 'claude'
+    ? `- 공식기관 원문 검색은 서로 다른 query로 최소 ${minimumOfficialSearches}회 실행한다. 각 공식 검색은 허용 도메인의 실제 원문 URL을 하나 이상 찾아야 한다. WebSearch의 allowed_domains에는 다음 신뢰 목록의 hostname 또는 그 하위 도메인만 1개 이상 넣는다: ${officialDomainScope}`
+    : `- 공식기관 원문 검색은 서로 다른 query로 최소 ${minimumOfficialSearches}회 실행한다. ${searchToolName}의 query마다 다음 신뢰 목록 중 하나 이상의 hostname을 site:hostname 형식으로 명시하고, 목록 밖 site: 도메인은 쓰지 않는다: ${officialDomainScope}`;
+  const broadSearchInstruction = provider === 'claude'
+    ? `- 일반 동향 검색은 서로 다른 query로 최소 ${minimumBroadSearches}회 실행하며 allowed_domains를 넣지 않는다. 일반 검색 1: 주요 국제·현지 언론, 일반 검색 2: 현지어 기사·통상 전문매체·산업협회, 일반 검색 3: 한국 기업·공급망·제품 영향을 각각 넓게 탐색한다.`
+    : `- 일반 동향 검색은 서로 다른 query로 최소 ${minimumBroadSearches}회 실행하며 site: 연산자를 넣지 않는다. 일반 검색 1: 주요 국제·현지 언론, 일반 검색 2: 현지어 기사·통상 전문매체·산업협회, 일반 검색 3: 한국 기업·공급망·제품 영향을 각각 넓게 탐색한다.`;
+  const providerEvidenceInstructions = provider === 'claude' ? [] : [
+    '- 최종 JSON 최상위에 _searchEvidence 배열을 반드시 포함한다.',
+    `- _searchEvidence에는 성공한 ${searchToolName} query마다 정확히 한 항목을 두고, 도구에 실제 전달한 query 문자열을 글자 하나 바꾸지 않고 복사한다.`,
+    '- 각 항목은 {"query":"실제 query","mode":"official|broad","urls":["그 query 결과에서 실제 확인한 HTTPS 원문 URL"]} 형식이다.',
+    '- official은 site:hostname을 사용한 공식기관 검색, broad는 site:를 사용하지 않은 일반 검색이다. 검색 결과에 없던 URL을 만들거나 다른 query의 URL을 옮기지 않는다.',
+  ];
 
   return [
     '당신은 기업용 글로벌 통상 리서치 애널리스트다.',
@@ -697,19 +722,22 @@ export function buildCategoryPrompt(domain, unit, context, options = {}) {
     '- sourceUrl은 실제로 검색에서 확인한 공개 HTTPS 원문이어야 한다. URL이 없거나 중요도가 상·중·하 중 하나가 아니면 항목을 제외한다.',
     '',
     `[필수 ${minimumSearchesPerCategory}회 다각도 심층 검색 절차]`,
-    `- 이 카테고리만 조사하며 Claude WebSearch를 총 최소 ${minimumSearchesPerCategory}회 성공시킨다. 모든 query는 의미상 서로 달라야 하며 단어 순서만 바꾼 반복 검색은 금지한다.`,
-    `- 공식기관 원문 검색은 서로 다른 query로 최소 ${minimumOfficialSearches}회 실행한다. 각 공식 검색은 허용 도메인의 실제 원문 URL을 하나 이상 찾아야 한다. WebSearch의 allowed_domains에는 다음 신뢰 목록의 hostname 또는 그 하위 도메인만 1개 이상 넣는다: ${officialDomainScope}`,
+    `- 이 카테고리만 조사하며 ${providerName}의 ${searchToolName}를 총 최소 ${minimumSearchesPerCategory}회 성공시킨다. 모든 query는 의미상 서로 달라야 하며 단어 순서만 바꾼 반복 검색은 금지한다.`,
+    officialSearchInstruction,
     `- 각 하위 대상은 실제 공식 원문 URL을 얻은 공식기관 검색 query에 최소 1회 포함한다. 공식 query 하나에는 하위 대상을 최대 ${officialTargetsPerSearch}개까지만 넣어 대상을 분산한다.`,
     '- government·intergovernmental 원문을 법적 근거로 우선한다. trusted-association은 보조 출처이며 법령·제재·판정의 유일한 원문 근거로 사용하지 않는다.',
     '- 공식 검색 1: 최신 법령·관보·행정명령·보도자료, 공식 검색 2: 집행기관의 이행지침·통관/허가/판정, 공식 검색 3: 전자·가전·부품·반도체·AI·철강·HS 품목별 조치를 각각 탐색한다.',
-    '- URL이나 경로는 넣지 않고 blocked_domains와 함께 사용하지 않는다. 목록 밖 언론·민간 도메인은 이 검색에 넣지 않는다.',
-    `- 일반 동향 검색은 서로 다른 query로 최소 ${minimumBroadSearches}회 실행하며 allowed_domains를 넣지 않는다. 일반 검색 1: 주요 국제·현지 언론, 일반 검색 2: 현지어 기사·통상 전문매체·산업협회, 일반 검색 3: 한국 기업·공급망·제품 영향을 각각 넓게 탐색한다.`,
+    provider === 'claude'
+      ? '- URL이나 경로는 넣지 않고 blocked_domains와 함께 사용하지 않는다. 목록 밖 언론·민간 도메인은 이 검색에 넣지 않는다.'
+      : '- site:에는 hostname만 넣고 URL 경로는 넣지 않는다. 목록 밖 언론·민간 도메인을 공식 검색의 site:에 넣지 않는다.',
+    broadSearchInstruction,
     '- 각 하위 대상은 실제 결과 URL을 얻은 성공 검색 query 중 적어도 하나에 위 표기 또는 통용 영문명으로 명시한다. 여러 대상을 한 query에 묶을 수 있지만 누락은 금지한다.',
     '- 복수 국가·기관 카테고리는 하위 대상을 가능한 한 서로 다른 검색 query에 분산해 전체 범위를 고르게 확인하고, 한 국가나 기관만 반복 검색하지 않는다.',
     '- 최종 항목은 응답 항목 소속 허용값 중 하나와 실제로 일치해야 한다. 다른 지역·기관·조치 유형의 항목을 이 카테고리에 넣지 않는다.',
     '- 모든 검색은 조사 기간, 대상 국가·기관, 조치 유형을 반영한다. 실패한 검색은 성공 횟수에 포함하지 말고 새로운 query로 보완한다.',
     `- 중복을 제외하고 최대 ${maximumItemsPerCategory}건. 해당 기간에 검증된 신규 동향이 없으면 빈 배열을 둔다.`,
     `- categories에는 "${unit.key}" 키를 정확히 한 번 포함한다.`,
+    ...providerEvidenceInstructions,
     correctiveAppendix ? '' : null,
     correctiveAppendix ? '[이전 조사 오류 교정 지침]' : null,
     correctiveAppendix || null,
@@ -722,7 +750,10 @@ export function buildCategoryPrompt(domain, unit, context, options = {}) {
     '  "insight": "영역 종합 인사이트",',
     '  "categories": {',
     categoryTemplate,
-    '  }',
+    provider === 'claude' ? '  }' : '  },',
+    provider === 'claude' ? null : '  "_searchEvidence": [',
+    provider === 'claude' ? null : '    {"query":"실제 검색 query","mode":"official|broad","urls":["https://실제-검색-결과-URL"]}',
+    provider === 'claude' ? null : '  ]',
     '}',
   ].filter((line) => line !== null).join('\n');
 }
@@ -731,7 +762,7 @@ export function buildCategoryPrompt(domain, unit, context, options = {}) {
 // 여러 카테고리를 한 요청으로 묶는 호출은 거부한다.
 export function buildDomainPrompt(domain, context, requestedUnits = domain.units, options = {}) {
   if (!Array.isArray(requestedUnits) || requestedUnits.length !== 1) {
-    throw new Error('Claude 조사 프롬프트는 카테고리 하나만 포함해야 합니다.');
+    throw new Error('조사 프롬프트는 카테고리 하나만 포함해야 합니다.');
   }
   return buildCategoryPrompt(domain, requestedUnits[0], context, options);
 }

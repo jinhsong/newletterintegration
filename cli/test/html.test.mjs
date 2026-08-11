@@ -108,7 +108,7 @@ test('단일 카테고리 HTML은 선택 범위만 표시하고 미선택 17개�
   assert.match(html, /<title>글로벌 통상 모니터링 · 수출통제 \/ 미국 · 2026-07-29<\/title>/);
   assert.match(html, /<body class="live-output">/);
   assert.match(html, /선택 조사 · 수출통제 \/ 미국/);
-  assert.match(html, /요청한 1개 카테고리의 Claude Code 표준 조사를 정리했습니다/);
+  assert.match(html, /요청한 1개 카테고리의 Claude Code CLI 표준 조사를 정리했습니다/);
   assert.match(html, /조사 깊이 표준\(standard\)/);
   assert.match(html, /카테고리 1\/1 · 웹 검색 6회 성공/);
   assert.match(html, /--domain-band:#7a1f1f/);
@@ -147,7 +147,7 @@ test('그룹 HTML은 선택한 영역의 전체 카테고리만 표시한다', a
   assert.ok(payload.collection.requestedCategoryIds.every((id) => id.startsWith('customs:')));
   assert.match(html, /선택 그룹 · 관세 · 9개 카테고리/);
   assert.match(html, /<title>글로벌 통상 모니터링 · 관세 그룹 · 2026-07-29<\/title>/);
-  assert.match(html, /요청한 9개 카테고리의 Claude Code 표준 조사를 정리했습니다/);
+  assert.match(html, /요청한 9개 카테고리의 Claude Code CLI 표준 조사를 정리했습니다/);
   assert.match(html, /카테고리 9\/9 · 웹 검색 60회 성공/);
   assert.match(html, /id="domain-customs"/);
   assert.doesNotMatch(html, /id="domain-export"/);
@@ -162,13 +162,18 @@ test('그룹 HTML은 선택한 영역의 전체 카테고리만 표시한다', a
 
 test('조사 기간 근처에 발표일의 시각·날짜 정밀도 한계를 표시한다', async () => {
   const payload = await mockPayload();
-  payload.context.lookbackSource = 'last-complete-run';
+  payload.context.lookbackSource = 'weekday-default';
   const html = renderMonitoringHtml(payload);
   const periodStart = html.indexOf('<div class="period">');
   const periodEnd = html.indexOf('</div>', periodStart);
   const period = html.slice(periodStart, periodEnd);
   assert.match(period, /발표시각이 확인된 항목은 정확한 시각, 나머지는 KST 달력 날짜 기준/);
-  assert.match(html, /기간 계산:<\/b> 동일 범위·깊이의 마지막 완전 성공 시각에서 6시간 중첩/);
+  assert.match(html, /기간 계산:<\/b> 빈 입력 기본값\(월요일 72시간, 그 외 요일 24시간\)/);
+  assert.match(html, /이번 실행 24시간/);
+
+  payload.context.lookbackSource = 'manual';
+  payload.context.lookbackHours = 48;
+  assert.match(renderMonitoringHtml(payload), /사용자가 직접 지정 \(48시간\)/);
 });
 
 test('모델 텍스트는 한 번만 HTML escape되고 위험한 URL은 링크가 되지 않는다', async () => {
@@ -200,6 +205,12 @@ test('출처명과 실제 hostname을 함께 표시한다', async () => {
   assert.match(html, /<span class="source-host">ustr\.gov<\/span>/);
   assert.match(html, />원문 열기 /);
   assert.match(html, /HTTPS 형식 확인 · 원문 수동 확인 필요/);
+
+  item.sourceVerification = 'reported';
+  assert.match(
+    renderMonitoringHtml(payload),
+    /모델 보고 검색 URL과 연결 · 원문 수동 확인/,
+  );
 
   item.sourceUrl = 'https://user:pass@ustr.gov/private';
   assert.doesNotMatch(renderMonitoringHtml(payload), /href="https:\/\/user:pass@/);
@@ -278,7 +289,7 @@ test('부분 실패, 확인 불가, 검색 후 0건을 영역과 카테고리에
   const html = renderMonitoringHtml(payload);
   assert.match(html, /일부 범위 조사 실패/);
   assert.match(html, /부분 결과/);
-  assert.match(html, /카테고리 2\/3 · 웹 검색 12회 성공 · Claude 경고 1건/);
+  assert.match(html, /카테고리 2\/3 · 웹 검색 12회 성공 · AI CLI 경고 1건/);
   assert.match(html, /수집 실패로 확인할 수 없습니다/);
   assert.match(html, /사유: &lt;정책 차단&gt;/);
   assert.match(html, /웹 검색을 마쳤으며, 조사 기간과 포함 기준을 충족한 신규 동향은 0건입니다/);
@@ -348,7 +359,7 @@ test('run.mjs mock 실행은 HTML 한 파일만 만든다', async () => {
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const html = await fs.readFile(output, 'utf8');
     assert.match(html, /글로벌 통상 모니터링/);
-    assert.match(html, /AI 예비 조사 · 원문 수동 확인 필수<\/b> · v6\.0\.0/);
+    assert.match(html, /AI 예비 조사 · 원문 수동 확인 필수<\/b> · v7\.0\.0/);
     assert.deepEqual(await fs.readdir(path.dirname(output)), ['monitoring.html']);
   });
 });

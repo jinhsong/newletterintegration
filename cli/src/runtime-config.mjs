@@ -10,6 +10,18 @@ export const LOCAL_ENV_KEYS = new Set([
   'CLAUDE_CLI_RETRY_MAX',
   'CLAUDE_CLI_TIMEOUT_MS',
   'CLAUDE_RUN_TIMEOUT_MS',
+  'GEMINI_CLI_BIN',
+  'GEMINI_CLI_MODEL',
+  'GEMINI_CLI_PREFLIGHT_TIMEOUT_MS',
+  'GEMINI_CLI_RETRY_MAX',
+  'GEMINI_CLI_TIMEOUT_MS',
+  'GEMINI_RUN_TIMEOUT_MS',
+  'CODEX_CLI_BIN',
+  'CODEX_CLI_MODEL',
+  'CODEX_CLI_PREFLIGHT_TIMEOUT_MS',
+  'CODEX_CLI_RETRY_MAX',
+  'CODEX_CLI_TIMEOUT_MS',
+  'CODEX_RUN_TIMEOUT_MS',
   'LOCAL_OUTPUT_FILE',
 ]);
 
@@ -61,17 +73,33 @@ function validateIntegerSetting(env, name, minimum, maximum) {
   }
 }
 
-export function validateRuntimeEnvironment(env = process.env) {
-  validateIntegerSetting(env, 'CLAUDE_CLI_PREFLIGHT_TIMEOUT_MS', 1, 300000);
-  validateIntegerSetting(env, 'CLAUDE_CLI_RETRY_MAX', 1, 3);
-  validateIntegerSetting(env, 'CLAUDE_CLI_TIMEOUT_MS', 1, 1800000);
-  validateIntegerSetting(env, 'CLAUDE_RUN_TIMEOUT_MS', 1, 14400000);
-  validateIntegerSetting(env, 'CLAUDE_CLI_MAX_TURNS', 1, 50);
-  if (String(env.CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN || '').trim()
+export function validateRuntimeEnvironment(env = process.env, provider = 'all') {
+  const normalizedProvider = String(provider || 'all').trim().toLowerCase();
+  const validateClaude = normalizedProvider === 'all' || normalizedProvider === 'claude';
+  const providerPrefixes = normalizedProvider === 'all'
+    ? ['GEMINI', 'CODEX']
+    : ({ gemini: ['GEMINI'], chatgpt: ['CODEX'], none: [] }[normalizedProvider] || []);
+  if (!validateClaude && providerPrefixes.length === 0 && normalizedProvider !== 'none') {
+    throw new Error('호출 모델은 claude, gemini, chatgpt 중 하나여야 합니다.');
+  }
+  if (validateClaude) {
+    validateIntegerSetting(env, 'CLAUDE_CLI_PREFLIGHT_TIMEOUT_MS', 1, 300000);
+    validateIntegerSetting(env, 'CLAUDE_CLI_RETRY_MAX', 1, 3);
+    validateIntegerSetting(env, 'CLAUDE_CLI_TIMEOUT_MS', 1, 1800000);
+    validateIntegerSetting(env, 'CLAUDE_RUN_TIMEOUT_MS', 1, 14400000);
+    validateIntegerSetting(env, 'CLAUDE_CLI_MAX_TURNS', 1, 50);
+  }
+  for (const prefix of providerPrefixes) {
+    validateIntegerSetting(env, `${prefix}_CLI_PREFLIGHT_TIMEOUT_MS`, 1, 300000);
+    validateIntegerSetting(env, `${prefix}_CLI_RETRY_MAX`, 1, 3);
+    validateIntegerSetting(env, `${prefix}_CLI_TIMEOUT_MS`, 1, 1800000);
+    validateIntegerSetting(env, `${prefix}_RUN_TIMEOUT_MS`, 1, 14400000);
+  }
+  if (validateClaude && String(env.CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN || '').trim()
     && !['0', '1'].includes(String(env.CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN).trim())) {
     throw new Error('CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN은 0 또는 1이어야 합니다.');
   }
-  if (String(env.CLAUDE_CLI_ALLOWED_SHA256 || '').trim()
+  if (validateClaude && String(env.CLAUDE_CLI_ALLOWED_SHA256 || '').trim()
     && !/^[0-9a-f]{64}$/i.test(String(env.CLAUDE_CLI_ALLOWED_SHA256).trim())) {
     throw new Error('CLAUDE_CLI_ALLOWED_SHA256는 64자리 SHA-256 16진수여야 합니다.');
   }

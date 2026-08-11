@@ -1,17 +1,17 @@
 # 프로젝트 작업 지침
 
-이 저장소는 회사 Claude Code CLI를 이용해 통상 동향을 조사하고 PC 로컬 HTML 한 파일을
+이 저장소는 회사 Claude Code, Gemini 또는 ChatGPT(Codex) CLI를 이용해 통상 동향을 조사하고 PC 로컬 HTML 한 파일을
 생성하는 수동 실행 도구입니다.
 
 - 런타임은 순수 Node.js ES modules이며 Apps Script 코드를 추가하지 않습니다.
 - 메일, SMTP, Gmail, Google Drive, Sheets, Obsidian, 예약·시간 트리거를 추가하지 않습니다.
-- 별도 API 키를 요구하거나 저장하지 않고 현재 회사 Claude Code CLI 인증을 사용합니다.
+- 별도 API 키를 요구하거나 저장하지 않고 사용자가 선택한 CLI의 기존 회사 계정 인증을 사용합니다.
 - 회사 IT가 제공한 경우 `CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN`과
   `CLAUDE_CLI_ALLOWED_SHA256`로 실행 파일 절대경로·해시를 고정할 수 있으며, 불일치는
   보안 오류로 중단합니다. SHA-256 고정은 실제 payload인 네이티브 `.exe`·`.com`에만
   허용하고 `.cmd`·`.bat` 래퍼에는 적용하지 않습니다.
 - `cli/.env`에서 읽을 수 있는 키는 실행기에 필요한 명시적 allowlist로 제한하며,
-  Claude Code 인증·회사 관리 설정을 저장소 설정으로 주입하지 않습니다.
+  CLI 인증·회사 관리 설정이나 API 키를 저장소 설정으로 주입하지 않습니다.
 - 조사 영역과 프롬프트의 기준은 `cli/src/config.mjs`입니다.
 - 전체 조사 산출물은 `cli/output/monitoring.html`, 그룹 산출물은 영역별
   `monitoring-customs.html`·`monitoring-export.html`·`monitoring-trade.html`입니다.
@@ -35,24 +35,38 @@
 - Claude Code는 비어 있는 OS 임시 폴더에서 `--safe-mode`로 실행하고,
   `--tools WebSearch`, `--permission-mode dontAsk`, 엄격한 MCP 차단 인수로
   파일·셸·WebFetch·사용자 정의 도구를 사용할 수 없게 합니다.
+- Gemini는 임시 폴더의 고정 `.gemini/settings.json`으로 `google_web_search`만 허용하고
+  MCP·hooks·skills·agents·프로젝트 컨텍스트를 비활성화합니다.
+- ChatGPT는 Codex CLI의 저장된 ChatGPT OAuth 로그인만 허용하고 API key·access token·
+  사용자 지정 API 및 OAuth endpoint 환경변수를 제거합니다. ephemeral 실행, 읽기 전용 sandbox,
+  승인 금지, 사용자 설정·규칙 무시, 웹 검색, JSONL 출력을 적용합니다. 스킬·앱·협업·
+  환경 안내 주입을 명시적으로 끄고, 내용이 있는 CODEX_HOME 전역 AGENTS 파일은 외부 요청
+  전에 거부합니다. 실행 전에
+  셸·hooks·앱·플러그인·MCP·브라우저·컴퓨터 사용·이미지·메모리·다중 에이전트 관련
+  feature와 goal·identity·skill 검색이 실제로 꺼졌는지 확인하며, 검토되지 않은 새 활성
+  feature 및 command·파일 변경·MCP 등 허용하지 않은 이벤트를 거부합니다.
 - 회사 hardening이 요청한 `dontAsk`를 `default`로 강제하는 경우도
   `--allowedTools WebSearch`, 정확한 init 도구 목록, 권한 거부 없음과 실제 도구 이벤트를
   모두 검증한 때에만 허용합니다. 다른 권한 모드는 거부합니다.
-- 전체 18개, 그룹 9개·6개·3개, 단일 카테고리 1개를 각각 별도의 Claude 호출로
+- 전체 18개, 그룹 9개·6개·3개, 단일 카테고리 1개를 각각 선택한 AI CLI의 별도 호출로
   조사합니다. 기본은 전역 조사 잠금과 동시성 1이며, 사용자가 위험을 이해하고
   `--allow-parallel`을 명시한 경우만 전역 잠금을 우회합니다.
 - 각 카테고리는 `cli/src/config.mjs`에 비어 있지 않은 신뢰 공식 도메인 목록을 둡니다.
   `fast`·`standard`·`deep` 조사 깊이와 카테고리의 국가·기관 등 하위 대상 수에 따라
   공식기관 및 일반 검색의 최소 횟수와 최대 항목 수를 계산합니다.
-- stream-json 기록에서 서로 다른 검색어, 공식 검색 요청의 `allowed_domains`, 공식 검색
+- Claude stream-json 기록에서는 서로 다른 검색어, 공식 검색 요청의 `allowed_domains`, 공식 검색
   결과 URL 호스트, 도메인 제한 없는 일반 동향 검색과 성공 결과를 함께 검증합니다.
   필수 횟수를 채운 뒤의 추가 검색 실패는 경고로 보존합니다. 목록 밖 도메인과 응답·검색
   검증 오류는 첫 실패 원인을 포함한 보정 프롬프트로 해당 카테고리를 한 번만 재조사합니다.
+- Gemini·Codex는 실행 이벤트의 실제 검색 query와 최종 `_searchEvidence`를 1:1 대조하고,
+  공개 HTTPS·공식 `site:` 도메인·항목 출처 연결을 검사합니다. 이벤트가 원 검색결과 URL
+  목록을 제공하지 않는 한계는 `sourceVerification=reported`로 보존하여 Claude의 직접
+  검색결과 근거와 구분하고, HTML과 문서에서 원문 수동 확인을 요구합니다.
 - 중복 제거와 표시 한도 적용으로 제외된 건수는 카테고리 상태와 전체 감사 통계에 남깁니다.
-- `--lookback`을 생략하면 동일 scope·depth의 마지막 완전 성공 시각에서 6시간을 겹쳐
-  조사하되 최대 168시간까지만 소급합니다. 기록이 없을 때만 요일 기본값을 사용합니다.
-- `CLAUDE_RUN_TIMEOUT_MS`가 없으면 전체 실행 제한은 fast 60분, standard 120분,
-  deep 240분입니다. 사용자가 환경변수로 지정하면 그 값을 우선합니다.
+- 옵션 없는 TTY 실행은 공급자와 조회 시간을 질문합니다. 모델 빈 입력은 Claude, 기간 빈
+  입력은 KST 월요일 72시간·그 외 요일 24시간이며 직접 입력은 1~168시간 정수입니다.
+- 선택한 공급자의 `*_RUN_TIMEOUT_MS`가 없으면 전체 실행 제한은 fast 60분, standard
+  120분, deep 240분입니다. 사용자가 해당 환경변수로 지정하면 그 값을 우선합니다.
 - 보안 정책이나 사전 점검을 우회하는 fallback을 추가하지 않습니다.
 - Windows 동시 실행 잠금은 전역 조사 잠금과 결과 경로별 named pipe를 실제 잠금으로
   사용하고, 파일은 진단 정보로만 사용합니다. 사용자에게 잠금 파일 수동 삭제를 지시하지

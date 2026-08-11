@@ -12,12 +12,11 @@ import {
   resolveGroupSelector,
 } from './src/config.mjs';
 import {
-  prepareResearchWorkspace,
-  preflightClaudeCli,
   resolveWindowsSystemExecutable,
-  stopAllClaudeProcesses,
-  totalTimeoutMs,
+  stopAllProviderProcesses,
 } from './src/claude-client.mjs';
+import { completeInteractiveOptions } from './src/interactive-options.mjs';
+import { resolveProvider } from './src/provider-registry.mjs';
 import { renderMonitoringHtml } from './src/html-renderer.mjs';
 import { collectMonitoring } from './src/pipeline.mjs';
 import { acquireRunLock } from './src/run-lock.mjs';
@@ -30,11 +29,7 @@ import {
 } from './src/output-store.mjs';
 import {
   appStateDirectory,
-  automaticFromDate,
   globalResearchLockTarget,
-  lastCompleteRun,
-  monitoringScopeKey,
-  recordCompleteRun,
 } from './src/run-state.mjs';
 import { APP_VERSION } from './src/version.mjs';
 
@@ -50,7 +45,8 @@ const ownedResearchWorkspaces = new Set();
 function help() {
   console.log(`
 사용법:
-  .\\run-monitoring.cmd [--depth fast|standard|deep] [--lookback 24|72|168]
+  .\\run-monitoring.cmd [--provider claude|gemini|chatgpt]
+                         [--depth fast|standard|deep] [--lookback 1~168]
                          [--group GROUP | --category CATEGORY] [--out FILE]
                          [--open|--no-open] [--allow-partial-overwrite]
                          [--allow-parallel] [--allow-network-output]
@@ -59,8 +55,11 @@ function help() {
   .\\run-monitoring.cmd --mock .\\cli\\test\\fixtures\\responses.json [--out FILE]
   .\\run-monitoring.cmd --version
 
-회사 계정으로 로그인된 Claude Code CLI를 사용해 통상 동향을 조사하고
+회사 계정으로 로그인된 Claude, Gemini 또는 ChatGPT(Codex) CLI를 사용해 통상 동향을 조사하고
 PC에 HTML 파일 하나만 저장합니다.
+
+옵션 없이 실행하면 호출 모델과 기간을 질문합니다.
+빈 입력 기본값: Claude / 월요일 72시간 / 그 외 요일 24시간
 
 기본 결과: cli/output/monitoring.html
 그룹별 기본 결과: cli/output/monitoring-customs.html | monitoring-export.html | monitoring-trade.html
@@ -68,7 +67,7 @@ PC에 HTML 파일 하나만 저장합니다.
 목 테스트 기본 결과: cli/output/mock-monitoring.html
 
 기본 조사 깊이: standard
-기본 조사 기간: 같은 범위의 마지막 완전 성공 시각부터 자동 계산(최대 168시간)
+기본 조사 기간: 월요일 72시간, 그 외 요일 24시간
 부분 결과: 대표 파일을 보존하고 timestamp가 붙은 별도 파일로 저장(종료 코드 2)
 부분 결과 대표 파일 교체: --allow-partial-overwrite
 동시 조사 허용(주의): --allow-parallel
@@ -94,12 +93,12 @@ function listCategories() {
   console.log('예: .\\run-monitoring.cmd --category "customs:북미"');
 }
 
-async function createResearchWorkspace() {
+async function createResearchWorkspace(provider) {
   const configuredTempRoot = os.tmpdir();
   if (!path.isAbsolute(configuredTempRoot)
     || isNetworkOutputPath(configuredTempRoot)
     || (process.platform === 'win32' && /^\\\\[?.]\\/.test(configuredTempRoot))) {
-    const error = new Error('OS 임시 폴더가 로컬 일반 절대경로가 아니어서 Claude 조사를 시작하지 않았습니다.');
+    const error = new Error('OS 임시 폴더가 로컬 일반 절대경로가 아니어서 AI 조사를 시작하지 않았습니다.');
     error.code = 'SECURITY_POLICY';
     throw error;
   }
@@ -111,15 +110,15 @@ async function createResearchWorkspace() {
   }
   const tempRoot = await fsPromises.realpath(configuredTempRoot);
   if (isNetworkOutputPath(tempRoot)) {
-    const error = new Error('네트워크 임시 폴더에서는 Claude 조사를 실행하지 않습니다.');
+    const error = new Error('네트워크 임시 폴더에서는 AI 조사를 실행하지 않습니다.');
     error.code = 'SECURITY_POLICY';
     throw error;
   }
-  const directory = await fsPromises.mkdtemp(path.join(tempRoot, 'trade-monitor-claude-'));
+  const directory = await fsPromises.mkdtemp(path.join(tempRoot, provider.workspacePrefix));
   const resolvedDirectory = path.resolve(directory);
   ownedResearchWorkspaces.add(resolvedDirectory);
   try {
-    await prepareResearchWorkspace(resolvedDirectory);
+    await provider.prepareWorkspace(resolvedDirectory);
     return resolvedDirectory;
   } catch (error) {
     await removeResearchWorkspace(resolvedDirectory).catch(() => {});
@@ -131,7 +130,7 @@ async function removeResearchWorkspace(directory) {
   if (!directory) return;
   const resolved = path.resolve(directory);
   if (!ownedResearchWorkspaces.has(resolved)
-    || !path.basename(resolved).startsWith('trade-monitor-claude-')) {
+    || !path.basename(resolved).startsWith('trade-monitor-')) {
     throw new Error(`임시 작업 폴더 경로가 안전하지 않아 삭제하지 않았습니다: ${resolved}`);
   }
   await fsPromises.rm(resolved, { recursive: true, force: true });
@@ -170,9 +169,9 @@ async function main() {
   if (!Number.isInteger(nodeMajor) || nodeMajor < 20) {
     throw new Error(`Node.js 20 이상이 필요합니다. 현재 버전: ${process.versions.node}`);
   }
-  const options = parseArgs(process.argv.slice(2));
+  let options = parseArgs(process.argv.slice(2));
   if (options.version) {
-    console.log(`trade-monitor-claude-cli ${APP_VERSION}`);
+    console.log(`trade-monitor-cli ${APP_VERSION}`);
     return;
   }
   if (options.listGroups) {
@@ -188,7 +187,13 @@ async function main() {
     return;
   }
   loadEnvFile(path.join(cliDir, '.env'));
-  validateRuntimeEnvironment();
+  options = await completeInteractiveOptions(options);
+  validateRuntimeEnvironment(process.env, options.mockPath ? 'none' : options.provider);
+  const provider = resolveProvider(options.provider);
+  console.log(`호출 모델: ${provider.cliLabel}`);
+  console.log(`모니터링 기간: ${options.lookbackHours === undefined
+    ? '요일 기본값(월요일 72시간, 그 외 24시간)'
+    : `최근 ${options.lookbackHours}시간`}`);
   const categorySelection = options.category
     ? resolveCategorySelector(options.category)
     : null;
@@ -201,12 +206,7 @@ async function main() {
     { ...options, categorySelection, groupSelection },
     process.env.LOCAL_OUTPUT_FILE,
   );
-  const scopeKey = monitoringScopeKey({ categorySelection, groupSelection, depth: options.depth });
   const runStartedAt = new Date();
-  const previousComplete = !options.mockPath && options.lookbackHours === undefined
-    ? await lastCompleteRun(cliDir, scopeKey)
-    : null;
-  const automaticStart = automaticFromDate(runStartedAt, previousComplete);
   const controller = new AbortController();
   let interrupted = false;
   let outputRunLock;
@@ -217,7 +217,7 @@ async function main() {
   const onInterrupt = () => {
     if (interrupted) return;
     interrupted = true;
-    console.warn('\n중단 요청을 받았습니다. 실행 중인 Claude 작업을 정리합니다...');
+    console.warn(`\n중단 요청을 받았습니다. 실행 중인 ${provider.label} 작업을 정리합니다...`);
     controller.abort();
   };
   process.on('SIGINT', onInterrupt);
@@ -228,22 +228,22 @@ async function main() {
     if (!options.mockPath && !options.allowParallel) {
       globalRunLock = await acquireRunLock(globalResearchLockTarget(cliDir), {
         lockDirectory,
-        description: '다른 Claude 모니터링',
+        description: '다른 AI 모니터링',
       });
     }
     outputRunLock = await acquireRunLock(outputFile, { lockDirectory });
     if (!options.mockPath) {
-      researchWorkspace = await createResearchWorkspace();
-      console.log('Claude Code CLI 버전과 실행기 보안 설정을 확인합니다...');
-      const preflight = await preflightClaudeCli({ cwd: researchWorkspace, signal: controller.signal });
-      console.log(`Claude Code ${preflight.version} 확인 완료.`);
-      if (preflight.executablePath) console.log(`Claude 실행 파일: ${preflight.executablePath}`);
+      researchWorkspace = await createResearchWorkspace(provider);
+      console.log(`${provider.cliLabel} 버전과 실행기 보안 설정을 확인합니다...`);
+      const preflight = await provider.preflight({ cwd: researchWorkspace, signal: controller.signal });
+      console.log(`${provider.cliLabel} ${preflight.version} 확인 완료.`);
+      if (preflight.executablePath) console.log(`${provider.label} 실행 파일: ${preflight.executablePath}`);
       for (const warning of preflight.diagnostics?.warnings || []) {
         console.warn(`실행 환경 주의: ${warning}`);
       }
-      const deadline = process.env.CLAUDE_RUN_TIMEOUT_MS === undefined
+      const deadline = process.env[provider.runTimeoutEnv] === undefined
         ? DEFAULT_RUN_TIMEOUT_BY_DEPTH_MS[options.depth]
-        : totalTimeoutMs();
+        : provider.totalTimeoutMs();
       deadlineAt = Date.now() + deadline;
       console.log(`전체 실행 제한: ${Math.round(deadline / 60000)}분`);
       deadlineTimer = setTimeout(() => {
@@ -259,8 +259,8 @@ async function main() {
       cwd: researchWorkspace || repoRoot,
       now: runStartedAt,
       lookbackHours: options.lookbackHours,
-      fromDate: options.lookbackHours === undefined ? automaticStart : null,
       depth: options.depth,
+      provider: provider.key,
       categorySelection,
       groupSelection,
       mockPath: options.mockPath,
@@ -270,9 +270,7 @@ async function main() {
     payload.appVersion = APP_VERSION;
     payload.context.lookbackSource = options.lookbackHours !== undefined
       ? 'manual'
-      : automaticStart
-        ? 'last-complete-run'
-        : 'weekday-default';
+      : 'weekday-default';
     throwIfAborted(controller.signal);
     if (payload.collection.completedDomains === 0) {
       const subject = categorySelection
@@ -311,16 +309,6 @@ async function main() {
       } else {
         console.warn(`기존 대표 결과는 보존했습니다: ${outputFile}`);
       }
-    } else if (!options.mockPath) {
-      try {
-        await recordCompleteRun(cliDir, scopeKey, {
-          completedAt: payload.createdAt,
-          outputFile: savedOutputFile,
-          depth: options.depth,
-        });
-      } catch (error) {
-        console.warn(`다음 자동 조사 기간을 위한 실행 시각 저장 경고: ${error.message}`);
-      }
     }
     console.log('메일 발송, 예약 실행, 외부 서비스 저장은 수행하지 않았습니다.');
     if (options.open) {
@@ -330,7 +318,7 @@ async function main() {
     if (!complete) process.exitCode = 2;
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
-    const processCleanup = await stopAllClaudeProcesses();
+    const processCleanup = await stopAllProviderProcesses();
     if (!processCleanup.ok && process.exitCode !== 130) process.exitCode = 1;
     const cleanup = await Promise.allSettled([
       removeResearchWorkspace(researchWorkspace),
@@ -355,7 +343,7 @@ main().catch((error) => {
     return;
   }
   if (error?.code === 'ABORTED') {
-    console.error('실행을 중단했습니다. Claude 프로세스와 임시 실행 정보를 정리했습니다.');
+    console.error('실행을 중단했습니다. AI CLI 프로세스와 임시 실행 정보를 정리했습니다.');
     process.exitCode = 130;
     return;
   }

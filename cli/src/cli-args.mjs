@@ -1,7 +1,7 @@
 import path from 'node:path';
 
-const LOOKBACK_VALUES = new Set(['24', '72', '168']);
 const DEPTH_VALUES = new Set(['fast', 'standard', 'deep']);
+const PROVIDER_VALUES = new Set(['claude', 'gemini', 'chatgpt']);
 
 function optionValue(argv, index, option) {
   const value = argv[index + 1];
@@ -16,14 +16,27 @@ export function parseArgs(argv, cwd = process.cwd()) {
   let categorySeen = false;
   let groupSeen = false;
   let depthSeen = false;
+  let lookbackSeen = false;
+  let providerSeen = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--lookback') {
-      const value = optionValue(argv, index, arg);
-      if (!LOOKBACK_VALUES.has(value)) {
-        throw new Error('--lookback은 24, 72, 168 중 하나여야 합니다.');
+      if (lookbackSeen) throw new Error('--lookback은 한 번만 입력할 수 있습니다.');
+      const value = optionValue(argv, index, arg).trim();
+      if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 168) {
+        throw new Error('--lookback은 1~168 사이의 정수 시간이어야 합니다.');
       }
       options.lookbackHours = Number(value);
+      lookbackSeen = true;
+      index += 1;
+    } else if (arg === '--provider') {
+      if (providerSeen) throw new Error('--provider는 한 번만 입력할 수 있습니다.');
+      const value = optionValue(argv, index, arg).trim().toLocaleLowerCase('en-US');
+      if (!PROVIDER_VALUES.has(value)) {
+        throw new Error('--provider는 claude, gemini, chatgpt 중 하나여야 합니다.');
+      }
+      options.provider = value;
+      providerSeen = true;
       index += 1;
     } else if (arg === '--depth') {
       if (depthSeen) throw new Error('--depth는 한 번만 입력할 수 있습니다.');
@@ -83,7 +96,8 @@ export function parseArgs(argv, cwd = process.cwd()) {
   if ((options.listCategories || options.listGroups) && (
     options.category
     || options.group
-    || options.lookbackHours
+    || options.lookbackHours !== undefined
+    || options.provider
     || depthSeen
     || options.outputFile
     || options.mockPath

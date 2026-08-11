@@ -29,7 +29,11 @@ jobs:
 
       - name: 구문 확인
         shell: pwsh
-        run: node --check .\cli\run.mjs
+        run: |
+          node --check .\cli\run.mjs
+          node --check .\cli\src\gemini-client.mjs
+          node --check .\cli\src\codex-client.mjs
+          node --check .\cli\src\interactive-options.mjs
 
       # Run each test file directly. The outer `node --test` worker/IPC layer can
       # hang or corrupt serialized events around Windows child-process tests.
@@ -37,6 +41,11 @@ jobs:
         shell: pwsh
         timeout-minutes: 3
         run: node --test-reporter=dot .\cli\test\claude-client.test.mjs
+
+      - name: Gemini·ChatGPT CLI 및 대화형 입력 테스트
+        shell: pwsh
+        timeout-minutes: 3
+        run: node --test-reporter=dot .\cli\test\provider-clients.test.mjs
 
       - name: HTML 렌더링 테스트
         shell: pwsh

@@ -44,10 +44,11 @@ async function writeRecoveryPair(output, html) {
   }), 'utf8');
 }
 
-test('CLI 인자는 lookback·그룹·단일 카테고리·값이 있는 경로만 받는다', () => {
+test('CLI 인자는 provider·임의 lookback·그룹·단일 카테고리·값이 있는 경로만 받는다', () => {
   const cwd = path.resolve('example-root');
   const parsed = parseArgs([
     '--lookback', '72',
+    '--provider', 'GEMINI',
     '--category', 'customs:북미',
     '--depth', 'deep',
     '--out', 'result.html',
@@ -57,6 +58,7 @@ test('CLI 인자는 lookback·그룹·단일 카테고리·값이 있는 경로�
     '--open',
   ], cwd);
   assert.equal(parsed.lookbackHours, 72);
+  assert.equal(parsed.provider, 'gemini');
   assert.equal(parsed.category, 'customs:북미');
   assert.equal(parsed.depth, 'deep');
   assert.equal(parsed.allowPartialOverwrite, true);
@@ -68,10 +70,21 @@ test('CLI 인자는 lookback·그룹·단일 카테고리·값이 있는 경로�
   assert.equal(parseArgs(['--category', 'UN 및 다자체제'], cwd).category, 'UN 및 다자체제');
   assert.equal(parseArgs(['--group', '관세'], cwd).group, '관세');
   assert.equal(parseArgs([], cwd).depth, 'standard');
+  assert.equal(parseArgs(['--lookback', '1'], cwd).lookbackHours, 1);
+  assert.equal(parseArgs(['--lookback', '48'], cwd).lookbackHours, 48);
+  assert.equal(parseArgs(['--lookback', '168'], cwd).lookbackHours, 168);
+  assert.equal(parseArgs(['--provider', 'chatgpt'], cwd).provider, 'chatgpt');
   assert.equal(parseArgs(['--list-categories', '--open'], cwd).listCategories, true);
   assert.equal(parseArgs(['--list-groups', '--open'], cwd).listGroups, true);
-  assert.throws(() => parseArgs(['--lookback', 'abc'], cwd), /24, 72, 168/);
+  assert.throws(() => parseArgs(['--lookback', 'abc'], cwd), /1~168/);
+  for (const invalid of ['0', '169', '1.5', '-1', '+1', '1e2']) {
+    assert.throws(() => parseArgs(['--lookback', invalid], cwd), /1~168/);
+  }
   assert.throws(() => parseArgs(['--lookback'], cwd), /값을 입력/);
+  assert.throws(() => parseArgs(['--lookback', '24', '--lookback', '48'], cwd), /한 번만/);
+  assert.throws(() => parseArgs(['--provider'], cwd), /값을 입력/);
+  assert.throws(() => parseArgs(['--provider', 'openai'], cwd), /claude, gemini, chatgpt/);
+  assert.throws(() => parseArgs(['--provider', 'claude', '--provider', 'gemini'], cwd), /한 번만/);
   assert.throws(() => parseArgs(['--depth', 'maximum'], cwd), /fast, standard, deep/);
   assert.throws(() => parseArgs(['--depth', 'fast', '--depth', 'deep'], cwd), /한 번만/);
   assert.throws(() => parseArgs(['--category'], cwd), /값을 입력/);
@@ -111,7 +124,7 @@ test('.env는 BOM·허용목록·엄격한 숫자 범위를 처리한다', async
     const envFile = path.join(directory, '.env');
     await fs.writeFile(
       envFile,
-      '\uFEFFCLAUDE_CLI_TIMEOUT_MS=900000\nUNSAFE_TOKEN=secret\nCLAUDE_CLI_MAX_TURNS=32\n',
+      '\uFEFFCLAUDE_CLI_TIMEOUT_MS=900000\nGEMINI_CLI_TIMEOUT_MS=800000\nCODEX_CLI_RETRY_MAX=3\nUNSAFE_TOKEN=secret\nCLAUDE_CLI_MAX_TURNS=32\n',
       'utf8',
     );
     const target = {};
@@ -119,6 +132,8 @@ test('.env는 BOM·허용목록·엄격한 숫자 범위를 처리한다', async
     loadEnvFile(envFile, target, (warning) => warnings.push(warning));
     assert.equal(target.CLAUDE_CLI_TIMEOUT_MS, '900000');
     assert.equal(target.CLAUDE_CLI_MAX_TURNS, '32');
+    assert.equal(target.GEMINI_CLI_TIMEOUT_MS, '800000');
+    assert.equal(target.CODEX_CLI_RETRY_MAX, '3');
     assert.equal(target.UNSAFE_TOKEN, undefined);
     assert.match(warnings.join('\n'), /UNSAFE_TOKEN/);
     assert.doesNotThrow(() => validateRuntimeEnvironment(target));
@@ -130,6 +145,30 @@ test('.env는 BOM·허용목록·엄격한 숫자 범위를 처리한다', async
       () => validateRuntimeEnvironment({ CLAUDE_CLI_ALLOWED_SHA256: 'not-a-hash' }),
       /64자리/,
     );
+    assert.throws(
+      () => validateRuntimeEnvironment({ GEMINI_CLI_RETRY_MAX: '4' }),
+      /1~3/,
+    );
+    assert.throws(
+      () => validateRuntimeEnvironment({ CODEX_RUN_TIMEOUT_MS: '0' }),
+      /1~14400000/,
+    );
+    assert.doesNotThrow(() => validateRuntimeEnvironment({
+      CLAUDE_CLI_TIMEOUT_MS: '600000',
+      GEMINI_CLI_RETRY_MAX: '잘못된 미사용 값',
+      CODEX_RUN_TIMEOUT_MS: '0',
+    }, 'claude'));
+    assert.throws(
+      () => validateRuntimeEnvironment({ GEMINI_CLI_RETRY_MAX: '잘못된 값' }, 'gemini'),
+      /정수/,
+    );
+    assert.doesNotThrow(() => validateRuntimeEnvironment({
+      CLAUDE_CLI_TIMEOUT_MS: '잘못된 미사용 값',
+      GEMINI_CLI_TIMEOUT_MS: '잘못된 미사용 값',
+    }, 'chatgpt'));
+    assert.doesNotThrow(() => validateRuntimeEnvironment({
+      CLAUDE_CLI_TIMEOUT_MS: '잘못된 목 실행 미사용 값',
+    }, 'none'));
 
     await fs.writeFile(envFile, 'CLAUDE_CLI_TIMEOUT_MS 900000\n', 'utf8');
     assert.throws(() => loadEnvFile(envFile, {}), /KEY=VALUE/);

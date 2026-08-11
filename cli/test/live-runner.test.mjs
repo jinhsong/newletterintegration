@@ -236,7 +236,7 @@ async function removeTestDirectory(directory) {
   });
 }
 
-test('--version은 Claude 사전 점검 없이 앱 버전을 출력한다', () => {
+test('--version은 AI CLI 사전 점검 없이 앱 버전을 출력한다', () => {
   const execution = spawnSync(process.execPath, [runFile, '--version'], {
     cwd: cliDir,
     env: { ...process.env, CLAUDE_CLI_BIN: 'definitely-missing-claude' },
@@ -245,7 +245,7 @@ test('--version은 Claude 사전 점검 없이 앱 버전을 출력한다', () =
     windowsHide: true,
   });
   assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
-  assert.match(execution.stdout, /trade-monitor-claude-cli 6\.0\.0/);
+  assert.match(execution.stdout, /trade-monitor-cli 7\.0\.0/);
   assert.equal(execution.stderr, '');
 });
 
@@ -370,7 +370,7 @@ test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 6회 �
     assert.equal(execution.error, undefined, execution.error?.message);
     assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
     assert.equal(execution.signal, null);
-    assert.match(execution.stdout, /Claude Code 2\.1\.214 확인 완료/);
+    assert.match(execution.stdout, /Claude Code CLI 2\.1\.214 확인 완료/);
     assert.match(execution.stdout, /\[1\/18\] 관세 \/ 북미 조사 시작/);
     assert.match(execution.stdout, /\[18\/18\] 관세 \/ 동아시아 조사 시작/);
     assert.match(execution.stdout, /HTML 저장 완료/);
@@ -430,7 +430,7 @@ test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 6회 �
     const html = await fs.readFile(outputFile, 'utf8');
     assert.match(html, /^<!DOCTYPE html>/i);
     assert.match(html, /결과 생성 완료/);
-    assert.match(html, /요청한 18개 카테고리의 Claude Code 표준 조사를 정리했습니다/);
+    assert.match(html, /요청한 18개 카테고리의 Claude Code CLI 표준 조사를 정리했습니다/);
     assert.match(html, /카테고리 9\/9/);
     assert.match(html, /웹 검색 60회 성공/);
     assert.match(html, /카테고리 6\/6/);
@@ -490,7 +490,7 @@ test('run.mjs 단일 카테고리 모드는 선택 범위만 한 번 조사해 �
 
     const html = await fs.readFile(outputFile, 'utf8');
     assert.match(html, /선택 조사 · 관세 \/ 북미/);
-    assert.match(html, /요청한 1개 카테고리의 Claude Code 표준 조사를 정리했습니다/);
+    assert.match(html, /요청한 1개 카테고리의 Claude Code CLI 표준 조사를 정리했습니다/);
     assert.match(html, /카테고리 1\/1 · 웹 검색 6회 성공/);
     assert.match(html, />북미</);
     assert.doesNotMatch(html, />중남미</);
@@ -550,7 +550,7 @@ test('run.mjs 그룹 모드는 선택한 영역의 카테고리만 각각 조사
 
     const html = await fs.readFile(outputFile, 'utf8');
     assert.match(html, /선택 그룹 · 무역구제 · 3개 카테고리/);
-    assert.match(html, /요청한 3개 카테고리의 Claude Code 표준 조사를 정리했습니다/);
+    assert.match(html, /요청한 3개 카테고리의 Claude Code CLI 표준 조사를 정리했습니다/);
     assert.match(html, /카테고리 3\/3 · 웹 검색 18회 성공/);
     assert.match(html, /id="domain-trade"/);
     assert.doesNotMatch(html, /id="domain-customs"|id="domain-export"/);

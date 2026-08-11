@@ -838,7 +838,7 @@ function stopProcessTree(child, taskkillRunner = null) {
     const rootAlreadyExited = child.exitCode !== null || child.signalCode !== null;
     if (process.platform === 'win32' && rootAlreadyExited) {
       treeConfirmed = false;
-      details = 'Claude 루트 프로세스가 이미 종료되어 PID 재사용 위험을 피하도록 taskkill을 생략했습니다.';
+      details = 'AI CLI 루트 프로세스가 이미 종료되어 PID 재사용 위험을 피하도록 taskkill을 생략했습니다.';
     } else if (process.platform === 'win32' && child.pid) {
       const killed = taskkillRunner
         ? await taskkillRunner(child.pid)
@@ -873,7 +873,7 @@ function stopProcessTree(child, taskkillRunner = null) {
         } else if (windowsLaunchKind(child) !== 'native') {
           details = appendCleanupDetail(
             details,
-            'CLAUDE_CLI_BIN이 .cmd/.bat 래퍼이므로 하위 CLI 프로세스가 남아 있을 수 있고 종료를 확인할 수 없습니다.',
+            'AI CLI 실행 파일이 .cmd/.bat 래퍼이므로 하위 프로세스가 남아 있을 수 있고 종료를 확인할 수 없습니다.',
           );
         }
       }
@@ -935,7 +935,7 @@ function stopProcessTree(child, taskkillRunner = null) {
       try { child.unref(); } catch {}
       details = appendCleanupDetail(
         details,
-        '종료되지 않은 Claude 프로세스의 부모 측 핸들을 분리했습니다. 프로세스 트리 종료는 확인되지 않았습니다.',
+        '종료되지 않은 AI CLI 프로세스의 부모 측 핸들을 분리했습니다. 프로세스 트리 종료는 확인되지 않았습니다.',
       );
     }
     return { closed, treeConfirmed, details };
@@ -989,7 +989,7 @@ export function createProcessCleanupError(originalError, cleanup = {}, pid = nul
   ].filter(Boolean).join('\n');
   return new ClaudeCliError(
     'PROCESS_CLEANUP',
-    'Claude 프로세스 트리 종료를 확인하지 못해 실행을 중단했습니다.',
+    'AI CLI 프로세스 트리 종료를 확인하지 못해 실행을 중단했습니다.',
     details,
   );
 }
@@ -1003,25 +1003,33 @@ export async function stopAllClaudeProcesses() {
   const children = [...activeChildren];
   const statuses = await Promise.allSettled(children.map((child) => stopProcessTree(child)));
   const processes = statuses.map((status, index) => {
-    const pid = children[index]?.pid ?? null;
+    const child = children[index];
+    const pid = child?.pid ?? null;
+    const providerLabel = childLaunchMetadata.get(child)?.providerLabel || 'AI CLI';
     if (status.status === 'rejected') {
       return {
         pid,
+        providerLabel,
         closed: false,
         treeConfirmed: false,
         details: `프로세스 정리 중 오류: ${status.reason?.message || String(status.reason)}`,
       };
     }
-    return { pid, ...status.value };
+    return { pid, providerLabel, ...status.value };
   });
   for (const status of processes) {
     if (!status.closed || !status.treeConfirmed) {
       console.warn(
-        `Claude 프로세스 트리 종료 실패(PID ${status.pid ?? '확인 불가'}): ${status.details || '완전한 종료를 확인하지 못했습니다.'}`,
+        `${status.providerLabel} 프로세스 트리 종료 실패(PID ${status.pid ?? '확인 불가'}): ${status.details || '완전한 종료를 확인하지 못했습니다.'}`,
       );
     }
   }
   return { ok: processes.every((status) => status.closed && status.treeConfirmed), processes };
+}
+
+// 모든 공급자 어댑터가 같은 프로세스 감독기를 사용한다. 기존 export는 하위 호환을 위해 유지한다.
+export async function stopAllProviderProcesses() {
+  return stopAllClaudeProcesses();
 }
 
 export function isRetryableClaudeError(error) {
@@ -1055,9 +1063,15 @@ function signalError(signal) {
     : new ClaudeCliError('ABORTED', '사용자가 실행을 중단했습니다.');
 }
 
-async function executeCli(args, options = {}) {
+export function executeManagedCliProcess(spec, options = {}) {
   const timeout = positiveInt(options.timeoutMs, DEFAULT_PREFLIGHT_TIMEOUT_MS, 1800000);
-  const spec = await launchSpec(args);
+  const providerLabel = String(options.providerLabel || 'AI CLI').trim() || 'AI CLI';
+  const classify = typeof options.classifyError === 'function'
+    ? options.classifyError
+    : classifyError;
+  const environment = options.env && typeof options.env === 'object'
+    ? options.env
+    : process.env;
 
   return new Promise((resolve, reject) => {
     if (options.signal?.aborted) {
@@ -1069,7 +1083,7 @@ async function executeCli(args, options = {}) {
     try {
       child = spawn(spec.command, spec.args, {
         cwd: options.cwd,
-        env: enterpriseEnvironment(),
+        env: environment,
         shell: false,
         windowsHide: true,
         windowsVerbatimArguments: spec.windowsVerbatimArguments,
@@ -1077,12 +1091,15 @@ async function executeCli(args, options = {}) {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {
-      const code = error?.code === 'ENOENT' ? 'CLI_NOT_FOUND' : classifyError(error?.message);
-      reject(new ClaudeCliError(code, `Claude CLI를 실행하지 못했습니다: ${error.message}`));
+      const code = error?.code === 'ENOENT' ? 'CLI_NOT_FOUND' : classify(error?.message);
+      reject(new ClaudeCliError(code, `${providerLabel}를 실행하지 못했습니다: ${error.message}`));
       return;
     }
 
-    childLaunchMetadata.set(child, { executablePath: spec.executablePath });
+    childLaunchMetadata.set(child, {
+      executablePath: spec.executablePath,
+      providerLabel,
+    });
     child.once('close', () => {
       closedChildren.add(child);
       activeChildren.delete(child);
@@ -1127,14 +1144,14 @@ async function executeCli(args, options = {}) {
 
     timer = setTimeout(() => {
       const timeoutMessage = options.timeoutMessage
-        || `Claude 응답이 ${Math.max(1, Math.round(timeout / 60000))}분 안에 끝나지 않았습니다.`;
+        || `${providerLabel} 응답이 ${Math.max(1, Math.round(timeout / 60000))}분 안에 끝나지 않았습니다.`;
       void forceStop(new ClaudeCliError(options.timeoutCode || 'TIMEOUT', timeoutMessage));
     }, timeout);
 
     if (options.heartbeat) {
       heartbeat = setInterval(() => {
         const seconds = Math.round((Date.now() - startedAt) / 1000);
-        console.log(`  ... Claude 조사 중 (${seconds}초 경과)`);
+        console.log(`  ... ${providerLabel} 조사 중 (${seconds}초 경과)`);
       }, 20000);
       heartbeat.unref();
     }
@@ -1146,23 +1163,23 @@ async function executeCli(args, options = {}) {
     }
     child.stdout.on('data', (chunk) => {
       if (!stdoutCapture.append(chunk)) {
-        void forceStop(new ClaudeCliError('BAD_OUTPUT', 'Claude CLI 출력이 허용 크기를 초과했습니다.'));
+        void forceStop(new ClaudeCliError('BAD_OUTPUT', `${providerLabel} 출력이 허용 크기를 초과했습니다.`));
       }
     });
     child.stderr.on('data', (chunk) => {
       if (!stderrCapture.append(chunk)) {
-        void forceStop(new ClaudeCliError('BAD_OUTPUT', 'Claude CLI 오류 출력이 허용 크기를 초과했습니다.'));
+        void forceStop(new ClaudeCliError('BAD_OUTPUT', `${providerLabel} 오류 출력이 허용 크기를 초과했습니다.`));
       }
     });
     child.stdin.on('error', (error) => {
       if (!forcedError && !['EPIPE', 'ERR_STREAM_DESTROYED'].includes(error?.code)) {
-        void forceStop(new ClaudeCliError('CLI_EXIT', `Claude CLI 입력 전달 오류: ${error.message}`));
+        void forceStop(new ClaudeCliError('CLI_EXIT', `${providerLabel} 입력 전달 오류: ${error.message}`));
       }
     });
     child.on('error', (error) => {
       if (forcedError) return;
-      const code = error?.code === 'ENOENT' ? 'CLI_NOT_FOUND' : classifyError(error.message);
-      const cliError = new ClaudeCliError(code, `Claude CLI 실행 오류: ${error.message}`);
+      const code = error?.code === 'ENOENT' ? 'CLI_NOT_FOUND' : classify(error.message);
+      const cliError = new ClaudeCliError(code, `${providerLabel} 실행 오류: ${error.message}`);
       if (Number.isSafeInteger(child.pid) && child.pid > 0) {
         void forceStop(cliError);
         return;
@@ -1175,8 +1192,8 @@ async function executeCli(args, options = {}) {
       finish(() => {
         try {
           resolve({
-            stdout: stdoutCapture.text('Claude CLI 표준 출력'),
-            stderr: stderrCapture.text('Claude CLI 오류 출력'),
+            stdout: stdoutCapture.text(`${providerLabel} 표준 출력`),
+            stderr: stderrCapture.text(`${providerLabel} 오류 출력`),
             exitCode,
             signalCode,
             executablePath: spec.executablePath,
@@ -1190,6 +1207,16 @@ async function executeCli(args, options = {}) {
 
     if (options.input === undefined) child.stdin.end();
     else child.stdin.end(options.input, 'utf8');
+  });
+}
+
+async function executeCli(args, options = {}) {
+  const spec = await launchSpec(args);
+  return executeManagedCliProcess(spec, {
+    ...options,
+    providerLabel: 'Claude CLI',
+    classifyError,
+    env: enterpriseEnvironment(),
   });
 }
 
@@ -2159,6 +2186,7 @@ export function parseClaudeStream(output, options = {}) {
     }));
   return {
     response: finalResult.result,
+    evidenceKind: 'direct',
     stats: {
       durationMs: metric(finalResult.duration_ms),
       durationApiMs: metric(finalResult.duration_api_ms),

@@ -12,13 +12,16 @@ import {
   scopedDomains,
 } from './config.mjs';
 import {
-  callClaudeCli,
   ClaudeCliError,
-  isRetryableClaudeError,
-  retryMax,
   searchQueryFingerprint,
-  timeoutMs as configuredClaudeTimeoutMs,
 } from './claude-client.mjs';
+import {
+  callProviderCli,
+  isRetryableProviderError,
+  providerRetryMax,
+  providerTimeoutMs,
+  resolveProvider,
+} from './provider-registry.mjs';
 import { parseJsonObject } from './json-utils.mjs';
 
 const KST = 'Asia/Seoul';
@@ -87,8 +90,8 @@ export function createContext(now = new Date(), lookbackOverride, fromDateOverri
   let fromDate;
   let lookbackHours;
   if (lookbackOverride !== undefined && lookbackOverride !== null) {
-    if (![24, 72, 168].includes(lookbackOverride)) {
-      throw new Error('lookback은 24, 72, 168시간 중 하나여야 합니다.');
+    if (!Number.isSafeInteger(lookbackOverride) || lookbackOverride < 1 || lookbackOverride > 168) {
+      throw new Error('lookback은 1~168시간 사이의 정수여야 합니다.');
     }
     lookbackHours = lookbackOverride;
     fromDate = new Date(now.getTime() - lookbackHours * 60 * 60 * 1000);
@@ -262,7 +265,14 @@ function targetCountriesField(raw, errors) {
   return normalized.map((entry) => entry.slice(0, 80)).join(', ').slice(0, 240);
 }
 
-function normalizeItem(raw, groundingUrls = [], domain = null, groundingSearches = [], unit = null) {
+function normalizeItem(
+  raw,
+  groundingUrls = [],
+  domain = null,
+  groundingSearches = [],
+  unit = null,
+  evidenceKind = 'unverified',
+) {
   const errors = [];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { item: null, errors: ['itemType'], timestamp: null };
@@ -298,7 +308,9 @@ function normalizeItem(raw, groundingUrls = [], domain = null, groundingSearches
   const sourceVerification = !sourceUrl
     ? 'missing'
     : ((provenance.length > 0 || sourceIsGrounded(sourceUrl, groundingUrls))
-      ? 'grounded'
+      ? (evidenceKind === 'reported'
+        ? 'reported'
+        : (evidenceKind === 'direct' ? 'grounded' : 'unverified'))
       : 'ungrounded');
   const item = {
     importance,
@@ -325,7 +337,7 @@ function normalizeItem(raw, groundingUrls = [], domain = null, groundingSearches
     notes: stringField(raw, 'notes', 600, errors),
   };
   if (!sourceUrl) errors.push('sourceUrl');
-  if (sourceVerification !== 'grounded') errors.push('sourceUngrounded');
+  if (!['grounded', 'reported'].includes(sourceVerification)) errors.push('sourceUngrounded');
   if (domain && violatesDomainBoundary(domain.key, item)) errors.push('domainBoundary');
   if (unit && !itemMatchesUnitScope(item, unit)) errors.push('unitScope');
   return { item, errors: [...new Set(errors)], timestamp: timestamp.date };
@@ -499,6 +511,7 @@ export function parseDomainResponse(domain, response, context, options = {}) {
         domain,
         options.groundingSearches || [],
         unit,
+        options.evidenceKind || 'unverified',
       );
       const errors = [...normalized.errors];
       if (normalized.item && !inDateRange(normalized.item, normalized.timestamp, context)) {
@@ -583,7 +596,7 @@ export function parseDomainResponse(domain, response, context, options = {}) {
 function warningStrings(value) {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
-    throw new ClaudeCliError('BAD_OUTPUT', 'Claude CLI의 warnings 형식이 올바르지 않습니다.');
+    throw new ClaudeCliError('BAD_OUTPUT', 'AI CLI의 warnings 형식이 올바르지 않습니다.');
   }
   return value.map((warning) => text(warning, 1000)).filter(Boolean);
 }
@@ -702,17 +715,17 @@ function matchingCoverageTargets(search, coverageTargets) {
 function normalizedGroundingSearches(value) {
   if (value === undefined) return [];
   if (!Array.isArray(value)) {
-    throw new ClaudeCliError('BAD_OUTPUT', 'Claude CLI의 검색별 출처 증거 형식이 올바르지 않습니다.');
+    throw new ClaudeCliError('BAD_OUTPUT', 'AI CLI의 검색별 출처 증거 형식이 올바르지 않습니다.');
   }
   return value.map((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      throw new ClaudeCliError('BAD_OUTPUT', 'Claude CLI의 검색별 출처 증거 항목이 올바르지 않습니다.');
+      throw new ClaudeCliError('BAD_OUTPUT', 'AI CLI의 검색별 출처 증거 항목이 올바르지 않습니다.');
     }
     const query = typeof entry.query === 'string' ? text(entry.query, 1000) : '';
     const toolUseId = typeof entry.toolUseId === 'string' ? text(entry.toolUseId, 200) : '';
     const mode = ['official', 'broad'].includes(entry.mode) ? entry.mode : '';
     if (!query || !toolUseId || !mode || !Array.isArray(entry.urls)) {
-      throw new ClaudeCliError('BAD_OUTPUT', 'Claude CLI의 검색별 출처 증거 필드가 완전하지 않습니다.');
+      throw new ClaudeCliError('BAD_OUTPUT', 'AI CLI의 검색별 출처 증거 필드가 완전하지 않습니다.');
     }
     const urls = [...new Set(entry.urls.map(safeSourceUrl).filter(Boolean))];
     const officialUrls = Array.isArray(entry.officialUrls)
@@ -728,7 +741,7 @@ function normalizedGroundingSearches(value) {
         || !isTrustedOfficialDomain(new URL(url).hostname, allowedDomains)
       ))
     )) {
-      throw new ClaudeCliError('BAD_OUTPUT', 'Claude CLI의 공식검색 출처 증거가 허용 도메인과 일치하지 않습니다.');
+      throw new ClaudeCliError('BAD_OUTPUT', 'AI CLI의 공식검색 출처 증거가 허용 도메인과 일치하지 않습니다.');
     }
     return {
       toolUseId,
@@ -755,6 +768,18 @@ export function validateResearchEnvelope(
   if (!envelope || typeof envelope !== 'object') {
     throw new ClaudeCliError('BAD_OUTPUT', `${label} 응답 봉투가 올바르지 않습니다.`);
   }
+  const expectedEvidenceKind = options.expectedEvidenceKind;
+  if (expectedEvidenceKind !== undefined
+    && !['direct', 'reported'].includes(expectedEvidenceKind)) {
+    throw new ClaudeCliError('CONFIG', `${label}의 검색 근거 유형 설정이 올바르지 않습니다.`);
+  }
+  if (expectedEvidenceKind !== undefined && envelope.evidenceKind !== expectedEvidenceKind) {
+    throw new ClaudeCliError(
+      'BAD_OUTPUT',
+      `${label}의 검색 근거 유형을 확인하지 못했습니다.`,
+      `예상 ${expectedEvidenceKind}, 수신 ${String(envelope.evidenceKind || '(없음)')}`,
+    );
+  }
   const warnings = warningStrings(envelope.warnings);
   const search = envelope.toolEvidence?.byName?.WebSearch;
   const success = Number(search?.success);
@@ -764,7 +789,7 @@ export function validateResearchEnvelope(
     const code = Number.isSafeInteger(fail) && fail > 0 ? 'SEARCH_FAILED' : 'SEARCH_NOT_RUN';
     throw new ClaudeCliError(
       code,
-      `${label}에서 성공한 Claude WebSearch 호출을 확인하지 못했습니다.`,
+      `${label}에서 성공한 웹 검색 호출을 확인하지 못했습니다.`,
       warnings.join('\n'),
     );
   }
@@ -781,7 +806,7 @@ export function validateResearchEnvelope(
   if (!Number.isSafeInteger(fail) || fail < 0) {
     throw new ClaudeCliError(
       'SEARCH_FAILED',
-      `${label} 중 Claude WebSearch 실패가 감지되었습니다.`,
+      `${label} 중 웹 검색 실패가 감지되었습니다.`,
       warnings.join('\n'),
     );
   }
@@ -804,7 +829,7 @@ export function validateResearchEnvelope(
   if (options.requireOfficialAndBroadSearch !== true && fail > 0) {
     throw new ClaudeCliError(
       'SEARCH_FAILED',
-      `${label} 중 Claude WebSearch 실패가 감지되었습니다.`,
+      `${label} 중 웹 검색 실패가 감지되었습니다.`,
       warnings.join('\n'),
     );
   }
@@ -855,13 +880,13 @@ export function validateResearchEnvelope(
     );
   }
   const blockingWarnings = warnings.filter((warning) => (
-    !(options.requireOfficialAndBroadSearch === true && fail > 0 && /^WebSearch 실패:/i.test(warning))
-    && /\b(?:error|failed|failure|denied|forbidden|blocked|disabled|unavailable)\b|오류|실패|거부|차단|비활성|사용할 수 없/i.test(warning)
+    !(options.requireOfficialAndBroadSearch === true && fail > 0 && /^(?:WebSearch|웹 검색|검색) 실패:/i.test(warning))
+    && /\b(?:error|failed|failure|denied|forbidden|blocked|disabled|unavailable|quota|rate\s*limit|resource\s*exhausted|429)\b|오류|실패|거부|차단|비활성|사용할 수 없|할당량|사용량 제한/i.test(warning)
   ));
   if (blockingWarnings.length > 0) {
     throw new ClaudeCliError(
       'SEARCH_WARNING',
-      `${label} 중 결과 신뢰성에 영향을 주는 Claude CLI 경고가 발생했습니다.`,
+      `${label} 중 결과 신뢰성에 영향을 주는 AI CLI 경고가 발생했습니다.`,
       blockingWarnings.join('\n').slice(0, 3000),
     );
   }
@@ -895,7 +920,7 @@ export function validateResearchEnvelope(
     if (groundingSearches.length !== success || invalidGroundingSearch || evidenceMismatch) {
       throw new ClaudeCliError(
         'BAD_OUTPUT',
-        `${label}의 검색별 출처 증거가 성공한 WebSearch 내역과 일치하지 않습니다.`,
+        `${label}의 검색별 출처 증거가 성공한 웹 검색 내역과 일치하지 않습니다.`,
         `성공 검색 ${success}회, 검색별 출처 ${groundingSearches.length}개`,
       );
     }
@@ -956,6 +981,9 @@ export function validateResearchEnvelope(
     warnings,
     groundingUrls,
     groundingSearches,
+    evidenceKind: ['direct', 'reported'].includes(envelope.evidenceKind)
+      ? envelope.evidenceKind
+      : 'unverified',
     coverageTargetEvidence: targetCoverage.byTarget,
   };
 }
@@ -1154,7 +1182,7 @@ function sourceAuthorityRank(item) {
 }
 
 function shouldReplaceDuplicate(current, candidate) {
-  const verificationRank = { grounded: 2, ungrounded: 1, missing: 0 };
+  const verificationRank = { grounded: 3, reported: 2, ungrounded: 1, missing: 0 };
   const currentVerification = verificationRank[current.sourceVerification] ?? 0;
   const candidateVerification = verificationRank[candidate.sourceVerification] ?? 0;
   if (candidateVerification !== currentVerification) {
@@ -1305,16 +1333,16 @@ function correctiveAppendixFor(error) {
   const code = error?.code || '';
   const instructions = {
     BAD_JSON: '최종 응답은 스키마와 키 이름을 정확히 지킨 단일 JSON 객체만 출력한다. 설명·코드펜스·후행 쉼표를 넣지 않는다.',
-    BAD_OUTPUT: '모든 필수 문자열 필드와 HTTPS 원문 URL을 채우고, WebSearch 결과에서 직접 확인하지 못한 항목은 제외한다.',
+    BAD_OUTPUT: '모든 필수 문자열 필드와 HTTPS 원문 URL을 채우고, 웹 검색 결과에서 직접 확인하지 못한 항목은 제외한다.',
     TURN_LIMIT: '필수 검색을 먼저 완료하고 검색 도중 장황한 분석을 출력하지 않는다. 마지막 turn을 반드시 JSON 작성에 남긴다.',
-    SEARCH_NOT_RUN: '답변을 작성하기 전에 반드시 지정된 횟수의 WebSearch를 실제 실행한다.',
+    SEARCH_NOT_RUN: '답변을 작성하기 전에 반드시 지정된 횟수의 웹 검색을 실제 실행한다.',
     SEARCH_INCOMPLETE: '공식기관 제한 검색과 제한 없는 일반 검색의 최소 횟수, 서로 다른 query, 모든 하위 대상 표기를 빠짐없이 충족한다.',
-    SEARCH_FAILED: '실패한 WebSearch는 다른 query로 즉시 보완하고 성공한 검색만 최소 횟수에 포함한다.',
+    SEARCH_FAILED: '실패한 웹 검색은 다른 query로 즉시 보완하고 성공한 검색만 최소 횟수에 포함한다.',
     SEARCH_WARNING: '차단·거부·실패 경고가 남지 않도록 검색 조건을 고쳐 다시 실행한다.',
   };
   const rejectedReasons = error?.categoryStatus?.rejectedReasons || {};
   const reasonInstructions = {
-    sourceUngrounded: 'sourceUrl은 이번 WebSearch의 구조화된 실제 결과 URL과 정확히 일치하는 원문만 사용한다.',
+    sourceUngrounded: 'sourceUrl은 이번 웹 검색에서 실제 확인한 결과 URL과 정확히 일치하는 원문만 사용한다.',
     sourceUrl: '공개 HTTPS 원문 URL을 확인할 수 없는 항목은 제외한다.',
     dateRange: '최초 발표일이 지정된 조사 시작·종료 시각 범위 안임을 다시 확인한다.',
     announcedDate: 'announcedDate는 실제 존재하는 YYYY-MM-DD 최초 발표일이어야 한다.',
@@ -1400,7 +1428,7 @@ function allocateCategoryDeadline(options = {}) {
 }
 
 function categoryTimeoutMs(options = {}) {
-  const configuredMaximum = configuredClaudeTimeoutMs();
+  const configuredMaximum = providerTimeoutMs(options.provider || 'claude');
   if (options.categoryDeadlineAt === undefined || options.categoryDeadlineAt === null) {
     return configuredMaximum;
   }
@@ -1422,7 +1450,7 @@ function categoryTimeoutMs(options = {}) {
 
 async function collectUnits(domain, units, context, options, mock, coverage) {
   if (!Array.isArray(units) || units.length !== 1) {
-    throw new ClaudeCliError('CONFIG', 'Claude 조사 호출은 카테고리 하나만 포함해야 합니다.');
+    throw new ClaudeCliError('CONFIG', 'AI 조사 호출은 카테고리 하나만 포함해야 합니다.');
   }
   const [unit] = units;
   const researchPolicy = researchPolicyForUnit(unit, options.depth);
@@ -1458,6 +1486,7 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
         units,
         coverage,
         groundingUrls: mockGroundingUrls,
+        evidenceKind: 'direct',
         researchPolicy,
       }),
       audit: {
@@ -1469,15 +1498,19 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
     };
   }
 
-  const attempts = retryMax();
+  const providerKey = options.provider || 'claude';
+  const attempts = providerRetryMax(providerKey);
   let lastError = options.correctiveError ? asClaudeError(options.correctiveError) : null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const caller = options.callClaude || callClaudeCli;
+      const caller = options.callProvider
+        || options.callClaude
+        || ((prompt, callOptions) => callProviderCli(providerKey, prompt, callOptions));
       const callTimeoutMs = categoryTimeoutMs(options);
       const envelope = await caller(buildCategoryPrompt(domain, unit, context, {
         depth: researchPolicy.depth,
         correctiveAppendix: correctiveAppendixFor(lastError),
+        provider: providerKey,
       }), {
         cwd: options.cwd,
         signal: options.signal,
@@ -1501,6 +1534,7 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
           coverageTargets: unit.coverageTargets,
           officialTargetsPerSearch: researchPolicy.officialTargetsPerSearch,
           officialDomainAllowlist: unit.officialDomains,
+          expectedEvidenceKind: providerKey === 'claude' ? 'direct' : 'reported',
         },
       );
       return {
@@ -1514,6 +1548,7 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
           warningCount: audit.warnings.length,
           groundingUrls: audit.groundingUrls,
           groundingSearches: audit.groundingSearches,
+          evidenceKind: audit.evidenceKind,
           researchPolicy,
         }),
         audit,
@@ -1521,7 +1556,7 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
     } catch (error) {
       lastError = asClaudeError(error);
       if (FATAL_ERROR_CODES.has(lastError.code)) throw lastError;
-      const retryable = isRetryableClaudeError(lastError) && lastError.code !== 'TIMEOUT';
+      const retryable = isRetryableProviderError(providerKey, lastError) && lastError.code !== 'TIMEOUT';
       if (!retryable || attempt >= attempts) break;
       const delay = 30000 * 2 ** (attempt - 1);
       console.warn(`  ${lastError.code}: ${delay / 1000}초 후 한 번 더 시도합니다.`);
@@ -1674,13 +1709,24 @@ function failureRecord(domain, error, unit = null) {
 
 export async function collectMonitoring(options = {}) {
   const context = createContext(options.now || new Date(), options.lookbackHours, options.fromDate);
+  let provider;
+  try {
+    provider = resolveProvider(options.provider || 'claude');
+  } catch (error) {
+    throw new ClaudeCliError('CONFIG', error.message);
+  }
   let depth;
   try {
     depth = resolveResearchDepth(options.depth);
   } catch (error) {
     throw new ClaudeCliError('CONFIG', error.message);
   }
-  const collectionOptions = { ...options, depth };
+  const collectionOptions = {
+    ...options,
+    depth,
+    provider: provider.key,
+    providerLabel: provider.cliLabel,
+  };
   const hasCategoryInput = options.categorySelection != null || options.category != null;
   const hasGroupInput = options.groupSelection != null || options.group != null;
   if (hasCategoryInput && hasGroupInput) {
@@ -1716,8 +1762,8 @@ export async function collectMonitoring(options = {}) {
   const minimumSearches = Math.min(...policies.map((policy) => policy.minimumSearchesPerCategory));
   const maximumSearches = Math.max(...policies.map((policy) => policy.minimumSearchesPerCategory));
   console.log(
-    `Claude 호출: ${targets.length}개 카테고리, 조사 깊이 ${depth}, `
-    + `카테고리별 ${minimumSearches}~${maximumSearches}회 WebSearch를 실행합니다.`,
+    `${provider.cliLabel} 호출: ${targets.length}개 카테고리, 조사 깊이 ${depth}, `
+    + `카테고리별 ${minimumSearches}~${maximumSearches}회 웹 검색을 실행합니다.`,
   );
 
   for (let index = 0; index < targets.length; index += 1) {
@@ -1789,7 +1835,7 @@ export async function collectMonitoring(options = {}) {
   );
 
   return {
-    version: 5,
+    version: 7,
     createdAt: new Date().toISOString(),
     context: {
       fromISO: context.fromISO,
@@ -1803,6 +1849,9 @@ export async function collectMonitoring(options = {}) {
     failures,
     collection: {
       mode: mock ? 'mock' : 'live',
+      provider: provider.key,
+      providerLabel: provider.cliLabel,
+      evidenceMode: provider.evidenceMode,
       depth,
       scope: categorySelection ? 'category' : groupSelection ? 'group' : 'all',
       selection: categorySelection ? {

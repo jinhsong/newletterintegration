@@ -62,6 +62,10 @@ function researchDepth(payload) {
   };
 }
 
+function providerLabel(payload) {
+  return String(payload.collection?.providerLabel || 'Claude Code CLI').trim() || 'AI CLI';
+}
+
 function finiteNonNegative(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : null;
@@ -173,11 +177,13 @@ function sourceLink(item) {
   const sourceName = item.sourceName || '출처명 없음';
   const verification = item.sourceVerification === 'grounded'
     ? { kind: 'grounded', label: '검색 근거와 연결 · 원문 수동 확인' }
-    : item.sourceVerification === 'format-only'
-      ? { kind: 'format-only', label: 'HTTPS 형식 확인 · 원문 수동 확인 필요' }
-      : item.sourceVerification === 'missing'
-        ? { kind: 'missing', label: '원문 검증 정보 없음' }
-        : { kind: 'unknown', label: '검증 상태 정보 없음 · 원문 수동 확인 필요' };
+    : item.sourceVerification === 'reported'
+      ? { kind: 'reported', label: '모델 보고 검색 URL과 연결 · 원문 수동 확인' }
+      : item.sourceVerification === 'format-only'
+        ? { kind: 'format-only', label: 'HTTPS 형식 확인 · 원문 수동 확인 필요' }
+        : item.sourceVerification === 'missing'
+          ? { kind: 'missing', label: '원문 검증 정보 없음' }
+          : { kind: 'unknown', label: '검증 상태 정보 없음 · 원문 수동 확인 필요' };
   return `<div class="source-block"><a class="source" href="${escapeHtml(item.sourceUrl)}" target="_blank" rel="noopener noreferrer"><span class="source-name">${escapeHtml(sourceName)}</span><span class="source-host">${escapeHtml(hostname)}</span><span class="source-action">원문 열기 <span aria-hidden="true">↗</span><span class="sr-only">(새 창)</span></span></a><span class="source-verification verification-${verification.kind}">${verification.label}</span></div>`;
 }
 
@@ -286,7 +292,7 @@ function domainState(domain, payload, result) {
     const detail = [
       `카테고리 ${completed}/${requested}`,
       searches === null ? '' : `웹 검색 ${searches}회 성공`,
-      warningCount > 0 ? `Claude 경고 ${warningCount}건` : '',
+      warningCount > 0 ? `AI CLI 경고 ${warningCount}건` : '',
     ].filter(Boolean).join(' · ');
     return {
       label,
@@ -357,7 +363,7 @@ function failureBanner(payload) {
       0,
     );
     const depth = researchDepth(payload);
-    return `<div class="status status-ok"><b>결과 생성 완료</b><span>요청한 ${escapeHtml(total)}개 카테고리의 Claude Code ${escapeHtml(depth.label)} 조사를 정리했습니다. 검색 범위와 원문을 수동으로 확인하세요.</span></div>`;
+    return `<div class="status status-ok"><b>결과 생성 완료</b><span>요청한 ${escapeHtml(total)}개 카테고리의 ${escapeHtml(providerLabel(payload))} ${escapeHtml(depth.label)} 조사를 정리했습니다. 검색 범위와 원문을 수동으로 확인하세요.</span></div>`;
   }
   const failureItems = failures
     .map((failure) => `<li><b>${escapeHtml(failure.domainLabel)}${failure.categoryLabel ? ` / ${escapeHtml(failure.categoryLabel)}` : ''}</b> <code>${escapeHtml(failure.code)}</code> ${escapeHtml(failure.reason)}</li>`)
@@ -388,7 +394,7 @@ function failureBanner(payload) {
 
 function mockBanner(payload) {
   if (payload.collection?.mode !== 'mock') return '';
-  return '<div class="status status-mock" role="alert"><b>MOCK · 테스트 전용</b><span>Claude Code WebSearch를 실행하지 않은 내장 목 응답입니다. 실제 모니터링 결과나 업무 판단 자료로 사용하지 마세요.</span></div>';
+  return '<div class="status status-mock" role="alert"><b>MOCK · 테스트 전용</b><span>AI CLI 웹 검색을 실행하지 않은 내장 목 응답입니다. 실제 모니터링 결과나 업무 판단 자료로 사용하지 마세요.</span></div>';
 }
 
 function auditSummary(payload) {
@@ -406,14 +412,21 @@ function researchNotice(payload) {
   const dateNote = payload.context?.dateCoverageNote
     ? `<span><b>날짜 판정:</b> ${escapeHtml(payload.context.dateCoverageNote)}</span>`
     : '';
+  const lookbackHours = Number(payload.context?.lookbackHours);
+  const hoursLabel = Number.isFinite(lookbackHours) && lookbackHours > 0
+    ? `${lookbackHours}시간`
+    : '';
   const lookbackLabels = {
-    manual: '사용자가 --lookback으로 지정',
-    'last-complete-run': '동일 범위·깊이의 마지막 완전 성공 시각에서 6시간 중첩',
-    'weekday-default': '이전 완전 성공 기록이 없어 요일 기본값 사용',
+    manual: `사용자가 직접 지정${hoursLabel ? ` (${hoursLabel})` : ''}`,
+    'weekday-default': `빈 입력 기본값(월요일 72시간, 그 외 요일 24시간)${hoursLabel ? ` · 이번 실행 ${hoursLabel}` : ''}`,
   };
   const lookbackLabel = lookbackLabels[payload.context?.lookbackSource];
   const lookbackNote = lookbackLabel
     ? `<span><b>기간 계산:</b> ${escapeHtml(lookbackLabel)}</span>`
+    : '';
+  const providerNote = `<span><b>호출 모델:</b> ${escapeHtml(providerLabel(payload))}</span>`;
+  const evidenceNote = payload.collection?.evidenceMode === 'reported-and-event-checked'
+    ? '<span><b>출처 검증 범위:</b> CLI 이벤트에서 검색어 실행을 확인하고, 모델이 검색별로 보고한 URL을 형식·도메인·응답 항목과 대조했습니다. 원 검색결과의 URL 목록은 이벤트에 포함되지 않으므로 원문을 직접 확인하세요.</span>'
     : '';
   return `
     <aside class="research-notice" aria-label="AI 조사 결과 이용 주의">
@@ -421,6 +434,8 @@ function researchNotice(payload) {
       <span>모델이 웹 검색 결과를 정리한 자료입니다. 링크, 발표일, 적용 대상, 수치를 원문에서 확인한 뒤 의사결정에 사용하세요.</span>
       ${dateNote}
       ${lookbackNote}
+      ${providerNote}
+      ${evidenceNote}
     </aside>`;
 }
 
@@ -509,6 +524,7 @@ export function renderMonitoringHtml(payload) {
   const fullyCompletedDomains = payload.collection?.fullyCompletedDomains ?? 0;
   const totalDomains = payload.collection?.totalDomains ?? requestedDomains.length;
   const appVersion = payload.appVersion ? ` · v${escapeHtml(payload.appVersion)}` : '';
+  const selectedProvider = providerLabel(payload);
 
   return `<!DOCTYPE html>
 <html lang="ko">
@@ -545,7 +561,7 @@ export function renderMonitoringHtml(payload) {
         <div class="period"><span>조사 기간</span><b>${escapeHtml(payload.context.fromStr)} ~ ${escapeHtml(payload.context.toStr)} KST</b>${payload.context.dateCoverageNote ? `<small>${escapeHtml(payload.context.dateCoverageNote)}</small>` : ''}</div>
       </div>
       <nav class="quick-nav" aria-label="영역 바로가기">${domainNav}</nav>
-      <p class="hero-summary">합계 <b>${payload.stats?.total ?? 0}건</b> · 중요도 상 ${payload.stats?.high ?? 0}건 · 조사 깊이 ${escapeHtml(depth.label)}(${escapeHtml(depth.key)}) · 완료 카테고리 ${escapeHtml(completedCategories)}/${escapeHtml(totalCategories)} · 완전 완료 영역 ${escapeHtml(fullyCompletedDomains)}/${escapeHtml(totalDomains)}</p>
+      <p class="hero-summary">합계 <b>${payload.stats?.total ?? 0}건</b> · 중요도 상 ${payload.stats?.high ?? 0}건 · 호출 모델 ${escapeHtml(selectedProvider)} · 조사 깊이 ${escapeHtml(depth.label)}(${escapeHtml(depth.key)}) · 완료 카테고리 ${escapeHtml(completedCategories)}/${escapeHtml(totalCategories)} · 완전 완료 영역 ${escapeHtml(fullyCompletedDomains)}/${escapeHtml(totalDomains)}</p>
     </header>
     ${mockBanner(payload)}
     ${failureBanner(payload)}

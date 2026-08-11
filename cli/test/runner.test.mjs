@@ -95,6 +95,7 @@ function groundedParseOptions(response, unit, overrides = {}) {
       .map((entry) => entry?.sourceUrl)
       .filter(Boolean),
     researchPolicy: researchPolicyForUnit(unit, overrides.depth),
+    evidenceKind: 'direct',
     ...overrides,
   };
 }
@@ -205,6 +206,7 @@ function searchedEnvelope(response, overrides = {}) {
     : undefined;
   return {
     response: JSON.stringify(response),
+    evidenceKind: overrides.evidenceKind || 'direct',
     toolEvidence: {
       available: true,
       totalCalls: search.count,
@@ -358,10 +360,14 @@ test('공식 출처 메타데이터는 hostname·중복·등급·검토일을 �
 test('KST 월요일은 기본 72시간, 화요일은 24시간을 사용한다', () => {
   const monday = createContext(new Date('2026-07-27T00:00:00Z'));
   const tuesday = createContext(new Date('2026-07-28T00:00:00Z'));
+  const sunday2359Kst = createContext(new Date('2026-07-26T14:59:00Z'));
+  const monday0000Kst = createContext(new Date('2026-07-26T15:00:00Z'));
   assert.equal(monday.lookbackHours, 72);
   assert.equal(tuesday.lookbackHours, 24);
+  assert.equal(sunday2359Kst.lookbackHours, 24);
+  assert.equal(monday0000Kst.lookbackHours, 72);
   assert.match(tuesday.dateCoverageNote, /달력 날짜/);
-  assert.throws(() => createContext(tuesday.now, 0), /24, 72, 168/);
+  assert.throws(() => createContext(tuesday.now, 0), /1~168/);
   const priorSuccess = new Date(tuesday.now.getTime() - 30.5 * 60 * 60 * 1000);
   const resumed = createContext(tuesday.now, undefined, priorSuccess);
   assert.equal(resumed.lookbackHours, 30.5);
@@ -370,6 +376,52 @@ test('KST 월요일은 기본 72시간, 화요일은 24시간을 사용한다', 
     () => createContext(tuesday.now, undefined, new Date(tuesday.now.getTime() - 169 * 60 * 60 * 1000)),
     /168시간/,
   );
+});
+
+test('Gemini 단일 카테고리와 ChatGPT 그룹 선택이 프롬프트부터 payload까지 유지된다', async () => {
+  const geminiSelection = resolveCategorySelector('customs:북미');
+  const geminiPrompts = [];
+  const geminiPayload = await collectMonitoring({
+    provider: 'gemini',
+    categorySelection: geminiSelection,
+    now,
+    lookbackHours: 48,
+    callProvider: async (prompt) => {
+      geminiPrompts.push(prompt);
+      const { domain, units } = promptDomainAndUnits(prompt);
+      return searchedEnvelope(responseFor(domain, units), { evidenceKind: 'reported' });
+    },
+  });
+  assert.equal(geminiPrompts.length, 1);
+  assert.match(geminiPrompts[0], /Gemini CLI.*google_web_search/s);
+  assert.equal(geminiPayload.collection.provider, 'gemini');
+  assert.equal(geminiPayload.collection.providerLabel, 'Gemini CLI');
+  assert.equal(geminiPayload.collection.scope, 'category');
+  assert.equal(geminiPayload.collection.totalCategories, 1);
+  assert.equal(geminiPayload.context.lookbackHours, 48);
+  assert.deepEqual(Object.keys(geminiPayload.results), ['customs']);
+
+  const chatgptSelection = resolveGroupSelector('trade');
+  const chatgptPrompts = [];
+  const chatgptPayload = await collectMonitoring({
+    provider: 'chatgpt',
+    groupSelection: chatgptSelection,
+    now,
+    lookbackHours: 72,
+    callProvider: async (prompt) => {
+      chatgptPrompts.push(prompt);
+      const { domain, units } = promptDomainAndUnits(prompt);
+      return searchedEnvelope(responseFor(domain, units), { evidenceKind: 'reported' });
+    },
+  });
+  assert.equal(chatgptPrompts.length, 3);
+  assert.ok(chatgptPrompts.every((prompt) => /ChatGPT\(Codex CLI\).*web_search/s.test(prompt)));
+  assert.equal(chatgptPayload.collection.provider, 'chatgpt');
+  assert.equal(chatgptPayload.collection.providerLabel, 'ChatGPT (Codex CLI)');
+  assert.equal(chatgptPayload.collection.scope, 'group');
+  assert.equal(chatgptPayload.collection.totalCategories, 3);
+  assert.equal(chatgptPayload.context.lookbackHours, 72);
+  assert.deepEqual(Object.keys(chatgptPayload.results), ['trade']);
 });
 
 test('마크다운 fence와 부가 텍스트가 섞인 JSON을 복구한다', () => {
@@ -397,6 +449,25 @@ test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', ()
   const good = validateResearchEnvelope(searchedEnvelope('{}', { warnings: ['일반 업데이트 안내'] }));
   assert.equal(good.webSearchSuccesses, 6);
   assert.equal(good.warnings.length, 1);
+  assert.equal(good.evidenceKind, 'direct');
+  assert.equal(
+    validateResearchEnvelope(searchedEnvelope('{}', { evidenceKind: 'reported' })).evidenceKind,
+    'reported',
+  );
+  const missingEvidenceKind = searchedEnvelope('{}');
+  delete missingEvidenceKind.evidenceKind;
+  assert.throws(
+    () => validateResearchEnvelope(missingEvidenceKind, 'Gemini 조사', 1, {
+      expectedEvidenceKind: 'reported',
+    }),
+    (error) => error.code === 'BAD_OUTPUT' && /검색 근거 유형/.test(error.message),
+  );
+  assert.throws(
+    () => validateResearchEnvelope(searchedEnvelope('{}', {
+      warnings: ['quota 429 rate limit reached'],
+    })),
+    (error) => error.code === 'SEARCH_WARNING',
+  );
 
   const deep = validateResearchEnvelope(
     searchedEnvelope('{}'),
@@ -875,12 +946,22 @@ test('검색 근거 URL은 안전하게 canonicalize하고 연결되지 않은 �
   ];
   const parsed = parseDomainResponse(domains[0], response, context, {
     groundingUrls: ['https://example.com/exact?a=1#result'],
+    evidenceKind: 'direct',
   });
   assert.equal(parsed.categories.북미.length, 1);
   assert.equal(parsed.categories.북미[0].sourceVerification, 'grounded');
   assert.equal(parsed.categories.북미[0].sourceCanonicalUrl, 'https://example.com/exact?a=1');
   assert.equal(parsed.categoryStatus.북미.rejectedCount, 1);
   assert.equal(parsed.categoryStatus.북미.rejectedReasons.sourceUngrounded, 1);
+
+  const reportedResponse = responseFor(domains[0]);
+  reportedResponse.categories.북미 = [item({ sourceUrl: 'https://example.com/reported' })];
+  const reported = parseDomainResponse(domains[0], reportedResponse, context, {
+    groundingUrls: ['https://example.com/reported'],
+    evidenceKind: 'reported',
+  });
+  assert.equal(reported.categories.북미.length, 1);
+  assert.equal(reported.categories.북미[0].sourceVerification, 'reported');
 });
 
 test('문자열 타입과 원본 날짜 길이를 자르기 전에 거부하고 announcedAt은 KST 날짜로 판정한다', () => {
@@ -921,6 +1002,7 @@ test('검색별 provenance를 항목에 연결하고 payload 감사 정보로 �
   const parsed = parseDomainResponse(domains[0], response, context, {
     groundingSearches,
     groundingUrls: [],
+    evidenceKind: 'direct',
   });
   assert.equal(parsed.categories.북미.length, 1);
   assert.deepEqual(parsed.categories.북미[0].sourceEvidence, [{
@@ -1132,7 +1214,7 @@ test('mock 수집은 Claude 호출 없이 상태를 포함한 공통 payload를 
     now,
     lookbackHours: 24,
   });
-  assert.equal(payload.version, 5);
+  assert.equal(payload.version, 7);
   assert.equal(payload.collection.mode, 'mock');
   assert.equal(payload.collection.depth, 'standard');
   assert.equal(payload.collection.completedDomains, 3);
