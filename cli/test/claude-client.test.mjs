@@ -547,6 +547,89 @@ test('blocked_domains 검색은 broad로 세지 않고 엄격 검색에서는 �
   );
 });
 
+test('공식 compact_boundary와 compacting status 이벤트는 읽기 전용 상태로 허용한다', () => {
+  const events = successfulSearchEvents();
+  events.splice(1, 0,
+    {
+      type: 'system',
+      subtype: 'status',
+      status: 'compacting',
+      permissionMode: 'dontAsk',
+      uuid: 'status-1',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'compact_boundary',
+      compact_metadata: { trigger: 'auto', pre_tokens: 120_000 },
+      uuid: 'compact-1',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'status',
+      status: null,
+      uuid: 'status-2',
+      session_id: 'session-1',
+    },
+  );
+
+  const parsed = parseClaudeStream(events.map((event) => JSON.stringify(event)).join('\n'));
+  assert.equal(parsed.response, DOMAIN_JSON);
+  assert.equal(parsed.toolEvidence.byName.WebSearch.success, 1);
+});
+
+test('compact_boundary와 status 이벤트의 비공식 필드·값·권한 변경은 거부한다', () => {
+  const unsafeEvents = [
+    {
+      type: 'system',
+      subtype: 'compact_boundary',
+      compact_metadata: { trigger: 'background', pre_tokens: 120_000 },
+      uuid: 'compact-1',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'compact_boundary',
+      compact_metadata: { trigger: 'auto', pre_tokens: 120_000, file: 'report.txt' },
+      uuid: 'compact-1',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'status',
+      status: 'backgrounded',
+      uuid: 'status-1',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'status',
+      status: 'compacting',
+      permissionMode: 'bypassPermissions',
+      uuid: 'status-1',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'status',
+      status: 'compacting',
+      permissionMode: 'default',
+      uuid: 'status-1',
+      session_id: 'session-1',
+    },
+  ];
+
+  for (const unsafeEvent of unsafeEvents) {
+    const events = successfulSearchEvents();
+    events.splice(1, 0, unsafeEvent);
+    assert.throws(
+      () => parseClaudeStream(events.map((event) => JSON.stringify(event)).join('\n')),
+      (error) => ['BAD_OUTPUT', 'SECURITY_POLICY'].includes(error.code),
+    );
+  }
+});
+
 test('stream session_id 불일치와 허용 목록 밖 이벤트·subtype·content block을 거부한다', () => {
   const mismatch = successfulSearchEvents();
   mismatch[2].session_id = 'session-2';

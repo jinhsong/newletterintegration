@@ -31,7 +31,30 @@ const ALLOWED_STREAM_EVENT_TYPES = new Set([
   'tool_progress',
   'user',
 ]);
-const ALLOWED_SYSTEM_EVENT_SUBTYPES = new Set(['api_retry', 'init']);
+const ALLOWED_SYSTEM_EVENT_SUBTYPES = new Set([
+  'api_retry',
+  'compact_boundary',
+  'init',
+  'status',
+]);
+const ALLOWED_COMPACT_BOUNDARY_FIELDS = new Set([
+  'compact_metadata',
+  'session_id',
+  'subtype',
+  'type',
+  'uuid',
+]);
+const ALLOWED_COMPACT_METADATA_FIELDS = new Set(['pre_tokens', 'trigger']);
+const ALLOWED_COMPACT_TRIGGERS = new Set(['auto', 'manual']);
+const ALLOWED_STATUS_EVENT_FIELDS = new Set([
+  'permissionMode',
+  'session_id',
+  'status',
+  'subtype',
+  'type',
+  'uuid',
+]);
+const ALLOWED_STATUS_VALUES = new Set(['compacting', null]);
 const ALLOWED_RESULT_EVENT_SUBTYPES = new Set([
   'error_during_execution',
   'error_max_budget_usd',
@@ -1526,6 +1549,61 @@ function validateRateLimitEvent(event) {
   }
 }
 
+function requireExactEventFields(event, allowedFields, label) {
+  const unknownFields = Object.keys(event).filter((field) => !allowedFields.has(field));
+  if (unknownFields.length > 0) {
+    throw streamError(
+      'SECURITY_POLICY',
+      `Claude CLI ${label}에 허용 목록 밖 필드가 있습니다.`,
+      unknownFields.join(', '),
+    );
+  }
+  if (typeof event.uuid !== 'string' || !event.uuid.trim()
+    || typeof event.session_id !== 'string' || !event.session_id.trim()) {
+    throw streamError('BAD_OUTPUT', `Claude CLI ${label} 식별자 형식이 올바르지 않습니다.`);
+  }
+}
+
+function validateCompactBoundaryEvent(event) {
+  requireExactEventFields(event, ALLOWED_COMPACT_BOUNDARY_FIELDS, 'compact_boundary 이벤트');
+  const metadata = event.compact_metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI compact_metadata 형식이 올바르지 않습니다.');
+  }
+  const unknownFields = Object.keys(metadata)
+    .filter((field) => !ALLOWED_COMPACT_METADATA_FIELDS.has(field));
+  if (unknownFields.length > 0
+    || !ALLOWED_COMPACT_TRIGGERS.has(metadata.trigger)
+    || !Number.isSafeInteger(metadata.pre_tokens)
+    || metadata.pre_tokens < 0) {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude CLI compact_metadata에 알 수 없는 필드 또는 값이 있습니다.',
+      [...unknownFields, String(metadata.trigger || '(trigger 없음)'), String(metadata.pre_tokens)]
+        .join(', '),
+    );
+  }
+}
+
+function validateStatusEvent(event) {
+  requireExactEventFields(event, ALLOWED_STATUS_EVENT_FIELDS, 'status 이벤트');
+  if (!ALLOWED_STATUS_VALUES.has(event.status)) {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude CLI status 이벤트에 알 수 없는 상태가 있습니다.',
+      String(event.status ?? '(상태 없음)'),
+    );
+  }
+  if (event.permissionMode !== undefined
+    && !['dontAsk', 'default'].includes(event.permissionMode)) {
+    throw streamError(
+      'SECURITY_POLICY',
+      'Claude CLI status 이벤트에서 허용되지 않은 권한 모드가 감지되었습니다.',
+      String(event.permissionMode),
+    );
+  }
+}
+
 function validateKnownStreamEvent(event) {
   if (!ALLOWED_STREAM_EVENT_TYPES.has(event.type)) {
     throw streamError(
@@ -1542,6 +1620,8 @@ function validateKnownStreamEvent(event) {
         String(event.subtype || '(없음)'),
       );
     }
+    if (event.subtype === 'compact_boundary') validateCompactBoundaryEvent(event);
+    if (event.subtype === 'status') validateStatusEvent(event);
     return;
   }
   if (event.type === 'result') {
@@ -1929,6 +2009,19 @@ export function parseClaudeStream(output, options = {}) {
     }
     if (event.type === 'system' && event.subtype === 'api_retry') {
       warnings.push(`Claude API 재시도 ${metric(event.attempt)}/${metric(event.max_retries)}`);
+      continue;
+    }
+    if (event.type === 'system' && event.subtype === 'compact_boundary') {
+      continue;
+    }
+    if (event.type === 'system' && event.subtype === 'status') {
+      if (event.permissionMode !== undefined && event.permissionMode !== init.permissionMode) {
+        throw streamError(
+          'SECURITY_POLICY',
+          'Claude CLI 실행 중 권한 모드가 변경되었습니다.',
+          `시작: ${init.permissionMode}\n상태 이벤트: ${event.permissionMode}`,
+        );
+      }
       continue;
     }
     if (event.type === 'rate_limit_event') {
