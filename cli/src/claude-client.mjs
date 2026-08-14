@@ -77,25 +77,53 @@ const ALLOWED_RESULT_EVENT_FIELDS = new Set([
   'duration_api_ms',
   'duration_ms',
   'errors',
+  'fast_mode_disabled_reason',
   'fast_mode_state',
   'is_error',
   'modelUsage',
   'num_turns',
   'origin',
   'permission_denials',
+  'request_sent_wall_ms',
   'result',
   'session_id',
   'stop_reason',
   'structured_output',
   'subtype',
   'terminal_reason',
+  'time_origin_ms',
+  'time_to_request_from_spawn_ms',
+  'time_to_request_ms',
   'total_cost_usd',
   'ttft_ms',
+  'ttft_stream_ms',
   'type',
   'usage',
+  'user_message_uuid',
   'uuid',
+  'warm_spare_claimed',
 ]);
 const ALLOWED_FAST_MODE_STATES = new Set(['cooldown', 'off', 'on']);
+const ALLOWED_FAST_MODE_DISABLED_REASONS = new Set([
+  'disabled_by_env',
+  'extra_usage_disabled',
+  'free',
+  'model_not_allowed',
+  'network_error',
+  'not_first_party',
+  'pending',
+  'preference',
+  'sdk_opt_in_required',
+  'unknown',
+]);
+const SUCCESS_RESULT_TIMING_FIELDS = [
+  'request_sent_wall_ms',
+  'time_origin_ms',
+  'time_to_request_from_spawn_ms',
+  'time_to_request_ms',
+  'ttft_ms',
+  'ttft_stream_ms',
+];
 const ALLOWED_TERMINAL_REASONS = new Set([
   'aborted_streaming',
   'aborted_tools',
@@ -1500,17 +1528,47 @@ function eventContent(event) {
 }
 
 function validateResultEventMetadata(event) {
-  if (
-    event.ttft_ms !== undefined
-    && (!Number.isFinite(event.ttft_ms) || event.ttft_ms < 0)
-  ) {
-    throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result의 ttft_ms 형식이 올바르지 않습니다.');
+  for (const field of SUCCESS_RESULT_TIMING_FIELDS) {
+    if (event[field] !== undefined && (!Number.isFinite(event[field]) || event[field] < 0)) {
+      throw streamError('BAD_OUTPUT', `Claude CLI 최종 result의 ${field} 형식이 올바르지 않습니다.`);
+    }
+  }
+  if (event.subtype !== 'success' && SUCCESS_RESULT_TIMING_FIELDS.some(
+    (field) => event[field] !== undefined,
+  )) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI 오류 result에 성공 전용 시간 메타데이터가 있습니다.');
   }
   if (
     event.fast_mode_state !== undefined
     && !ALLOWED_FAST_MODE_STATES.has(event.fast_mode_state)
   ) {
     throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result의 fast_mode_state 형식이 올바르지 않습니다.');
+  }
+  if (
+    event.fast_mode_disabled_reason !== undefined
+    && !ALLOWED_FAST_MODE_DISABLED_REASONS.has(event.fast_mode_disabled_reason)
+  ) {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude CLI 최종 result의 fast_mode_disabled_reason 형식이 올바르지 않습니다.',
+    );
+  }
+  if (
+    event.user_message_uuid !== undefined
+    && (typeof event.user_message_uuid !== 'string' || !event.user_message_uuid.trim())
+  ) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result의 user_message_uuid 형식이 올바르지 않습니다.');
+  }
+  if (
+    event.warm_spare_claimed !== undefined
+    && typeof event.warm_spare_claimed !== 'boolean'
+  ) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result의 warm_spare_claimed 형식이 올바르지 않습니다.');
+  }
+  if (event.subtype !== 'success' && (
+    event.user_message_uuid !== undefined || event.warm_spare_claimed !== undefined
+  )) {
+    throw streamError('BAD_OUTPUT', 'Claude CLI 오류 result에 성공 전용 요청 메타데이터가 있습니다.');
   }
   if (
     event.terminal_reason !== undefined

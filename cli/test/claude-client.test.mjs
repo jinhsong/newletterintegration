@@ -775,11 +775,19 @@ test('stream session_id 불일치와 허용 목록 밖 이벤트·subtype·conte
 
   const currentOptionalMetadata = successfulSearchEvents({
     resultOverrides: {
+      fast_mode_disabled_reason: 'extra_usage_disabled',
       fast_mode_state: 'off',
       origin: { kind: 'human' },
+      request_sent_wall_ms: 1_800_000_000_000,
       stop_reason: 'end_turn',
       terminal_reason: 'completed',
+      time_origin_ms: 1_799_999_999_900,
+      time_to_request_from_spawn_ms: 115.25,
+      time_to_request_ms: 15.25,
       ttft_ms: 12.5,
+      ttft_stream_ms: 11.75,
+      user_message_uuid: 'user-message-1',
+      warm_spare_claimed: false,
     },
   });
   assert.doesNotThrow(
@@ -788,7 +796,15 @@ test('stream session_id 불일치와 허용 목록 밖 이벤트·subtype·conte
 
   for (const resultOverrides of [
     { fast_mode_state: 'turbo' },
+    { fast_mode_disabled_reason: 'unexpected' },
     { ttft_ms: -1 },
+    { ttft_stream_ms: -1 },
+    { time_to_request_ms: -1 },
+    { request_sent_wall_ms: -1 },
+    { time_to_request_from_spawn_ms: -1 },
+    { time_origin_ms: -1 },
+    { user_message_uuid: '' },
+    { warm_spare_claimed: 'false' },
     { origin: { kind: 'task-notification' } },
     { origin: { kind: 'human', server: 'unexpected' } },
     { deferred_tool_use: { id: 'toolu-1', name: 'Write', input: {} } },
