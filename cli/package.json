@@ -1,6 +1,6 @@
 {
   "name": "trade-monitor-cli",
-  "version": "7.0.0",
+  "version": "7.1.0",
   "private": true,
   "type": "module",
   "description": "회사 Claude, Gemini, ChatGPT CLI 기반 로컬 HTML 통상 모니터링",

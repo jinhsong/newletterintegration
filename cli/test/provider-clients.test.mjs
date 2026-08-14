@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -52,6 +53,20 @@ const RESPONSE = JSON.stringify({
     { query: OFFICIAL_QUERY, mode: 'official', urls: [OFFICIAL_URL] },
     { query: BROAD_QUERY, mode: 'broad', urls: [BROAD_URL] },
   ],
+});
+const RUNNER_QUERIES = [
+  { query: 'United States tariff notice site:cbp.gov', url: 'https://www.cbp.gov/trade/rulings', mode: 'official' },
+  { query: 'Canada customs notice site:canada.ca', url: 'https://www.canada.ca/en/border-services-agency.html', mode: 'official' },
+  { query: 'North America tariff rule site:federalregister.gov', url: 'https://www.federalregister.gov/documents/2026/01/01/example', mode: 'official' },
+  { query: 'North America tariff industry update', url: 'https://news.example.org/north-america-1', mode: 'broad' },
+  { query: 'Canada customs electronics news', url: 'https://news.example.org/canada-2', mode: 'broad' },
+  { query: 'United States supply chain tariff analysis', url: 'https://news.example.org/us-3', mode: 'broad' },
+];
+const RUNNER_RESPONSE = JSON.stringify({
+  domain: 'customs',
+  insight: '',
+  categories: { 북미: [] },
+  _searchEvidence: RUNNER_QUERIES.map(({ query, url, mode }) => ({ query, mode, urls: [url] })),
 });
 
 function jsonl(events) {
@@ -129,6 +144,47 @@ function codexEvents(response = RESPONSE) {
   ];
 }
 
+function runnerEvents(provider) {
+  if (provider === 'gemini') {
+    return [
+      { type: 'init', session_id: 'runner-gemini', model: 'gemini-enterprise' },
+      ...RUNNER_QUERIES.flatMap((entry, index) => ([
+        {
+          type: 'tool_use',
+          tool_name: 'google_web_search',
+          tool_id: `runner-search-${index}`,
+          parameters: { query: entry.query },
+        },
+        {
+          type: 'tool_result',
+          tool_id: `runner-search-${index}`,
+          status: 'success',
+          output: `Search results for ${entry.query}`,
+        },
+      ])),
+      { type: 'message', role: 'assistant', content: RUNNER_RESPONSE, delta: false },
+      { type: 'result', status: 'success', stats: { total_tokens: 500 } },
+    ];
+  }
+  return [
+    { type: 'thread.started', thread_id: 'runner-codex' },
+    { type: 'turn.started' },
+    ...RUNNER_QUERIES.flatMap((entry, index) => ([
+      {
+        type: 'item.started',
+        item: { id: `runner-search-${index}`, type: 'web_search', action: { type: 'search', query: entry.query } },
+      },
+      {
+        type: 'item.completed',
+        item: { id: `runner-search-${index}`, type: 'web_search', action: { type: 'search', query: entry.query } },
+      },
+    ])),
+    { type: 'item.started', item: { id: 'runner-answer', type: 'agent_message', text: '', phase: 'final_answer' } },
+    { type: 'item.completed', item: { id: 'runner-answer', type: 'agent_message', text: RUNNER_RESPONSE, phase: 'final_answer' } },
+    { type: 'turn.completed', usage: { input_tokens: 500, output_tokens: 200 } },
+  ];
+}
+
 async function withEnvironment(values, worker) {
   const previous = new Map();
   for (const [key, value] of Object.entries(values)) {
@@ -149,6 +205,7 @@ async function withEnvironment(values, worker) {
 function fakeDriverSource(provider) {
   const research = provider === 'gemini' ? geminiEvents() : codexEvents();
   const encoded = Buffer.from(JSON.stringify(research), 'utf8').toString('base64');
+  const encodedRunner = Buffer.from(JSON.stringify(runnerEvents(provider)), 'utf8').toString('base64');
   const encodedFeatures = Buffer.from(
     CODEX_DISABLED_FEATURES.map((feature) => [feature, 'stable false'].join(' ')).join('\n'),
     'utf8',
@@ -187,13 +244,18 @@ if (args.length === 1 && args[0] === '--version') {
 }
 if (${JSON.stringify(provider)} === 'codex' && args.at(-2) === 'features' && args.at(-1) === 'list') {
   let output = Buffer.from('${encodedFeatures}', 'base64').toString('utf8');
+  if (mode === 'codex-older-features') output = output.split('\\n').slice(0, 2).join('\\n');
   if (mode === 'codex-feature-enabled') output = output.replace(' stable false', ' stable true');
   if (mode === 'codex-unreviewed-feature') output += '\\nfuture_remote_tool stable true';
   process.stdout.write(output + '\\n');
   process.exit(0);
 }
 if (${JSON.stringify(provider)} === 'codex' && args.length === 2 && args[0] === 'login' && args[1] === 'status') {
-  process.stdout.write(mode === 'codex-api-auth' ? 'Logged in using an API key\\n' : 'Logged in using ChatGPT\\n');
+  process.stdout.write(mode === 'codex-api-auth'
+    ? 'Logged in using an API key\\n'
+    : mode === 'codex-managed-auth'
+      ? 'Logged in using Agent Identity\\n'
+      : 'Logged in using ChatGPT\\n');
   process.exit(0);
 }
 if (mode === 'rate-limit' || mode === 'auth-error') {
@@ -208,7 +270,8 @@ if (mode === 'rate-limit' || mode === 'auth-error') {
   for (const event of failures) process.stdout.write(JSON.stringify(event) + '\\n');
   process.exitCode = 1;
 } else {
-  const events = JSON.parse(Buffer.from('${encoded}', 'base64').toString('utf8'));
+  const eventPayload = mode === 'runner-e2e' ? '${encodedRunner}' : '${encoded}';
+  const events = JSON.parse(Buffer.from(eventPayload, 'base64').toString('utf8'));
   for (const event of events) process.stdout.write(JSON.stringify(event) + '\\n');
 }
 `;
@@ -430,6 +493,43 @@ test('Gemini stream-json은 실제 검색 query와 보고 URL을 1:1 검증한�
   );
 });
 
+test('Gemini 검색 결과 없음·부분 근거·공식 Grounding 리다이렉트를 안전하게 처리한다', () => {
+  const broadOnlyResponse = JSON.stringify({
+    ...JSON.parse(RESPONSE),
+    _searchEvidence: [{ query: BROAD_QUERY, mode: 'broad', urls: [BROAD_URL] }],
+  });
+  const noResult = geminiEvents(broadOnlyResponse);
+  noResult[2].output = { returnDisplay: 'No information found.' };
+  const noResultEnvelope = parseGeminiStream(jsonl(noResult), {
+    officialDomainAllowlist: ['agency.gov'],
+  });
+  assert.equal(noResultEnvelope.toolEvidence.byName.WebSearch.success, 1);
+  assert.equal(noResultEnvelope.toolEvidence.byName.WebSearch.fail, 1);
+  assert.match(noResultEnvelope.warnings.join('\n'), /결과 없음/);
+
+  const partialEvidence = parseGeminiStream(jsonl(geminiEvents(broadOnlyResponse)), {
+    officialDomainAllowlist: ['agency.gov'],
+  });
+  assert.equal(partialEvidence.toolEvidence.byName.WebSearch.success, 1);
+  assert.equal(partialEvidence.toolEvidence.byName.WebSearch.fail, 1);
+  assert.match(partialEvidence.warnings.join('\n'), /출처 URL/);
+
+  const redirectUrl = 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/AbCdEf';
+  const redirectResponse = JSON.stringify({
+    ...JSON.parse(RESPONSE),
+    _searchEvidence: [
+      { query: OFFICIAL_QUERY, mode: 'official', urls: [redirectUrl] },
+      { query: BROAD_QUERY, mode: 'broad', urls: [BROAD_URL] },
+    ],
+  });
+  const redirectEnvelope = parseGeminiStream(jsonl(geminiEvents(redirectResponse)), {
+    officialDomainAllowlist: ['agency.gov'],
+  });
+  assert.equal(redirectEnvelope.toolEvidence.byName.WebSearch.official, 1);
+  assert.deepEqual(redirectEnvelope.groundingSearches[0].officialRedirectUrls, [redirectUrl]);
+  assert.match(redirectEnvelope.warnings.join('\n'), /Grounding 리다이렉트/);
+});
+
 test('Codex JSONL은 웹 검색과 최종 답변만 허용한다', () => {
   const envelope = parseCodexStream(jsonl(codexEvents()), {
     officialDomainAllowlist: ['agency.gov'],
@@ -526,14 +626,15 @@ test('Codex 가짜 CLI로 로그인·보안 인수·stdin·API key 제거를 통
     });
     const invocations = await readInvocations(fake.invocationFile);
     assert.deepEqual(invocations[0].args, ['--version']);
-    assert.deepEqual(invocations[1].args, codexFeatureArguments());
-    assert.deepEqual(invocations[2].args, ['login', 'status']);
-    assert.deepEqual(invocations[3].args, codexResearchArguments());
-    assert.equal(invocations[3].stdin, 'codex prompt');
-    assert.equal(invocations[3].env.OPENAI_API_KEY, null);
-    assert.equal(invocations[3].env.CODEX_API_KEY, null);
-    assert.equal(invocations[3].env.CODEX_ACCESS_TOKEN, null);
-    assert.equal(invocations[3].env.OPENAI_BASE_URL, null);
+    assert.deepEqual(invocations[1].args, ['features', 'list']);
+    assert.deepEqual(invocations[2].args, codexFeatureArguments());
+    assert.deepEqual(invocations[3].args, ['login', 'status']);
+    assert.deepEqual(invocations[4].args, codexResearchArguments());
+    assert.equal(invocations[4].stdin, 'codex prompt');
+    assert.equal(invocations[4].env.OPENAI_API_KEY, null);
+    assert.equal(invocations[4].env.CODEX_API_KEY, null);
+    assert.equal(invocations[4].env.CODEX_ACCESS_TOKEN, null);
+    assert.equal(invocations[4].env.OPENAI_BASE_URL, null);
     assert.equal(invocations[1].env.CODEX_REFRESH_TOKEN_URL_OVERRIDE, null);
     assert.equal(invocations[2].env.CODEX_REVOKE_TOKEN_URL_OVERRIDE, null);
     assert.equal(invocations[3].env.CODEX_APP_SERVER_LOGIN_CLIENT_ID, null);
@@ -546,9 +647,53 @@ test('Codex 가짜 CLI로 로그인·보안 인수·stdin·API key 제거를 통
         'CODEX_AUTHAPI_BASE_URL',
       ]) assert.equal(invocation.env[name], null, `${name}이 자식 프로세스에 남았습니다.`);
     }
-    assert.equal(path.resolve(invocations[3].cwd), path.resolve(fake.workspace));
+    assert.equal(path.resolve(invocations[4].cwd), path.resolve(fake.workspace));
   } finally {
     await fs.rm(fake.root, { recursive: true, force: true });
+  }
+});
+
+test('Gemini와 Codex 가짜 CLI는 run.mjs부터 단일 카테고리 HTML 저장까지 완주한다', async () => {
+  const repoRoot = path.resolve(import.meta.dirname, '..', '..');
+  for (const provider of ['gemini', 'codex']) {
+    const fake = await installFakeCli(provider);
+    try {
+      const output = path.join(fake.root, `${provider}-runner.html`);
+      const providerKey = provider === 'codex' ? 'chatgpt' : 'gemini';
+      const env = {
+        ...process.env,
+        TRADE_TEST_FAKE_MODE: 'runner-e2e',
+        GEMINI_CLI_BIN: provider === 'gemini' ? fake.command : undefined,
+        CODEX_CLI_BIN: provider === 'codex' ? fake.command : undefined,
+        CODEX_CLI_AUTH_MODE: provider === 'codex' ? 'chatgpt' : undefined,
+      };
+      for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
+      const execution = spawnSync(process.execPath, [
+        path.join(repoRoot, 'cli', 'run.mjs'),
+        '--provider', providerKey,
+        '--lookback', '24',
+        '--category', 'customs:북미',
+        '--out', output,
+        '--no-open',
+        '--allow-parallel',
+      ], {
+        cwd: repoRoot,
+        env,
+        encoding: 'utf8',
+        timeout: 30000,
+      });
+      assert.equal(
+        execution.status,
+        0,
+        `${provider} runner 실패\nstdout=${execution.stdout}\nstderr=${execution.stderr}`,
+      );
+      const html = await fs.readFile(output, 'utf8');
+      assert.match(html, /관세/);
+      assert.match(html, provider === 'gemini' ? /Gemini CLI/ : /ChatGPT \(Codex CLI\)/);
+      assert.match(html, provider === 'gemini' ? /CLI 0\.53\.0/ : /CLI 0\.101\.0/);
+    } finally {
+      await fs.rm(fake.root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -573,6 +718,47 @@ test('Codex 사전 점검은 비활성화 실패와 API key 로그인을 실행 
     } finally {
       await fs.rm(fake.root, { recursive: true, force: true });
     }
+  }
+});
+
+test('Codex 사전 점검은 구버전의 짧은 기능 목록과 회사 관리형 OAuth를 지원한다', async () => {
+  const older = await installFakeCli('codex');
+  try {
+    await withEnvironment({
+      CODEX_CLI_BIN: older.command,
+      TRADE_TEST_FAKE_MODE: 'codex-older-features',
+    }, async () => {
+      await prepareCodexResearchWorkspace(older.workspace);
+      const result = await preflightCodexCli({ cwd: older.workspace, timeoutMs: 10000 });
+      assert.equal(result.version, '0.101.0');
+      assert.equal(result.diagnostics.disabledFeatures.length, 2);
+    });
+  } finally {
+    await fs.rm(older.root, { recursive: true, force: true });
+  }
+
+  const managed = await installFakeCli('codex');
+  try {
+    await withEnvironment({
+      CODEX_CLI_BIN: managed.command,
+      CODEX_CLI_AUTH_MODE: 'managed',
+      TRADE_TEST_FAKE_MODE: 'codex-managed-auth',
+      OPENAI_API_KEY: 'must-not-leak',
+      OPENAI_BASE_URL: 'https://company.example.test',
+      CODEX_AUTHAPI_BASE_URL: 'https://company.example.test/auth',
+      CODEX_REFRESH_TOKEN_URL_OVERRIDE: 'https://company.example.test/refresh',
+    }, async () => {
+      await prepareCodexResearchWorkspace(managed.workspace);
+      const result = await preflightCodexCli({ cwd: managed.workspace, timeoutMs: 10000 });
+      assert.equal(result.diagnostics.authMethod, 'Agent Identity');
+      assert.equal(result.diagnostics.authMode, 'managed');
+    });
+    const invocations = await readInvocations(managed.invocationFile);
+    assert.ok(invocations.every((entry) => entry.env.OPENAI_API_KEY === null));
+    assert.ok(invocations.every((entry) => entry.env.OPENAI_BASE_URL === 'https://company.example.test'));
+    assert.ok(invocations.every((entry) => entry.env.CODEX_AUTHAPI_BASE_URL === 'https://company.example.test/auth'));
+  } finally {
+    await fs.rm(managed.root, { recursive: true, force: true });
   }
 });
 

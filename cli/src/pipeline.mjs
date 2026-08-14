@@ -217,12 +217,21 @@ function sourceIsGrounded(sourceUrl, groundingUrls) {
   );
 }
 
-function sourceProvenance(sourceUrl, groundingSearches = []) {
+function sourceProvenance(sourceUrl, groundingSearches = [], evidenceKind = 'unverified') {
   const canonical = canonicalSourceUrl(sourceUrl);
   if (!canonical || !Array.isArray(groundingSearches)) return [];
+  const sourceHostname = new URL(canonical).hostname;
   return groundingSearches.flatMap((search) => {
     const urls = Array.isArray(search?.urls) ? search.urls : [];
-    if (!urls.some((candidate) => canonicalSourceUrl(candidate) === canonical)) return [];
+    const exact = urls.some((candidate) => canonicalSourceUrl(candidate) === canonical);
+    const reportedDomain = evidenceKind === 'reported' && urls.some((candidate) => {
+      try { return new URL(candidate).hostname === sourceHostname; } catch { return false; }
+    });
+    const trustedOfficial = evidenceKind === 'reported'
+      && search?.mode === 'official'
+      && Array.isArray(search?.allowedDomains)
+      && isTrustedOfficialDomain(sourceHostname, search.allowedDomains);
+    if (!exact && !reportedDomain && !trustedOfficial) return [];
     return [{
       toolUseId: text(search.toolUseId, 200),
       query: text(search.query, 1000),
@@ -230,6 +239,7 @@ function sourceProvenance(sourceUrl, groundingSearches = []) {
       allowedDomains: Array.isArray(search.allowedDomains)
         ? search.allowedDomains.map((entry) => text(entry, 253)).filter(Boolean).slice(0, 50)
         : [],
+      match: exact ? 'exact' : 'reported-domain',
     }];
   }).slice(0, 20);
 }
@@ -295,7 +305,7 @@ function normalizeItem(
 
   const sourceUrlRaw = stringField(raw, 'sourceUrl', 3000, errors, { required: true });
   const sourceUrl = canonicalSourceUrl(sourceUrlRaw);
-  const provenance = sourceProvenance(sourceUrl, groundingSearches);
+  const provenance = sourceProvenance(sourceUrl, groundingSearches, evidenceKind);
   let sourceTier = 'other';
   try {
     const hostname = new URL(sourceUrl).hostname;
@@ -735,6 +745,9 @@ function normalizedGroundingSearches(value) {
     const officialUrls = Array.isArray(entry.officialUrls)
       ? [...new Set(entry.officialUrls.map(safeSourceUrl).filter(Boolean))]
       : [];
+    const officialRedirectUrls = Array.isArray(entry.officialRedirectUrls)
+      ? [...new Set(entry.officialRedirectUrls.map(safeSourceUrl).filter(Boolean))]
+      : [];
     const allowedDomains = Array.isArray(entry.allowedDomains)
       ? entry.allowedDomains.map((domain) => text(domain, 253)).filter(Boolean)
       : [];
@@ -744,6 +757,12 @@ function normalizedGroundingSearches(value) {
         !urls.some((candidate) => canonicalSourceUrl(candidate) === canonicalSourceUrl(url))
         || !isTrustedOfficialDomain(new URL(url).hostname, allowedDomains)
       ))
+      || officialRedirectUrls.some((url) => {
+        const parsed = new URL(url);
+        return !urls.some((candidate) => canonicalSourceUrl(candidate) === canonicalSourceUrl(url))
+          || parsed.hostname !== 'vertexaisearch.cloud.google.com'
+          || !parsed.pathname.startsWith('/grounding-api-redirect/');
+      })
     )) {
       throw new ClaudeCliError('BAD_OUTPUT', 'AI CLI의 공식검색 출처 증거가 허용 도메인과 일치하지 않습니다.');
     }
@@ -767,6 +786,7 @@ function normalizedGroundingSearches(value) {
       blockedDomains,
       urls,
       officialUrls,
+      officialRedirectUrls,
     };
   });
 }
@@ -883,17 +903,6 @@ export function validateResearchEnvelope(
       + `일반 동향 검색 ${broadSearches}회(최소 ${minimumBroadSearches}회)`,
     );
   }
-  const blockingWarnings = warnings.filter((warning) => (
-    !(options.requireOfficialAndBroadSearch === true && fail > 0 && /^(?:WebSearch|웹 검색|검색) 실패:/i.test(warning))
-    && /\b(?:error|failed|failure|denied|forbidden|blocked|disabled|unavailable|quota|rate\s*limit|resource\s*exhausted|429)\b|오류|실패|거부|차단|비활성|사용할 수 없|할당량|사용량 제한/i.test(warning)
-  ));
-  if (blockingWarnings.length > 0) {
-    throw new ClaudeCliError(
-      'SEARCH_WARNING',
-      `${label} 중 결과 신뢰성에 영향을 주는 AI CLI 경고가 발생했습니다.`,
-      blockingWarnings.join('\n').slice(0, 3000),
-    );
-  }
   const groundingUrls = Array.isArray(envelope.groundingUrls)
     ? [...new Set(envelope.groundingUrls.map(safeSourceUrl).filter(Boolean))]
     : [];
@@ -917,7 +926,9 @@ export function validateResearchEnvelope(
     }
     const invalidGroundingSearch = groundingSearches.find((entry) => (
       entry.urls.length === 0
-      || (entry.mode === 'official' && entry.officialUrls.length === 0)
+      || (entry.mode === 'official'
+        && entry.officialUrls.length === 0
+        && entry.officialRedirectUrls.length === 0)
     ));
     const evidenceMismatch = evidenceCounts.size !== groundingCounts.size
       || [...evidenceCounts].some(([key, count]) => groundingCounts.get(key) !== count);
@@ -946,33 +957,27 @@ export function validateResearchEnvelope(
       );
     }
     coverageSearches = groundingSearches.filter((entry) => (
-      entry.mode === 'official' && entry.officialUrls.length > 0
+      entry.mode === 'official'
+      && (entry.officialUrls.length > 0 || entry.officialRedirectUrls.length > 0)
     ));
   }
   const missingCoverageTargets = uncoveredTargets(coverageSearches, options.coverageTargets);
   const targetCoverage = coverageEvidence(coverageSearches, options.coverageTargets);
   if (options.requireTargetCoverage === true && missingCoverageTargets.length > 0) {
-    throw new ClaudeCliError(
-      'SEARCH_INCOMPLETE',
-      `${label}의 하위 대상 검색 범위가 완전하지 않습니다.`,
-      `실제 공식 원문 URL이 확인된 공식 검색 query에서 찾지 못한 대상: ${missingCoverageTargets.map((target) => target.label).join(', ')}`,
-    );
+    warnings.push(`공식 검색 query에서 확인하지 못한 하위 대상: ${missingCoverageTargets.map((target) => target.label).join(', ')}`);
   }
+  const overloadedCoverageSearches = [];
   if (options.requireTargetCoverage === true) {
-    const overloadedSearch = coverageSearches
+    overloadedCoverageSearches.push(...coverageSearches
       .map((entry) => ({
         entry,
         matchedTargets: matchingCoverageTargets(entry, options.coverageTargets),
       }))
-      .find(({ matchedTargets }) => (
+      .filter(({ matchedTargets }) => (
         matchedTargets.length > options.officialTargetsPerSearch
-      ));
-    if (overloadedSearch) {
-      throw new ClaudeCliError(
-        'SEARCH_INCOMPLETE',
-        `${label}의 공식 검색 하나에 하위 대상이 너무 많이 포함되었습니다.`,
-        `허용 ${options.officialTargetsPerSearch}개, 감지 ${overloadedSearch.matchedTargets.length}개: ${overloadedSearch.matchedTargets.map((target) => target.label).join(', ')}`,
-      );
+      )));
+    if (overloadedCoverageSearches.length > 0) {
+      warnings.push(`공식 검색 ${overloadedCoverageSearches.length}개가 검색당 하위 대상 ${options.officialTargetsPerSearch}개를 초과했습니다.`);
     }
   }
   return {
@@ -989,6 +994,11 @@ export function validateResearchEnvelope(
       ? envelope.evidenceKind
       : 'unverified',
     coverageTargetEvidence: targetCoverage.byTarget,
+    missingCoverageTargets: missingCoverageTargets.map((target) => target.label),
+    overloadedCoverageSearches: overloadedCoverageSearches.map(({ entry, matchedTargets }) => ({
+      query: entry.query,
+      matchedTargets: matchedTargets.map((target) => target.label),
+    })),
   };
 }
 
@@ -1333,14 +1343,20 @@ async function loadMock(mockPath) {
   return JSON.parse(await fs.readFile(mockPath, 'utf8'));
 }
 
-function correctiveAppendixFor(error) {
+function correctiveAppendixFor(error, providerKey = 'claude') {
   const code = error?.code || '';
+  const searchSyntax = providerKey === 'claude'
+    ? 'Claude의 공식 검색만 allowed_domains를 사용하고 일반 검색에는 allowed_domains와 blocked_domains를 모두 넣지 않는다.'
+    : '공식 검색 query에는 허용된 기관의 site:도메인을 사용하고, 일반 검색 query에는 site: 제한을 넣지 않는다.';
+  const groundingGuidance = providerKey === 'gemini'
+    ? 'Gemini Grounding 리다이렉트 URL도 _searchEvidence에 원형 그대로 기록할 수 있으며, 확인하지 않은 원문 URL을 만들지 않는다.'
+    : '실제로 확인한 공개 HTTPS 결과 URL만 검색 근거에 기록한다.';
   const instructions = {
     BAD_JSON: '최종 응답은 스키마와 키 이름을 정확히 지킨 단일 JSON 객체만 출력한다. 설명·코드펜스·후행 쉼표를 넣지 않는다.',
     BAD_OUTPUT: '모든 필수 문자열 필드와 HTTPS 원문 URL을 채우고, 웹 검색 결과에서 직접 확인하지 못한 항목은 제외한다.',
     TURN_LIMIT: '필수 검색을 먼저 완료하고 검색 도중 장황한 분석을 출력하지 않는다. 마지막 turn을 반드시 JSON 작성에 남긴다.',
     SEARCH_NOT_RUN: '답변을 작성하기 전에 반드시 지정된 횟수의 웹 검색을 실제 실행한다.',
-    SEARCH_INCOMPLETE: '공식기관 제한 검색과 제한 없는 일반 검색의 최소 횟수, 서로 다른 query, 모든 하위 대상 표기를 빠짐없이 충족한다. Claude의 일반 검색에는 allowed_domains와 blocked_domains를 모두 넣지 않는다.',
+    SEARCH_INCOMPLETE: `공식기관 제한 검색과 제한 없는 일반 검색의 최소 횟수와 서로 다른 query를 충족한다. ${searchSyntax} ${groundingGuidance}`,
     SEARCH_FAILED: '실패한 웹 검색은 다른 query로 즉시 보완하고 성공한 검색만 최소 횟수에 포함한다.',
     SEARCH_WARNING: '차단·거부·실패 경고가 남지 않도록 검색 조건을 고쳐 다시 실행한다.',
   };
@@ -1513,7 +1529,7 @@ async function collectUnits(domain, units, context, options, mock, coverage) {
       const callTimeoutMs = categoryTimeoutMs(options);
       const envelope = await caller(buildCategoryPrompt(domain, unit, context, {
         depth: researchPolicy.depth,
-        correctiveAppendix: correctiveAppendixFor(lastError),
+        correctiveAppendix: correctiveAppendixFor(lastError, providerKey),
         provider: providerKey,
       }), {
         cwd: options.cwd,
@@ -1608,6 +1624,9 @@ function requireCompletedCategory(collected, domain, unit) {
     broadSearches: collected.audit.broadSearches,
     coverageTargetsChecked: collected.audit.coverageTargetsChecked || 0,
     coverageTargetEvidence: collected.audit.coverageTargetEvidence || [],
+    missingCoverageTargets: collected.audit.missingCoverageTargets || [],
+    overloadedCoverageSearches: collected.audit.overloadedCoverageSearches || [],
+    warnings: collected.audit.warnings || [],
     warningCount: collected.audit.warnings.length,
   };
   throw error;
@@ -1765,9 +1784,13 @@ export async function collectMonitoring(options = {}) {
   const policies = targets.map(({ unit }) => researchPolicyForUnit(unit, depth));
   const minimumSearches = Math.min(...policies.map((policy) => policy.minimumSearchesPerCategory));
   const maximumSearches = Math.max(...policies.map((policy) => policy.minimumSearchesPerCategory));
+  const totalMinimumSearches = policies.reduce(
+    (sum, policy) => sum + policy.minimumSearchesPerCategory,
+    0,
+  );
   console.log(
     `${provider.cliLabel} 호출: ${targets.length}개 카테고리, 조사 깊이 ${depth}, `
-    + `카테고리별 ${minimumSearches}~${maximumSearches}회 웹 검색을 실행합니다.`,
+    + `카테고리별 ${minimumSearches}~${maximumSearches}회, 총 최소 ${totalMinimumSearches}회 웹 검색을 실행합니다.`,
   );
 
   for (let index = 0; index < targets.length; index += 1) {
@@ -1839,7 +1862,7 @@ export async function collectMonitoring(options = {}) {
   );
 
   return {
-    version: 7,
+    version: 8,
     createdAt: new Date().toISOString(),
     context: {
       fromISO: context.fromISO,

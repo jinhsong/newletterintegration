@@ -212,6 +212,7 @@ async function main() {
   let outputRunLock;
   let globalRunLock;
   let researchWorkspace;
+  let preflight;
   let deadlineTimer;
   let deadlineAt;
   const onInterrupt = () => {
@@ -235,7 +236,7 @@ async function main() {
     if (!options.mockPath) {
       researchWorkspace = await createResearchWorkspace(provider);
       console.log(`${provider.cliLabel} 버전과 실행기 보안 설정을 확인합니다...`);
-      const preflight = await provider.preflight({ cwd: researchWorkspace, signal: controller.signal });
+      preflight = await provider.preflight({ cwd: researchWorkspace, signal: controller.signal });
       console.log(`${provider.cliLabel} ${preflight.version} 확인 완료.`);
       if (preflight.executablePath) console.log(`${provider.label} 실행 파일: ${preflight.executablePath}`);
       for (const warning of preflight.diagnostics?.warnings || []) {
@@ -268,6 +269,12 @@ async function main() {
       deadlineAt,
     });
     payload.appVersion = APP_VERSION;
+    payload.runtime = {
+      cliVersion: preflight?.version || (options.mockPath ? 'mock' : ''),
+      model: String(process.env[provider.modelEnv] || '').trim() || 'CLI 기본값',
+      authMethod: preflight?.diagnostics?.authMethod || (options.mockPath ? 'mock' : '첫 조사에서 회사 로그인 확인'),
+      evidenceMode: provider.evidenceMode,
+    };
     payload.context.lookbackSource = options.lookbackHours !== undefined
       ? 'manual'
       : 'weekday-default';

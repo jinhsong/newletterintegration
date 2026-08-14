@@ -163,7 +163,12 @@ await fs.writeFile(new URL('./invocation.json', import.meta.url), JSON.stringify
 }), 'utf8');
 
 const versionCall = args.length === 1 && args[0] === '--version';
-const selected = versionCall ? (behavior.version || {}) : (behavior.research || behavior);
+const authCall = args.length === 2 && args[0] === 'auth' && args[1] === 'status';
+const selected = versionCall
+  ? (behavior.version || {})
+  : authCall
+    ? (behavior.auth || { stdoutRaw: '{"authMethod":"enterprise-oauth"}' })
+    : (behavior.research || behavior);
 if (selected.delayMs) {
   const stopFile = new URL('./stop-requested', import.meta.url);
   const deadline = Date.now() + selected.delayMs;
@@ -599,7 +604,14 @@ test('공식 compact_boundary와 compacting status 이벤트는 읽기 전용 �
     {
       type: 'system',
       subtype: 'compact_boundary',
-      compact_metadata: { trigger: 'auto', pre_tokens: 120_000 },
+      compact_metadata: {
+        trigger: 'auto',
+        pre_tokens: 120_000,
+        post_tokens: 20_000,
+        duration_ms: 125,
+        preserved_messages: 12,
+        preserved_segment: 'summary',
+      },
       uuid: 'compact-1',
       session_id: 'session-1',
     },
@@ -608,6 +620,25 @@ test('공식 compact_boundary와 compacting status 이벤트는 읽기 전용 �
       subtype: 'status',
       status: null,
       uuid: 'status-2',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'status',
+      status: 'requesting',
+      uuid: 'status-3',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'informational',
+      message: 'managed routing active',
+      uuid: 'info-1',
+      session_id: 'session-1',
+    },
+    {
+      type: 'auth_status',
+      status: 'authenticated',
       session_id: 'session-1',
     },
   );
@@ -751,7 +782,6 @@ test('stream session_id 불일치와 허용 목록 밖 이벤트·subtype·conte
     { type: 'file_persist_event', path: 'report.txt', session_id: 'session-1' },
     { type: 'telemetry_notice', state: 'active', session_id: 'session-1' },
     { type: 'system', subtype: 'background_job_started', session_id: 'session-1' },
-    { type: 'system', subtype: 'status_update', session_id: 'session-1' },
     { type: 'tool_invocation_delta', tool_name: 'Write', session_id: 'session-1' },
     { type: 'filesPersisted', path: 'report.txt', session_id: 'session-1' },
     { type: 'assistant', subtype: 'backgroundTaskStarted', session_id: 'session-1', message: { content: [] } },
@@ -763,6 +793,18 @@ test('stream session_id 불일치와 허용 목록 밖 이벤트·subtype·conte
       (error) => error.code === 'SECURITY_POLICY',
     );
   }
+
+  const passiveStatus = successfulSearchEvents();
+  passiveStatus.splice(-1, 0, {
+    type: 'system',
+    subtype: 'status_update',
+    message: 'enterprise telemetry',
+    session_id: 'session-1',
+  });
+  const passiveStatusResult = parseClaudeStream(
+    passiveStatus.map((event) => JSON.stringify(event)).join('\n'),
+  );
+  assert.match(passiveStatusResult.warnings.join('\n'), /status_update/);
 
   const suspiciousBlock = successfulSearchEvents();
   suspiciousBlock[1].message.content.unshift({ type: 'file_write', path: 'report.txt' });
@@ -790,7 +832,7 @@ test('stream session_id 불일치와 허용 목록 밖 이벤트·subtype·conte
   });
   assert.throws(
     () => parseClaudeStream(unknownResultSubtype.map((event) => JSON.stringify(event)).join('\n')),
-    (error) => error.code === 'SECURITY_POLICY' && /result subtype/.test(error.message),
+    (error) => error.code === 'BAD_OUTPUT',
   );
 
   for (const [field, value] of [
@@ -798,7 +840,6 @@ test('stream session_id 불일치와 허용 목록 밖 이벤트·subtype·conte
     ['filesPersisted', [{ path: 'report.txt' }]],
     ['fileChanges', [{ path: 'report.txt' }]],
     ['backgroundTasks', [{ id: 'task-1' }]],
-    ['future_metadata', { active: true }],
   ]) {
     const persistedResult = successfulSearchEvents({
       resultOverrides: { [field]: value },
@@ -810,6 +851,14 @@ test('stream session_id 불일치와 허용 목록 밖 이벤트·subtype·conte
         && error.details.includes(field),
     );
   }
+
+  const futureResultMetadata = successfulSearchEvents({
+    resultOverrides: { future_metadata: { active: true } },
+  });
+  const futureMetadataResult = parseClaudeStream(
+    futureResultMetadata.map((event) => JSON.stringify(event)).join('\n'),
+  );
+  assert.match(futureMetadataResult.warnings.join('\n'), /future_metadata/);
 
   const currentOptionalMetadata = successfulSearchEvents({
     resultOverrides: {
@@ -931,12 +980,7 @@ test('공식 rate_limit_event는 엄격히 검증하고 경고와 거부를 구�
   );
 
   for (const invalidEvent of [
-    rateEvent('unknown'),
     rateEvent('allowed', { rate_limit_info: { utilization: -1 } }),
-    rateEvent('allowed', { rate_limit_info: { rateLimitType: 'monthly' } }),
-    rateEvent('allowed', { rate_limit_info: { overageStatus: 'unknown' } }),
-    rateEvent('allowed', { rate_limit_info: { overageDisabledReason: 'unexpected' } }),
-    rateEvent('allowed', { rate_limit_info: { errorCode: 'unexpected' } }),
     rateEvent('allowed', { rate_limit_info: { isUsingOverage: 'false' } }),
     rateEvent('allowed', { rate_limit_info: { overageResetsAt: -1 } }),
     rateEvent('allowed', { backgroundTask: true }),
@@ -948,6 +992,19 @@ test('공식 rate_limit_event는 엄격히 검증하고 경고와 거부를 구�
       (error) => ['BAD_OUTPUT', 'SECURITY_POLICY'].includes(error.code),
     );
   }
+
+  const futureRateEvent = successfulSearchEvents();
+  futureRateEvent.splice(1, 0, rateEvent('new_warning_state', {
+    rate_limit_info: {
+      rateLimitType: 'monthly',
+      overageStatus: 'new_state',
+      futureQuotaField: 'diagnostic-only',
+    },
+  }));
+  const futureRateResult = parseClaudeStream(
+    futureRateEvent.map((event) => JSON.stringify(event)).join('\n'),
+  );
+  assert.match(futureRateResult.warnings.join('\n'), /futureQuotaField/);
 });
 
 test('공개 URL과 도메인은 동일한 예약·비공개 suffix 정책을 적용한다', () => {
@@ -2033,7 +2090,7 @@ test('실행기는 subprocess credential scrub을 자체 활성화하지 않는�
   }
 });
 
-test('사전 점검은 --version 하나로 Claude Code 버전을 확인한다', {
+test('사전 점검은 Claude Code 버전과 읽기 전용 인증 상태를 확인한다', {
   skip: process.platform !== 'win32',
 }, async () => {
   await withFakeClaude({
@@ -2055,8 +2112,9 @@ test('사전 점검은 --version 하나로 Claude Code 버전을 확인한다', 
       false,
     );
     const observed = await readInvocation(invocation);
-    assert.deepEqual(observed.args, ['--version']);
+    assert.deepEqual(observed.args, ['auth', 'status']);
     assert.equal(observed.stdin, '');
+    assert.equal(result.diagnostics.authMethod, 'enterprise-oauth');
   });
 });
 

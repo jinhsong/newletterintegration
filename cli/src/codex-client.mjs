@@ -107,6 +107,14 @@ function deleteEnvironmentKey(environment, name) {
   }
 }
 
+export function codexAuthMode() {
+  const mode = String(process.env.CODEX_CLI_AUTH_MODE || 'chatgpt').trim().toLowerCase();
+  if (!['chatgpt', 'managed'].includes(mode)) {
+    throw new ClaudeCliError('CONFIG', 'CODEX_CLI_AUTH_MODE는 chatgpt 또는 managed여야 합니다.');
+  }
+  return mode;
+}
+
 function enterpriseEnvironment() {
   const environment = { ...process.env };
   // 저장된 ChatGPT OAuth 로그인만 사용한다. API key, personal access token,
@@ -115,13 +123,17 @@ function enterpriseEnvironment() {
     'OPENAI_API_KEY',
     'CODEX_API_KEY',
     'CODEX_ACCESS_TOKEN',
-    'OPENAI_BASE_URL',
     'OPENAI_API_BASE',
-    'CODEX_REFRESH_TOKEN_URL_OVERRIDE',
-    'CODEX_REVOKE_TOKEN_URL_OVERRIDE',
-    'CODEX_APP_SERVER_LOGIN_CLIENT_ID',
-    'CODEX_AUTHAPI_BASE_URL',
   ]) deleteEnvironmentKey(environment, name);
+  if (codexAuthMode() === 'chatgpt') {
+    for (const name of [
+      'OPENAI_BASE_URL',
+      'CODEX_REFRESH_TOKEN_URL_OVERRIDE',
+      'CODEX_REVOKE_TOKEN_URL_OVERRIDE',
+      'CODEX_APP_SERVER_LOGIN_CLIENT_ID',
+      'CODEX_AUTHAPI_BASE_URL',
+    ]) deleteEnvironmentKey(environment, name);
+  }
   environment.NO_COLOR = '1';
   return environment;
 }
@@ -162,9 +174,9 @@ export function codexResearchArguments(disabledFeatures = CODEX_DISABLED_FEATURE
   return args;
 }
 
-export function codexFeatureArguments() {
+export function codexFeatureArguments(disabledFeatures = CODEX_DISABLED_FEATURES) {
   return [
-    ...CODEX_DISABLED_FEATURES.flatMap((feature) => ['--disable', feature]),
+    ...disabledFeatures.flatMap((feature) => ['--disable', feature]),
     'features', 'list',
   ];
 }
@@ -440,6 +452,20 @@ export function isChatGptOAuthLoginStatus(output) {
   return hasChatGpt && !hasOtherCredential;
 }
 
+function managedOAuthLoginStatus(output) {
+  const value = String(output || '');
+  if (/\b(?:API key|personal access token|PAT)\b/i.test(value)) return false;
+  return /^\s*Logged in using .+$/im.test(value)
+    || /^\s*Authentication(?: method)?:\s*(?:Agent Identity|OAuth|SSO|managed identity)\s*$/im.test(value);
+}
+
+function authMethodFromStatus(output) {
+  const match = String(output || '').match(/^\s*Logged in using (.+?)\s*$/im);
+  return match
+    ? match[1].trim().slice(0, 120)
+    : (codexAuthMode() === 'managed' ? 'Managed OAuth/SSO' : 'ChatGPT OAuth');
+}
+
 function exitFailure(result, context) {
   const stderr = String(result.stderr || '').trim();
   const stdout = String(result.stdout || '').trim();
@@ -498,7 +524,7 @@ export async function preflightCodexCli(options = {}) {
     );
   }
 
-  const featureResult = await execute(codexFeatureArguments(), {
+  const inventoryResult = await execute(['features', 'list'], {
     cwd,
     signal: options.signal,
     timeoutMs,
@@ -506,37 +532,42 @@ export async function preflightCodexCli(options = {}) {
     timeoutMessage: 'Codex CLI 기능 목록 확인이 제한 시간 안에 끝나지 않았습니다.',
   });
   await verifyResearchWorkspace(cwd);
-  if (featureResult.exitCode !== 0 || featureResult.signalCode) {
-    throw exitFailure(featureResult, 'Codex CLI 기능 확인 오류');
+  if (inventoryResult.exitCode !== 0 || inventoryResult.signalCode) {
+    throw exitFailure(inventoryResult, 'Codex CLI 기능 목록 확인 오류');
   }
-  const featureInventory = parseCodexFeatureInventory(featureResult.stdout);
-  const featureStates = new Map(
-    [...featureInventory].map(([name, entry]) => [name, entry.enabled]),
-  );
-  const missingFeatures = CODEX_DISABLED_FEATURES.filter((feature) => !featureStates.has(feature));
-  const enabledFeatures = CODEX_DISABLED_FEATURES.filter((feature) => featureStates.get(feature) === true);
+  const featureInventory = parseCodexFeatureInventory(inventoryResult.stdout);
   const safeEnabled = new Set(CODEX_SAFE_ENABLED_FEATURES);
-  const unexpectedEnabledFeatures = [...featureInventory]
-    .filter(([, entry]) => entry.enabled && entry.stage !== 'removed')
-    .map(([name]) => name)
-    .filter((name) => !safeEnabled.has(name) && !CODEX_DISABLED_FEATURES.includes(name));
-  if (missingFeatures.length > 0 || enabledFeatures.length > 0 || unexpectedEnabledFeatures.length > 0) {
-    throw new ClaudeCliError(
-      'CLI_VERSION',
-      '설치된 Codex CLI가 검색 전용 보안 기능 고정을 지원하거나 적용하지 못했습니다.',
-      [
-        missingFeatures.length > 0 ? `확인되지 않은 기능: ${missingFeatures.join(', ')}` : '',
-        enabledFeatures.length > 0 ? `비활성화되지 않은 기능: ${enabledFeatures.join(', ')}` : '',
-        unexpectedEnabledFeatures.length > 0
-          ? `검토되지 않은 활성 기능: ${unexpectedEnabledFeatures.join(', ')}`
-          : '',
-      ].filter(Boolean).join('\n'),
-    );
-  }
   const runtimeDisabledFeatures = [...featureInventory]
     .filter(([, entry]) => entry.stage !== 'removed')
     .map(([name]) => name)
     .filter((name) => !safeEnabled.has(name));
+
+  const featureResult = await execute(codexFeatureArguments(runtimeDisabledFeatures), {
+    cwd,
+    signal: options.signal,
+    timeoutMs,
+    timeoutCode: 'CLI_STARTUP_TIMEOUT',
+    timeoutMessage: 'Codex CLI 위험 기능 비활성화 확인이 제한 시간 안에 끝나지 않았습니다.',
+  });
+  await verifyResearchWorkspace(cwd);
+  if (featureResult.exitCode !== 0 || featureResult.signalCode) {
+    throw exitFailure(featureResult, 'Codex CLI 위험 기능 비활성화 오류');
+  }
+  const verifiedInventory = parseCodexFeatureInventory(featureResult.stdout);
+  const enabledUnsafeFeatures = runtimeDisabledFeatures.filter((name) => (
+    verifiedInventory.get(name)?.enabled !== false
+  ));
+  const newlyEnabledUnsafeFeatures = [...verifiedInventory]
+    .filter(([name, entry]) => entry.enabled && entry.stage !== 'removed' && !safeEnabled.has(name))
+    .map(([name]) => name);
+  const unsafeFeatures = [...new Set([...enabledUnsafeFeatures, ...newlyEnabledUnsafeFeatures])];
+  if (unsafeFeatures.length > 0) {
+    throw new ClaudeCliError(
+      'CLI_VERSION',
+      '설치된 Codex CLI의 검색 외 기능을 안전하게 비활성화하지 못했습니다.',
+      `비활성화되지 않은 기능: ${unsafeFeatures.join(', ')}`,
+    );
+  }
 
   const authResult = await execute(['login', 'status'], {
     cwd,
@@ -548,13 +579,17 @@ export async function preflightCodexCli(options = {}) {
   await verifyResearchWorkspace(cwd);
   if (authResult.exitCode !== 0 || authResult.signalCode) {
     const error = exitFailure(authResult, 'Codex CLI 로그인 확인 오류');
-    throw new ClaudeCliError('AUTH', 'ChatGPT 계정으로 Codex CLI에 먼저 로그인해야 합니다.', error.details);
+    throw new ClaudeCliError('AUTH', '승인된 ChatGPT 또는 회사 관리형 계정으로 Codex CLI에 먼저 로그인해야 합니다.', error.details);
   }
   const authOutput = `${authResult.stdout}\n${authResult.stderr}`;
-  if (!isChatGptOAuthLoginStatus(authOutput)) {
+  const authMode = codexAuthMode();
+  const validAuth = authMode === 'managed'
+    ? managedOAuthLoginStatus(authOutput)
+    : isChatGptOAuthLoginStatus(authOutput);
+  if (!validAuth) {
     throw new ClaudeCliError(
       'AUTH',
-      'Codex CLI가 ChatGPT 계정 로그인 방식으로 연결되어 있지 않습니다.',
+      'Codex CLI가 허용된 OAuth/SSO 로그인 방식으로 연결되어 있지 않습니다.',
       `${authOutput.trim().slice(0, 1000) || '(로그인 상태 출력 없음)'}\nAPI key와 access token 로그인은 이 프로그램에서 사용하지 않습니다.`,
     );
   }
@@ -562,7 +597,14 @@ export async function preflightCodexCli(options = {}) {
   return {
     version: `${version.parts.join('.')}${version.prerelease}`,
     executablePath: versionResult.executablePath,
-    diagnostics: { warnings: [] },
+    diagnostics: {
+      warnings: authMode === 'managed'
+        ? ['회사 관리형 Codex OAuth/SSO 엔드포인트를 명시적으로 허용했습니다.']
+        : [],
+      authMethod: authMethodFromStatus(authOutput),
+      authMode,
+      disabledFeatures: [...runtimeDisabledFeatures],
+    },
   };
 }
 

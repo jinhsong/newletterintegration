@@ -314,6 +314,13 @@ function domainSection(domain, payload, domainIndex) {
     const highCount = items.filter((item) => item.importance === '상').length;
     const category = categoryState(result, unit.key, failure);
     const categoryInsight = result.categoryInsights?.[unit.key] || '';
+    const categoryAudit = result.categoryAudit?.[unit.key] || {};
+    const auditWarnings = Array.isArray(categoryAudit.warnings)
+      ? categoryAudit.warnings.map(String).filter(Boolean).slice(0, 5)
+      : [];
+    const coverageWarning = auditWarnings.length > 0
+      ? `<div class="category-insight"><b>검색 범위 주의</b><p>${escapeHtml(auditWarnings.join(' · '))}</p></div>`
+      : '';
     return `
       <section class="category" id="${categoryAnchorId(domain, unitIndex)}">
         <div class="category-heading">
@@ -321,6 +328,7 @@ function domainSection(domain, payload, domainIndex) {
           ${unit.description ? `<p class="category-description">${escapeHtml(unit.description)}</p>` : ''}
         </div>
         ${categoryInsight ? `<div class="category-insight"><b>카테고리 요약</b><p>${escapeHtml(categoryInsight)}</p></div>` : ''}
+        ${coverageWarning}
         ${items.length > 0
     ? `<div class="items">${items.map((item) => itemCard(item, { unit })).join('')}</div>`
     : emptyCategoryMessage(category)}
@@ -425,8 +433,17 @@ function researchNotice(payload) {
     ? `<span><b>기간 계산:</b> ${escapeHtml(lookbackLabel)}</span>`
     : '';
   const providerNote = `<span><b>호출 모델:</b> ${escapeHtml(providerLabel(payload))}</span>`;
+  const runtime = payload.runtime || {};
+  const runtimeNote = [
+    runtime.cliVersion ? `CLI ${runtime.cliVersion}` : '',
+    runtime.model ? `모델 ${runtime.model}` : '',
+    runtime.authMethod ? `인증 ${runtime.authMethod}` : '',
+  ].filter(Boolean).join(' · ');
+  const runtimeDetail = runtimeNote
+    ? `<span><b>실행 환경:</b> ${escapeHtml(runtimeNote)}</span>`
+    : '';
   const evidenceNote = payload.collection?.evidenceMode === 'reported-and-event-checked'
-    ? '<span><b>출처 검증 범위:</b> CLI 이벤트에서 검색어 실행을 확인하고, 모델이 검색별로 보고한 URL을 형식·도메인·응답 항목과 대조했습니다. 원 검색결과의 URL 목록은 이벤트에 포함되지 않으므로 원문을 직접 확인하세요.</span>'
+    ? '<span><b>출처 검증 범위:</b> CLI 이벤트에서 검색어 실행을 확인하고, 모델이 검색별로 보고한 URL을 형식·도메인·응답 항목과 대조했습니다. Gemini Grounding 리다이렉트 또는 동일 신뢰 도메인 일치는 낮은 수준의 보고 근거로 표시되므로 원문을 직접 확인하세요.</span>'
     : '';
   return `
     <aside class="research-notice" aria-label="AI 조사 결과 이용 주의">
@@ -435,6 +452,7 @@ function researchNotice(payload) {
       ${dateNote}
       ${lookbackNote}
       ${providerNote}
+      ${runtimeDetail}
       ${evidenceNote}
     </aside>`;
 }

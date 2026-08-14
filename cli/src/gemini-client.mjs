@@ -25,7 +25,7 @@ const FIXED_PROMPT = '위 표준 입력의 전체 지시를 수행하고 지정�
 const preparedWorkspaces = new Set();
 
 const RESEARCH_WORKSPACE_SETTINGS = `${JSON.stringify({
-  tools: { core: [RESEARCH_TOOL] },
+  tools: { core: [RESEARCH_TOOL], allowed: [RESEARCH_TOOL] },
   mcp: { allowed: [] },
   hooksConfig: { enabled: false },
   skills: { enabled: false },
@@ -251,7 +251,17 @@ export function parseGeminiStream(output, options = {}) {
         throw new ClaudeCliError('BAD_OUTPUT', '대응하는 검색 요청이 없는 Gemini tool_result가 있습니다.');
       }
       if (event.status === 'success' && !event.error) {
-        search.status = 'success';
+        const display = typeof event.output === 'string'
+          ? event.output
+          : (typeof event.output?.returnDisplay === 'string'
+            ? event.output.returnDisplay
+            : JSON.stringify(event.output || ''));
+        if (/^\s*(?:no information found\.?|no results? found\.?)\s*$/i.test(display)) {
+          search.status = 'failed';
+          warnings.push(`WebSearch 결과 없음: ${search.query}`);
+        } else {
+          search.status = 'success';
+        }
       } else if (event.status === 'error') {
         search.status = 'failed';
         warnings.push(`WebSearch 실패: ${event.error?.message || event.output || '상세 없음'}`);
@@ -290,6 +300,7 @@ export function parseGeminiStream(output, options = {}) {
 
   return {
     ...normalizedProviderEnvelope({
+      providerKey: 'gemini',
       providerLabel: PROVIDER_LABEL,
       response,
       searches: [...searches.values()],
@@ -372,6 +383,7 @@ export async function preflightGeminiCli(options = {}) {
     version: `${version.parts.join('.')}${version.prerelease}`,
     executablePath: result.executablePath,
     diagnostics: {
+      authMethod: '회사 Gemini 로그인(첫 조사에서 확인)',
       warnings: ['설치 버전만 확인했습니다. 회사 로그인과 Google Search 권한은 첫 조사 호출에서 확인합니다.'],
     },
   };

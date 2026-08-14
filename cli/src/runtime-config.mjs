@@ -17,6 +17,7 @@ export const LOCAL_ENV_KEYS = new Set([
   'GEMINI_CLI_TIMEOUT_MS',
   'GEMINI_RUN_TIMEOUT_MS',
   'CODEX_CLI_BIN',
+  'CODEX_CLI_AUTH_MODE',
   'CODEX_CLI_MODEL',
   'CODEX_CLI_PREFLIGHT_TIMEOUT_MS',
   'CODEX_CLI_RETRY_MAX',
@@ -94,6 +95,10 @@ export function validateRuntimeEnvironment(env = process.env, provider = 'all') 
     validateIntegerSetting(env, `${prefix}_CLI_RETRY_MAX`, 1, 3);
     validateIntegerSetting(env, `${prefix}_CLI_TIMEOUT_MS`, 1, 1800000);
     validateIntegerSetting(env, `${prefix}_RUN_TIMEOUT_MS`, 1, 14400000);
+  }
+  if ((normalizedProvider === 'all' || normalizedProvider === 'chatgpt')
+    && !['', 'chatgpt', 'managed'].includes(String(env.CODEX_CLI_AUTH_MODE || '').trim().toLowerCase())) {
+    throw new Error('CODEX_CLI_AUTH_MODE는 chatgpt 또는 managed여야 합니다.');
   }
   if (validateClaude && String(env.CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN || '').trim()
     && !['0', '1'].includes(String(env.CLAUDE_CLI_REQUIRE_ABSOLUTE_BIN).trim())) {

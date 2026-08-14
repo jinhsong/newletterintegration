@@ -25,6 +25,7 @@ const SPECIAL_BUILTIN_TOOL = 'EndConversation';
 const WINDOWS_SYSTEM_EXECUTABLES = new Set(['cmd.exe', 'explorer.exe', 'taskkill.exe']);
 const ALLOWED_STREAM_EVENT_TYPES = new Set([
   'assistant',
+  'auth_status',
   'rate_limit_event',
   'result',
   'system',
@@ -33,8 +34,12 @@ const ALLOWED_STREAM_EVENT_TYPES = new Set([
 ]);
 const ALLOWED_SYSTEM_EVENT_SUBTYPES = new Set([
   'api_retry',
+  'auth_status',
   'compact_boundary',
+  'informational',
   'init',
+  'notification',
+  'session_state_changed',
   'status',
   'thinking_tokens',
 ]);
@@ -45,7 +50,14 @@ const ALLOWED_COMPACT_BOUNDARY_FIELDS = new Set([
   'type',
   'uuid',
 ]);
-const ALLOWED_COMPACT_METADATA_FIELDS = new Set(['pre_tokens', 'trigger']);
+const ALLOWED_COMPACT_METADATA_FIELDS = new Set([
+  'duration_ms',
+  'post_tokens',
+  'pre_tokens',
+  'preserved_messages',
+  'preserved_segment',
+  'trigger',
+]);
 const ALLOWED_COMPACT_TRIGGERS = new Set(['auto', 'manual']);
 const ALLOWED_STATUS_EVENT_FIELDS = new Set([
   'permissionMode',
@@ -55,7 +67,13 @@ const ALLOWED_STATUS_EVENT_FIELDS = new Set([
   'type',
   'uuid',
 ]);
-const ALLOWED_STATUS_VALUES = new Set(['compacting', null]);
+const ALLOWED_STATUS_VALUES = new Set([
+  'compact_error',
+  'compact_result',
+  'compacting',
+  'requesting',
+  null,
+]);
 const ALLOWED_THINKING_TOKENS_EVENT_FIELDS = new Set([
   'estimated_tokens',
   'estimated_tokens_delta',
@@ -124,21 +142,6 @@ const SUCCESS_RESULT_TIMING_FIELDS = [
   'ttft_ms',
   'ttft_stream_ms',
 ];
-const ALLOWED_TERMINAL_REASONS = new Set([
-  'aborted_streaming',
-  'aborted_tools',
-  'blocking_limit',
-  'completed',
-  'hook_stopped',
-  'image_error',
-  'max_turns',
-  'model_error',
-  'prompt_too_long',
-  'rapid_refill_breaker',
-  'stop_hook_prevented',
-  'tool_deferred',
-]);
-const ALLOWED_RATE_LIMIT_STATUSES = new Set(['allowed', 'allowed_warning', 'rejected']);
 const ALLOWED_RATE_LIMIT_EVENT_FIELDS = new Set([
   'rate_limit_info',
   'session_id',
@@ -159,29 +162,6 @@ const ALLOWED_RATE_LIMIT_INFO_FIELDS = new Set([
   'status',
   'surpassedThreshold',
   'utilization',
-]);
-const ALLOWED_RATE_LIMIT_TYPES = new Set([
-  'five_hour',
-  'overage',
-  'seven_day',
-  'seven_day_opus',
-  'seven_day_overage_included',
-  'seven_day_sonnet',
-]);
-const ALLOWED_OVERAGE_DISABLED_REASONS = new Set([
-  'fetch_error',
-  'group_zero_credit_limit',
-  'member_level_disabled',
-  'member_zero_credit_limit',
-  'no_limits_configured',
-  'org_level_disabled',
-  'org_level_disabled_until',
-  'org_service_level_disabled',
-  'out_of_credits',
-  'overage_not_provisioned',
-  'seat_tier_level_disabled',
-  'seat_tier_zero_credit_limit',
-  'unknown',
 ]);
 const ALLOWED_ASSISTANT_CONTENT_BLOCK_TYPES = new Set([
   'redacted_thinking',
@@ -1572,7 +1552,8 @@ function validateResultEventMetadata(event) {
   }
   if (
     event.terminal_reason !== undefined
-    && !ALLOWED_TERMINAL_REASONS.has(event.terminal_reason)
+    && event.terminal_reason !== null
+    && typeof event.terminal_reason !== 'string'
   ) {
     throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result의 terminal_reason 형식이 올바르지 않습니다.');
   }
@@ -1620,14 +1601,10 @@ function validateResultEventMetadata(event) {
 }
 
 function validateRateLimitEvent(event) {
-  const unknownFields = Object.keys(event)
-    .filter((field) => !ALLOWED_RATE_LIMIT_EVENT_FIELDS.has(field));
-  if (unknownFields.length > 0) {
-    throw streamError(
-      'SECURITY_POLICY',
-      'Claude CLI rate_limit_event에 허용 목록 밖 필드가 있습니다.',
-      unknownFields.join(', '),
-    );
+  const suspiciousFields = Object.keys(event)
+    .filter((field) => !ALLOWED_RATE_LIMIT_EVENT_FIELDS.has(field) && isSuspiciousRuntimeFamily(field));
+  if (suspiciousFields.length > 0) {
+    throw streamError('SECURITY_POLICY', 'Claude CLI rate_limit_event에 실행·저장 계열 필드가 있습니다.', suspiciousFields.join(', '));
   }
   if (typeof event.uuid !== 'string' || !event.uuid.trim()
     || typeof event.session_id !== 'string' || !event.session_id.trim()) {
@@ -1637,43 +1614,15 @@ function validateRateLimitEvent(event) {
   if (!info || typeof info !== 'object' || Array.isArray(info)) {
     throw streamError('BAD_OUTPUT', 'Claude CLI rate_limit_info 형식이 올바르지 않습니다.');
   }
-  const unknownInfoFields = Object.keys(info)
-    .filter((field) => !ALLOWED_RATE_LIMIT_INFO_FIELDS.has(field));
-  if (unknownInfoFields.length > 0 || !ALLOWED_RATE_LIMIT_STATUSES.has(info.status)) {
-    throw streamError(
-      'BAD_OUTPUT',
-      'Claude CLI rate_limit_info에 알 수 없는 필드 또는 상태가 있습니다.',
-      [...unknownInfoFields, String(info.status || '(상태 없음)')].join(', '),
-    );
+  const suspiciousInfoFields = Object.keys(info)
+    .filter((field) => !ALLOWED_RATE_LIMIT_INFO_FIELDS.has(field) && isSuspiciousRuntimeFamily(field));
+  if (suspiciousInfoFields.length > 0) {
+    throw streamError('SECURITY_POLICY', 'Claude CLI rate_limit_info에 실행·저장 계열 필드가 있습니다.', suspiciousInfoFields.join(', '));
   }
-  if (info.rateLimitType !== undefined && !ALLOWED_RATE_LIMIT_TYPES.has(info.rateLimitType)) {
-    throw streamError(
-      'BAD_OUTPUT',
-      'Claude CLI rate_limit_info.rateLimitType 값이 올바르지 않습니다.',
-      String(info.rateLimitType),
-    );
-  }
-  if (info.overageStatus !== undefined && !ALLOWED_RATE_LIMIT_STATUSES.has(info.overageStatus)) {
-    throw streamError(
-      'BAD_OUTPUT',
-      'Claude CLI rate_limit_info.overageStatus 값이 올바르지 않습니다.',
-      String(info.overageStatus),
-    );
-  }
-  if (info.overageDisabledReason !== undefined
-    && !ALLOWED_OVERAGE_DISABLED_REASONS.has(info.overageDisabledReason)) {
-    throw streamError(
-      'BAD_OUTPUT',
-      'Claude CLI rate_limit_info.overageDisabledReason 값이 올바르지 않습니다.',
-      String(info.overageDisabledReason),
-    );
-  }
-  if (info.errorCode !== undefined && info.errorCode !== 'credits_required') {
-    throw streamError(
-      'BAD_OUTPUT',
-      'Claude CLI rate_limit_info.errorCode 값이 올바르지 않습니다.',
-      String(info.errorCode),
-    );
+  for (const field of ['status', 'rateLimitType', 'overageStatus', 'overageDisabledReason', 'errorCode']) {
+    if (info[field] !== undefined && info[field] !== null && typeof info[field] !== 'string') {
+      throw streamError('BAD_OUTPUT', `Claude CLI rate_limit_info.${field} 형식이 올바르지 않습니다.`);
+    }
   }
   for (const field of ['resetsAt', 'overageResetsAt', 'surpassedThreshold', 'utilization']) {
     if (info[field] !== undefined && (!Number.isFinite(info[field]) || info[field] < 0)) {
@@ -1693,13 +1642,10 @@ function validateRateLimitEvent(event) {
 }
 
 function requireExactEventFields(event, allowedFields, label) {
-  const unknownFields = Object.keys(event).filter((field) => !allowedFields.has(field));
-  if (unknownFields.length > 0) {
-    throw streamError(
-      'SECURITY_POLICY',
-      `Claude CLI ${label}에 허용 목록 밖 필드가 있습니다.`,
-      unknownFields.join(', '),
-    );
+  const suspiciousFields = Object.keys(event)
+    .filter((field) => !allowedFields.has(field) && isSuspiciousRuntimeFamily(field));
+  if (suspiciousFields.length > 0) {
+    throw streamError('SECURITY_POLICY', `Claude CLI ${label}에 실행·저장 계열 필드가 있습니다.`, suspiciousFields.join(', '));
   }
   if (typeof event.uuid !== 'string' || !event.uuid.trim()
     || typeof event.session_id !== 'string' || !event.session_id.trim()) {
@@ -1713,29 +1659,40 @@ function validateCompactBoundaryEvent(event) {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
     throw streamError('BAD_OUTPUT', 'Claude CLI compact_metadata 형식이 올바르지 않습니다.');
   }
-  const unknownFields = Object.keys(metadata)
-    .filter((field) => !ALLOWED_COMPACT_METADATA_FIELDS.has(field));
-  if (unknownFields.length > 0
-    || !ALLOWED_COMPACT_TRIGGERS.has(metadata.trigger)
+  const suspiciousFields = Object.keys(metadata)
+    .filter((field) => !ALLOWED_COMPACT_METADATA_FIELDS.has(field) && isSuspiciousRuntimeFamily(field));
+  if (suspiciousFields.length > 0) {
+    throw streamError('SECURITY_POLICY', 'Claude CLI compact_metadata에 실행·저장 계열 필드가 있습니다.', suspiciousFields.join(', '));
+  }
+  if (!ALLOWED_COMPACT_TRIGGERS.has(metadata.trigger)
     || !Number.isSafeInteger(metadata.pre_tokens)
     || metadata.pre_tokens < 0) {
     throw streamError(
       'BAD_OUTPUT',
       'Claude CLI compact_metadata에 알 수 없는 필드 또는 값이 있습니다.',
-      [...unknownFields, String(metadata.trigger || '(trigger 없음)'), String(metadata.pre_tokens)]
+      [String(metadata.trigger || '(trigger 없음)'), String(metadata.pre_tokens)]
         .join(', '),
     );
+  }
+  for (const field of ['post_tokens', 'duration_ms', 'preserved_messages']) {
+    if (metadata[field] !== undefined
+      && (!Number.isSafeInteger(metadata[field]) || metadata[field] < 0)) {
+      throw streamError('BAD_OUTPUT', `Claude CLI compact_metadata.${field} 형식이 올바르지 않습니다.`);
+    }
   }
 }
 
 function validateStatusEvent(event) {
   requireExactEventFields(event, ALLOWED_STATUS_EVENT_FIELDS, 'status 이벤트');
-  if (!ALLOWED_STATUS_VALUES.has(event.status)) {
+  if (event.status !== undefined && event.status !== null && typeof event.status !== 'string') {
     throw streamError(
       'BAD_OUTPUT',
       'Claude CLI status 이벤트에 알 수 없는 상태가 있습니다.',
       String(event.status ?? '(상태 없음)'),
     );
+  }
+  if (!ALLOWED_STATUS_VALUES.has(event.status) && isSuspiciousRuntimeFamily(event.status)) {
+    throw streamError('SECURITY_POLICY', 'Claude CLI status 이벤트에 백그라운드·실행 계열 상태가 있습니다.', String(event.status));
   }
   if (event.permissionMode !== undefined
     && !['dontAsk', 'default'].includes(event.permissionMode)) {
@@ -1772,11 +1729,28 @@ function validateKnownStreamEvent(event) {
   }
   if (event.type === 'system') {
     if (!ALLOWED_SYSTEM_EVENT_SUBTYPES.has(event.subtype)) {
-      throw streamError(
-        'SECURITY_POLICY',
-        '허용 목록에 없는 Claude CLI system subtype이 감지되었습니다.',
-        String(event.subtype || '(없음)'),
-      );
+      if (isSuspiciousRuntimeFamily(event.subtype)) {
+        throw streamError(
+          'SECURITY_POLICY',
+          '알려지지 않은 Claude 도구·파일·저장·백그라운드 system subtype이 감지되었습니다.',
+          String(event.subtype || '(없음)'),
+        );
+      }
+      if (event.permissionMode !== undefined
+        && !['dontAsk', 'default'].includes(event.permissionMode)) {
+        throw streamError(
+          'SECURITY_POLICY',
+          'Claude CLI system 이벤트에서 허용되지 않은 권한 모드가 감지되었습니다.',
+          String(event.permissionMode),
+        );
+      }
+      const suspiciousFields = Object.keys(event)
+        .filter((field) => !['type', 'subtype', 'session_id', 'uuid', 'permissionMode'].includes(field)
+          && isSuspiciousRuntimeFamily(field));
+      if (suspiciousFields.length > 0) {
+        throw streamError('SECURITY_POLICY', 'Claude CLI 수동 system 이벤트에 실행·저장 계열 필드가 있습니다.', suspiciousFields.join(', '));
+      }
+      return;
     }
     if (event.subtype === 'compact_boundary') validateCompactBoundaryEvent(event);
     if (event.subtype === 'status') validateStatusEvent(event);
@@ -1784,27 +1758,36 @@ function validateKnownStreamEvent(event) {
     return;
   }
   if (event.type === 'result') {
-    if (!ALLOWED_RESULT_EVENT_SUBTYPES.has(event.subtype)) {
-      throw streamError(
-        'SECURITY_POLICY',
-        '허용 목록에 없는 Claude CLI result subtype이 감지되었습니다.',
-        String(event.subtype || '(없음)'),
-      );
+    if (typeof event.subtype !== 'string' || !event.subtype.trim()) {
+      throw streamError('BAD_OUTPUT', 'Claude CLI result subtype 형식이 올바르지 않습니다.');
     }
-    const unknownFields = Object.keys(event)
-      .filter((field) => !ALLOWED_RESULT_EVENT_FIELDS.has(field));
-    if (unknownFields.length > 0) {
-      throw streamError(
-        'SECURITY_POLICY',
-        'Claude CLI 최종 result에 허용 목록 밖 필드가 감지되어 결과를 폐기했습니다.',
-        unknownFields.join(', '),
-      );
+    const suspiciousFields = Object.keys(event)
+      .filter((field) => !ALLOWED_RESULT_EVENT_FIELDS.has(field) && isSuspiciousRuntimeFamily(field));
+    if (suspiciousFields.length > 0) {
+      throw streamError('SECURITY_POLICY', 'Claude CLI 최종 result에 실행·저장 계열 필드가 감지되었습니다.', suspiciousFields.join(', '));
     }
     validateResultEventMetadata(event);
     return;
   }
   if (event.type === 'rate_limit_event') {
     validateRateLimitEvent(event);
+    return;
+  }
+  if (event.type === 'auth_status') {
+    if (event.permissionMode !== undefined
+      && !['dontAsk', 'default'].includes(event.permissionMode)) {
+      throw streamError(
+        'SECURITY_POLICY',
+        'Claude CLI 인증 상태 이벤트에서 허용되지 않은 권한 모드가 감지되었습니다.',
+        String(event.permissionMode),
+      );
+    }
+    const suspiciousFields = Object.keys(event)
+      .filter((field) => !['type', 'subtype', 'session_id', 'uuid', 'permissionMode', 'status', 'message'].includes(field)
+        && isSuspiciousRuntimeFamily(field));
+    if (suspiciousFields.length > 0) {
+      throw streamError('SECURITY_POLICY', 'Claude CLI 인증 상태 이벤트에 실행·저장 계열 필드가 있습니다.', suspiciousFields.join(', '));
+    }
     return;
   }
   if (Object.prototype.hasOwnProperty.call(event, 'subtype')) {
@@ -2033,11 +2016,12 @@ function isUnexpectedToolBlock(block) {
 
 function isSuspiciousRuntimeFamily(value) {
   const normalized = String(value || '').replace(/([a-z0-9])([A-Z])/g, '$1_$2');
-  return /(?:^|[\s_-])(?:tools?|files?|persist(?:ed|ence|ent|ing)?|background|tasks?|memory|agent|shell|command|write|edit|hook|plugin|mcp|skill)(?:[\s_-]|$)/i
+  return /(?:^|[\s_-])(?:tools?|files?|persist(?:ed|ence|ent|ing)?|background(?:ed|ing)?|tasks?|memory|agent|shell|command|write|edit|hook|plugin|mcp|skill)(?:[\s_-]|$)/i
     .test(normalized);
 }
 
 function classifyResultFailure(event) {
+  if (!ALLOWED_RESULT_EVENT_SUBTYPES.has(event.subtype)) return 'BAD_OUTPUT';
   if (event.subtype === 'error_max_turns') return 'TURN_LIMIT';
   if (event.subtype === 'error_max_budget_usd') return 'BUDGET_LIMIT';
   const errors = Array.isArray(event.errors) ? event.errors.map(String) : [];
@@ -2152,6 +2136,22 @@ export function parseClaudeStream(output, options = {}) {
       );
     }
     validateKnownStreamEvent(event);
+    if (event.type === 'system' && !ALLOWED_SYSTEM_EVENT_SUBTYPES.has(event.subtype)) {
+      warnings.push(`Claude CLI 수동 시스템 알림을 무시했습니다: ${String(event.subtype || '(없음)')}`);
+    }
+    if (event.type === 'result') {
+      const passiveFields = Object.keys(event).filter((field) => !ALLOWED_RESULT_EVENT_FIELDS.has(field));
+      if (passiveFields.length > 0) {
+        warnings.push(`Claude CLI의 새 result 진단 필드를 보존하지 않았습니다: ${passiveFields.join(', ')}`);
+      }
+    }
+    if (event.type === 'rate_limit_event') {
+      const passiveFields = Object.keys(event.rate_limit_info || {})
+        .filter((field) => !ALLOWED_RATE_LIMIT_INFO_FIELDS.has(field));
+      if (passiveFields.length > 0) {
+        warnings.push(`Claude CLI의 새 사용량 진단 필드를 보존하지 않았습니다: ${passiveFields.join(', ')}`);
+      }
+    }
     if (finalResult) {
       throw streamError('BAD_OUTPUT', 'Claude CLI 최종 result 뒤에 추가 이벤트가 있습니다.');
     }
@@ -2481,6 +2481,10 @@ export function parseClaudeStream(output, options = {}) {
     groundingUrls,
     groundingSearches,
     sessionId: streamSessionId,
+    model: typeof init.model === 'string' ? init.model : '',
+    authSource: typeof init.apiKeySource === 'string'
+      ? init.apiKeySource
+      : (typeof init.api_key_source === 'string' ? init.api_key_source : ''),
   };
 }
 
@@ -2540,6 +2544,30 @@ export async function preflightClaudeCli(options = {}) {
     );
   }
   const inheritedSensitiveEnvironmentNames = sensitiveEnvironmentVariableNames(enterpriseEnvironment());
+  const authResult = await executeCli(['auth', 'status'], {
+    cwd,
+    signal: options.signal,
+    timeoutMs: timeout,
+    timeoutCode: 'CLI_STARTUP_TIMEOUT',
+    timeoutMessage: 'Claude CLI 인증 상태 확인이 제한 시간 안에 끝나지 않았습니다.',
+  });
+  await verifyResearchWorkspace(cwd);
+  let authMethod = '';
+  const authWarnings = [];
+  if (authResult.exitCode === 0 && !authResult.signalCode) {
+    const authOutput = String(authResult.stdout || '').trim();
+    try {
+      const auth = JSON.parse(authOutput);
+      const candidate = auth?.authMethod || auth?.apiProvider || auth?.loginMethod || auth?.subscriptionType;
+      authMethod = typeof candidate === 'string' && candidate.trim()
+        ? candidate.trim().slice(0, 120)
+        : 'Authenticated';
+    } catch {
+      authMethod = authOutput ? 'Authenticated' : '';
+    }
+  } else {
+    authWarnings.push('회사 관리형 인증에서는 `claude auth status` 확인이 지원되지 않을 수 있습니다. 실제 조사 호출에서 인증을 다시 확인합니다.');
+  }
   return {
     version: versionText,
     minimumVersion: MINIMUM_CLI_VERSION.join('.'),
@@ -2547,9 +2575,13 @@ export async function preflightClaudeCli(options = {}) {
     diagnostics: {
       inheritedSensitiveEnvironmentNames,
       executableVerification: result.executableVerification,
-      warnings: inheritedSensitiveEnvironmentNames.length > 0
+      authMethod,
+      warnings: [
+        ...(inheritedSensitiveEnvironmentNames.length > 0
         ? ['Claude CLI에 인증·라우팅 관련 환경변수가 상속됩니다. 진단에는 이름만 표시하며 값은 표시하지 않습니다.']
-        : [],
+        : []),
+        ...authWarnings,
+      ],
     },
   };
 }

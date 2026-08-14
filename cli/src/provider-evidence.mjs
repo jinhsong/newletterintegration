@@ -45,6 +45,17 @@ function publicHttpsUrl(value) {
   return url.href;
 }
 
+function isGeminiGroundingRedirect(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:'
+      && url.hostname.toLowerCase() === 'vertexaisearch.cloud.google.com'
+      && url.pathname.startsWith('/grounding-api-redirect/');
+  } catch {
+    return false;
+  }
+}
+
 function normalizedReportedEvidence(response, providerLabel) {
   let parsed;
   try {
@@ -57,56 +68,46 @@ function normalizedReportedEvidence(response, providerLabel) {
     );
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new ClaudeCliError('BAD_OUTPUT', `${providerLabel}의 최종 응답이 JSON 객체가 아닙니다.`);
+    throw new ClaudeCliError('BAD_OUTPUT', `${providerLabel}의 최종 응답은 JSON 객체여야 합니다.`);
   }
-  const evidence = parsed._searchEvidence;
-  if (!Array.isArray(evidence)) {
+  if (!Array.isArray(parsed._searchEvidence)) {
     throw new ClaudeCliError(
       'BAD_OUTPUT',
       `${providerLabel} 응답에 검색별 출처 근거(_searchEvidence)가 없습니다.`,
     );
   }
-  const normalized = evidence.map((entry, index) => {
+
+  const warnings = [];
+  const evidence = [];
+  for (let index = 0; index < parsed._searchEvidence.length; index += 1) {
+    const entry = parsed._searchEvidence[index];
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      throw new ClaudeCliError('BAD_OUTPUT', `_searchEvidence ${index + 1}번째 항목 형식이 올바르지 않습니다.`);
-    }
-    const unknownFields = Object.keys(entry).filter((key) => !['query', 'mode', 'urls'].includes(key));
-    if (unknownFields.length > 0) {
-      throw new ClaudeCliError(
-        'BAD_OUTPUT',
-        `_searchEvidence ${index + 1}번째 항목에 알 수 없는 필드가 있습니다.`,
-        unknownFields.join(', '),
-      );
+      warnings.push(`_searchEvidence ${index + 1}번 항목의 형식이 잘못되어 제외했습니다.`);
+      continue;
     }
     const query = typeof entry.query === 'string' ? entry.query.trim() : '';
-    const mode = entry.mode === 'official' || entry.mode === 'broad' ? entry.mode : '';
-    if (!query || !mode || !Array.isArray(entry.urls)
-      || entry.urls.length < 1 || entry.urls.length > MAX_EVIDENCE_URLS_PER_SEARCH) {
-      throw new ClaudeCliError(
-        'BAD_OUTPUT',
-        `_searchEvidence ${index + 1}번째 항목의 query·mode·urls가 완전하지 않습니다.`,
-      );
+    if (!query || !Array.isArray(entry.urls) || entry.urls.length > MAX_EVIDENCE_URLS_PER_SEARCH) {
+      warnings.push(`_searchEvidence ${index + 1}번 항목의 query 또는 urls가 올바르지 않아 제외했습니다.`);
+      continue;
     }
     const urls = [...new Set(entry.urls.map(publicHttpsUrl).filter(Boolean))];
-    if (urls.length !== entry.urls.length) {
-      throw new ClaudeCliError(
-        'BAD_OUTPUT',
-        `_searchEvidence ${index + 1}번째 항목에 중복되거나 안전하지 않은 URL이 있습니다.`,
-      );
+    if (urls.length < entry.urls.length) {
+      warnings.push(`_searchEvidence ${index + 1}번 항목의 중복·비공개·잘못된 URL을 제외했습니다.`);
     }
-    return {
+    evidence.push({
       query,
       fingerprint: searchQueryFingerprint(query),
-      mode,
+      mode: entry.mode === 'official' || entry.mode === 'broad' ? entry.mode : '',
       urls,
-    };
-  });
+    });
+  }
   const cleaned = { ...parsed };
   delete cleaned._searchEvidence;
-  return { evidence: normalized, response: JSON.stringify(cleaned) };
+  return { evidence, response: JSON.stringify(cleaned), warnings };
 }
 
 export function normalizedProviderEnvelope({
+  providerKey = '',
   providerLabel,
   response,
   searches,
@@ -115,50 +116,65 @@ export function normalizedProviderEnvelope({
 }) {
   const successful = searches.filter((search) => search.status === 'success');
   const failed = searches.filter((search) => search.status === 'failed');
-  const { evidence, response: cleanedResponse } = normalizedReportedEvidence(response, providerLabel);
-  if (evidence.length !== successful.length) {
-    throw new ClaudeCliError(
-      'SEARCH_INCOMPLETE',
-      `${providerLabel}의 성공 검색 수와 보고된 검색별 출처 근거 수가 일치하지 않습니다.`,
-      `성공 검색 ${successful.length}회, 출처 근거 ${evidence.length}개`,
-    );
+  const normalized = normalizedReportedEvidence(response, providerLabel);
+  const allWarnings = [...warnings, ...normalized.warnings];
+  const actualByFingerprint = new Map();
+  for (const search of successful) {
+    const fingerprint = searchQueryFingerprint(search.query);
+    if (!fingerprint || actualByFingerprint.has(fingerprint)) {
+      throw new ClaudeCliError(
+        'SEARCH_INCOMPLETE',
+        `${providerLabel}가 동일하거나 빈 검색어를 성공 검색으로 보고했습니다.`,
+        search.query,
+      );
+    }
+    actualByFingerprint.set(fingerprint, search);
   }
 
   const reportedByFingerprint = new Map();
-  for (const entry of evidence) {
-    if (!entry.fingerprint || reportedByFingerprint.has(entry.fingerprint)) {
+  for (const entry of normalized.evidence) {
+    const actual = actualByFingerprint.get(entry.fingerprint);
+    if (!entry.fingerprint || !actual) {
       throw new ClaudeCliError(
         'SEARCH_INCOMPLETE',
-        `${providerLabel}의 검색별 출처 근거에 빈 검색어 또는 의미상 중복 검색어가 있습니다.`,
+        `${providerLabel} 응답에 실제로 실행하지 않은 검색어의 근거가 포함되었습니다.`,
+        entry.query,
       );
     }
-    reportedByFingerprint.set(entry.fingerprint, entry);
+    const existing = reportedByFingerprint.get(entry.fingerprint);
+    if (existing) {
+      existing.urls = [...new Set([...existing.urls, ...entry.urls])];
+      allWarnings.push(`중복된 검색 근거를 하나로 합쳤습니다: ${entry.query}`);
+    } else {
+      reportedByFingerprint.set(entry.fingerprint, { ...entry });
+    }
   }
 
-  const groundingSearches = successful.map((search) => {
+  const groundingSearches = [];
+  for (const search of successful) {
     const fingerprint = searchQueryFingerprint(search.query);
     const reported = reportedByFingerprint.get(fingerprint);
-    if (!reported || reported.mode !== search.mode) {
-      throw new ClaudeCliError(
-        'SEARCH_INCOMPLETE',
-        `${providerLabel}의 실제 검색 query와 최종 검색별 출처 근거가 일치하지 않습니다.`,
-        search.query,
-      );
+    if (!reported || reported.urls.length === 0) {
+      allWarnings.push(`검색은 성공했지만 확인 가능한 출처 URL이 없어 근거 검색에서 제외했습니다: ${search.query}`);
+      continue;
     }
-    reportedByFingerprint.delete(fingerprint);
+    if (reported.mode && reported.mode !== search.mode) {
+      allWarnings.push(`모델이 보고한 검색 유형(${reported.mode}) 대신 실제 검색 유형(${search.mode})을 적용했습니다: ${search.query}`);
+    }
     const officialUrls = search.mode === 'official'
-      ? reported.urls.filter((url) => (
-        isTrustedOfficialDomain(new URL(url).hostname, search.allowedDomains)
-      ))
+      ? reported.urls.filter((url) => isTrustedOfficialDomain(new URL(url).hostname, search.allowedDomains))
       : [];
-    if (search.mode === 'official' && officialUrls.length === 0) {
-      throw new ClaudeCliError(
-        'BAD_OUTPUT',
-        `${providerLabel}의 공식기관 검색 근거에 허용 도메인의 원문 URL이 없습니다.`,
-        search.query,
-      );
+    const officialRedirectUrls = search.mode === 'official' && providerKey === 'gemini'
+      ? reported.urls.filter(isGeminiGroundingRedirect)
+      : [];
+    if (search.mode === 'official' && officialUrls.length === 0 && officialRedirectUrls.length === 0) {
+      allWarnings.push(`공식기관 검색에 신뢰 도메인 원문 또는 Gemini Grounding 링크가 없어 근거 검색에서 제외했습니다: ${search.query}`);
+      continue;
     }
-    return {
+    if (officialRedirectUrls.length > 0 && officialUrls.length === 0) {
+      allWarnings.push(`Gemini Grounding 리다이렉트 링크로 공식 검색 근거를 확인했습니다. 원문 URL보다 검증 수준이 낮습니다: ${search.query}`);
+    }
+    groundingSearches.push({
       toolUseId: search.toolUseId,
       query: search.query,
       mode: search.mode,
@@ -166,38 +182,35 @@ export function normalizedProviderEnvelope({
       blockedDomains: [],
       urls: [...reported.urls],
       officialUrls,
-    };
-  });
-  if (reportedByFingerprint.size > 0) {
-    throw new ClaudeCliError(
-      'SEARCH_INCOMPLETE',
-      `${providerLabel} 응답에 실제 실행되지 않은 검색 query의 근거가 포함되었습니다.`,
-    );
+      officialRedirectUrls,
+      evidenceMatch: officialRedirectUrls.length > 0 && officialUrls.length === 0
+        ? 'gemini-grounding-redirect'
+        : 'reported-url',
+    });
   }
 
   const groundingUrls = [...new Set(groundingSearches.flatMap((search) => search.urls))];
-  const official = successful.filter((search) => search.mode === 'official').length;
-  const broad = successful.filter((search) => search.mode === 'broad').length;
+  const official = groundingSearches.filter((search) => search.mode === 'official').length;
+  const broad = groundingSearches.filter((search) => search.mode === 'broad').length;
+  const unbackedCount = successful.length - groundingSearches.length;
   return {
-    response: cleanedResponse,
-    // Gemini/Codex JSONL은 검색 query 실행은 보여 주지만 검색결과 원문 URL 목록은
-    // 제공하지 않는다. 아래 URL은 모델이 최종 응답에서 보고한 값임을 보존한다.
+    response: normalized.response,
     evidenceKind: 'reported',
     stats,
-    warnings,
+    warnings: [...new Set(allWarnings.filter(Boolean))],
     toolEvidence: {
       available: true,
       totalCalls: searches.length,
-      totalSuccess: successful.length,
-      totalFail: failed.length,
+      totalSuccess: groundingSearches.length,
+      totalFail: failed.length + unbackedCount,
       byName: {
         WebSearch: {
           count: searches.length,
-          success: successful.length,
-          fail: failed.length,
+          success: groundingSearches.length,
+          fail: failed.length + unbackedCount,
           official,
           broad,
-          queries: successful.map((search) => ({
+          queries: groundingSearches.map((search) => ({
             query: search.query,
             mode: search.mode,
             allowedDomains: [...search.allowedDomains],
@@ -220,7 +233,7 @@ export function classifySiteFilteredQuery(query, officialDomainAllowlist) {
   if (uniqueDomains.some((hostname) => !isTrustedOfficialDomain(hostname, officialDomainAllowlist))) {
     throw new ClaudeCliError(
       'SEARCH_INCOMPLETE',
-      '공식기관 검색 query에 신뢰 목록 밖 site: 도메인이 포함되었습니다.',
+      '공식기관 검색어에 허용 목록 밖 site: 도메인이 포함되었습니다.',
       uniqueDomains.join(', '),
     );
   }

@@ -463,12 +463,10 @@ test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', ()
     }),
     (error) => error.code === 'BAD_OUTPUT' && /검색 근거 유형/.test(error.message),
   );
-  assert.throws(
-    () => validateResearchEnvelope(searchedEnvelope('{}', {
-      warnings: ['quota 429 rate limit reached'],
-    })),
-    (error) => error.code === 'SEARCH_WARNING',
-  );
+  const quotaWarning = validateResearchEnvelope(searchedEnvelope('{}', {
+    warnings: ['quota 429 rate limit reached'],
+  }));
+  assert.deepEqual(quotaWarning.warnings, ['quota 429 rate limit reached']);
 
   const deep = validateResearchEnvelope(
     searchedEnvelope('{}'),
@@ -643,8 +641,7 @@ test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', ()
     (error) => error.code === 'SEARCH_INCOMPLETE' && /서로 다른 query 5개/.test(error.details),
   );
 
-  assert.throws(
-    () => validateResearchEnvelope(
+  const missingCanadaAudit = validateResearchEnvelope(
       searchedEnvelope('{}', {
         includeGroundingSearches: true,
         queries: [
@@ -667,9 +664,9 @@ test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', ()
         officialDomainAllowlist: ['agency.gov'],
         coverageTargets: resolveCategorySelector('customs:북미').coverageTargets,
       },
-    ),
-    (error) => error.code === 'SEARCH_INCOMPLETE' && /캐나다/.test(error.details),
   );
+  assert.deepEqual(missingCanadaAudit.missingCoverageTargets, ['캐나다']);
+  assert.match(missingCanadaAudit.warnings.join('\n'), /캐나다/);
 
   const filteredBroadAudit = validateResearchEnvelope(
     searchedEnvelope('{}', {
@@ -760,10 +757,10 @@ test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', ()
     () => validateResearchEnvelope(searchedEnvelope('{}', { search: { success: 1, fail: -1 } })),
     (error) => error.code === 'SEARCH_FAILED',
   );
-  assert.throws(
-    () => validateResearchEnvelope(searchedEnvelope('{}', { warnings: ['web search tool blocked by policy'] })),
-    (error) => error.code === 'SEARCH_WARNING',
+  const policyWarning = validateResearchEnvelope(
+    searchedEnvelope('{}', { warnings: ['web search tool blocked by policy'] }),
   );
+  assert.deepEqual(policyWarning.warnings, ['web search tool blocked by policy']);
 });
 
 test('하위 대상은 실제 공식 URL이 있는 공식 검색에 분산되고 영문 약칭도 정확히 인식한다', () => {
@@ -798,15 +795,14 @@ test('하위 대상은 실제 공식 URL이 있는 공식 검색에 분산되고
   const broadOnlyCanada = validQueries.map((entry, index) => (
     index === 1 ? { ...entry, query: 'official customs guidance' } : entry
   ));
-  assert.throws(
-    () => validateResearchEnvelope(
+  const incompleteCoverage = validateResearchEnvelope(
       searchedEnvelope('{}', { includeGroundingSearches: true, queries: broadOnlyCanada }),
       '북미 조사',
       6,
       validationOptions,
-    ),
-    (error) => error.code === 'SEARCH_INCOMPLETE' && /캐나다/.test(error.details),
   );
+  assert.deepEqual(incompleteCoverage.missingCoverageTargets, ['캐나다']);
+  assert.match(incompleteCoverage.warnings.join('\n'), /캐나다/);
 
   const latinAmerica = resolveCategorySelector('customs:중남미');
   const overloadedQueries = [
@@ -818,8 +814,7 @@ test('하위 대상은 실제 공식 URL이 있는 공식 검색에 분산되고
     { query: 'regional customs industry news', allowedDomains: [] },
     { query: 'electronics supply chain impact', allowedDomains: [] },
   ];
-  assert.throws(
-    () => validateResearchEnvelope(
+  const overloadedCoverage = validateResearchEnvelope(
       searchedEnvelope('{}', {
         includeGroundingSearches: true,
         expectedSearches: 7,
@@ -833,9 +828,9 @@ test('하위 대상은 실제 공식 URL이 있는 공식 검색에 분산되고
         officialTargetsPerSearch: 2,
         coverageTargets: latinAmerica.coverageTargets,
       },
-    ),
-    (error) => error.code === 'SEARCH_INCOMPLETE' && /허용 2개, 감지 3개/.test(error.details),
   );
+  assert.equal(overloadedCoverage.overloadedCoverageSearches.length, 1);
+  assert.deepEqual(overloadedCoverage.overloadedCoverageSearches[0].matchedTargets, ['멕시코', '브라질', '콜롬비아']);
 
   const missingOfficialUrl = searchedEnvelope('{}', {
     includeGroundingSearches: true,
@@ -1010,7 +1005,23 @@ test('검색별 provenance를 항목에 연결하고 payload 감사 정보로 �
     query: 'United States Canada official tariff notice',
     mode: 'official',
     allowedDomains: ['agency.gov'],
+    match: 'exact',
   }]);
+
+  response.categories.북미 = [item({ sourceUrl: 'https://agency.gov/notice/new-path' })];
+  const reported = parseDomainResponse(domains[0], response, context, {
+    groundingSearches: [{
+      ...groundingSearches[0],
+      urls: ['https://vertexaisearch.cloud.google.com/grounding-api-redirect/example'],
+      officialUrls: [],
+      officialRedirectUrls: ['https://vertexaisearch.cloud.google.com/grounding-api-redirect/example'],
+    }],
+    groundingUrls: [],
+    evidenceKind: 'reported',
+  });
+  assert.equal(reported.categories.북미.length, 1);
+  assert.equal(reported.categories.북미[0].sourceVerification, 'reported');
+  assert.equal(reported.categories.북미[0].sourceEvidence[0].match, 'reported-domain');
 });
 
 test('관세 단독 조사도 명백한 무역구제·수출통제 영역 위반을 제거한다', () => {
@@ -1214,7 +1225,7 @@ test('mock 수집은 Claude 호출 없이 상태를 포함한 공통 payload를 
     now,
     lookbackHours: 24,
   });
-  assert.equal(payload.version, 7);
+  assert.equal(payload.version, 8);
   assert.equal(payload.collection.mode, 'mock');
   assert.equal(payload.collection.depth, 'standard');
   assert.equal(payload.collection.completedDomains, 3);

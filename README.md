@@ -68,7 +68,7 @@ Node.js는 v20 이상이어야 합니다. 명령을 찾을 수 없으면 회사 
 
     where.exe claude
     claude --version
-    claude auth status --text
+    claude auth status
 
 로그인되지 않았고 회사 정책이 허용하면 다음 명령으로 SSO 로그인을 시작합니다.
 
@@ -102,9 +102,9 @@ Gemini CLI 0.53.0 이상이 필요합니다.
 
     Logged in using ChatGPT
 
-API key 또는 Agent Identity 로그인은 이 프로그램에서 허용하지 않습니다. 개인 키나
-개인 access token이 회사 ChatGPT 로그인을 덮어쓰는 일을 막기 위해 관련 환경변수도
-조사 자식 프로세스에서 제거합니다.
+기본값은 ChatGPT OAuth이며 API key 또는 개인 access token은 허용하지 않습니다. 회사가
+Agent Identity나 사내 OAuth 주소를 관리하는 경우에는 아래 `CODEX_CLI_AUTH_MODE=managed`
+설정을 명시적으로 켤 수 있습니다.
 
 회사에서 별도 설치·SSO 절차를 제공하면 회사 안내를 우선 따르세요.
 
@@ -139,7 +139,9 @@ API key 또는 Agent Identity 로그인은 이 프로그램에서 허용하지 �
     .\run-monitoring.cmd
 
 전체 조사는 선택한 AI CLI로 카테고리를 차례대로 조사합니다. 각 카테고리에서
-공식기관과 일반 동향을 여러 관점으로 검색하므로 시간이 오래 걸릴 수 있습니다.
+공식기관과 일반 동향을 여러 관점으로 검색하므로 시간이 오래 걸릴 수 있습니다. 전체
+표준 조사는 최소 114회(빠름 72회, 심층 146회)의 웹 검색을 수행합니다. 연결 확인은 반드시
+위 단일 카테고리부터 시작하세요.
 
 정상 완료되면 기본 브라우저가 열리고 결과는 다음 파일에 저장됩니다.
 
@@ -236,7 +238,11 @@ HTML을 저장합니다. 이 경우 종료 코드는 2이며 화면에 저장 �
 - Claude는 CLI가 반환한 구조화 검색결과 URL과 항목 URL을 연결합니다.
 - Gemini와 Codex 이벤트는 실행된 검색어는 보여 주지만 원 검색결과의 URL 목록은 모두
   제공하지 않습니다. 모델이 검색별로 보고한 URL을 형식·공식 도메인·항목 출처와
-  대조하며, HTML에는 더 낮은 증거 수준인 모델 보고 검색 URL로 표시합니다.
+  대조하며, HTML에는 더 낮은 증거 수준인 모델 보고 검색 URL로 표시합니다. Gemini의
+  공식 Grounding 리다이렉트는 허용하되 원문 직접 일치보다 낮은 근거로 경고합니다.
+- 검색 최소 횟수·공식/일반 검색 비율·신뢰 도메인은 계속 강제합니다. 일부 하위 국가가
+  검색어에서 확인되지 않으면 전체 카테고리를 폐기하지 않고 HTML에 검색 범위 경고를
+  표시합니다.
 - 프로그램은 원문 URL을 Node에서 직접 내려받거나 DNS 조회하지 않습니다.
 - 모델이 보고한 안전한 공개 HTTPS 링크만 HTML 링크로 만듭니다.
 
@@ -253,9 +259,11 @@ HTML을 저장합니다. 이 경우 종료 코드는 2이며 화면에 저장 �
   셸·hooks·앱·플러그인·MCP·브라우저·컴퓨터 사용·이미지·메모리·goal·다중 에이전트
   기능이 실제로 비활성화됐는지 확인한 뒤 실행합니다. 검토하지 않은 새 활성 기능이나
   내용이 있는 CODEX_HOME 전역 AGENTS 파일이 발견되면 외부 요청 전에 중단합니다.
-- 알려지지 않은 도구나 이벤트가 나타나면 결과를 저장하지 않고 중단합니다.
+- 알려지지 않은 도구·파일·저장·백그라운드·권한 변경 이벤트는 결과를 저장하지 않고
+  중단합니다. 새 버전의 수동 상태·시간·사용량 진단 필드는 경고로 기록하고 계속합니다.
 - Gemini와 Codex 조사 프로세스에는 흔히 쓰이는 개인 API 키 환경변수를 전달하지 않습니다.
-  Codex의 OAuth 갱신·해지·Auth API 주소를 바꾸는 환경변수도 제거합니다.
+  기본 ChatGPT 모드에서는 Codex의 OAuth 갱신·해지·Auth API 주소를 바꾸는 환경변수도
+  제거합니다. 관리형 모드는 회사 설정을 의도적으로 보존합니다.
 
 ## 선택 설정
 
@@ -270,6 +278,12 @@ HTML을 저장합니다. 이 경우 종료 코드는 2이며 화면에 저장 �
     CLAUDE_CLI_MODEL=
     GEMINI_CLI_MODEL=
     CODEX_CLI_MODEL=
+
+회사 Codex가 Agent Identity 또는 관리형 OAuth/SSO 주소를 요구할 때만 다음 설정을
+추가합니다. 이 모드는 회사가 주입한 `OPENAI_BASE_URL`, Codex Auth API, refresh/revoke
+주소를 조사 프로세스에 보존하므로 IT가 승인한 환경에서만 사용하세요.
+
+    CODEX_CLI_AUTH_MODE=managed
 
 회사 전용 CLI가 PATH에 없다면 실행 파일의 전체 경로를 설정할 수 있습니다.
 
@@ -302,7 +316,7 @@ cli\.env에는 API 키를 넣을 수 없으며, 허용되지 않은 설정은 �
 
 Claude:
 
-    claude auth status --text
+    claude auth status
     claude auth login --sso
 
 Gemini:
@@ -315,13 +329,16 @@ ChatGPT:
     codex login
     codex login status
 
-ChatGPT는 상태가 Logged in using ChatGPT가 아니면 실행하지 않습니다.
+기본 ChatGPT 모드는 상태가 `Logged in using ChatGPT`가 아니면 실행하지 않습니다. 회사
+Agent Identity라면 `.env`의 `CODEX_CLI_AUTH_MODE=managed`를 확인하세요. managed 모드도
+API key와 개인 access token은 거부합니다.
 
 ### CLI_VERSION 또는 보안 기능 고정 실패
 
 회사 소프트웨어 센터나 IT 담당자를 통해 해당 CLI를 승인된 최신 버전으로 업데이트합니다.
-특히 Codex는 검색 이외 기능을 실행 전에 끄고 그 상태를 확인할 수 있어야 합니다. 기능
-이름이 없거나 비활성화가 적용되지 않으면 안전을 위해 중단합니다.
+특히 Codex는 먼저 현재 버전의 기능 목록을 읽고, 그 버전이 실제 지원하는 검색 외 기능을
+실행 전에 끈 뒤 상태를 다시 확인합니다. 구버전에 아직 없는 기능 이름은 오류로 보지
+않지만, 새 위험 기능을 끌 수 없거나 비활성화가 적용되지 않으면 안전을 위해 중단합니다.
 
 ### SECURITY_POLICY와 Codex 전역 AGENTS
 
@@ -358,6 +375,14 @@ PowerShell에서 다음처럼 모니터링 전용 홈을 만들고 그 홈에 �
 단일 카테고리도 반복해서 시간 초과되면 사내 프록시, 보안 검사, 해당 CLI 서비스 상태와
 웹 검색 권한을 확인하세요. 단순히 제한 시간을 계속 늘리기 전에 화면의 최초 오류 코드를
 확인하는 편이 좋습니다.
+
+### PROCESS_CLEANUP 또는 taskkill 경고
+
+원래 조사 오류 뒤에 프로세스 정리 경고가 함께 표시될 수 있습니다. 화면의 첫 오류와
+`상세`에 적힌 원래 오류를 먼저 확인하세요. `PROCESS_CLEANUP`은 AI CLI 자손 프로세스의
+종료를 확인하지 못했다는 별도 안전 오류입니다. 회사 보안 정책이 `taskkill`을 막는다면
+IT에 승인된 native 실행 파일 경로 또는 프로세스 종료 정책을 문의하세요. 프로그램은
+종료 확인 없이 다음 조사나 HTML 교체를 진행하지 않습니다.
 
 ### 결과가 너무 적음
 

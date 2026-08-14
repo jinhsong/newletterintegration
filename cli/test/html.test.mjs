@@ -359,7 +359,7 @@ test('run.mjs mock 실행은 HTML 한 파일만 만든다', async () => {
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     const html = await fs.readFile(output, 'utf8');
     assert.match(html, /글로벌 통상 모니터링/);
-    assert.match(html, /AI 예비 조사 · 원문 수동 확인 필수<\/b> · v7\.0\.0/);
+    assert.match(html, /AI 예비 조사 · 원문 수동 확인 필수<\/b> · v7\.1\.0/);
     assert.deepEqual(await fs.readdir(path.dirname(output)), ['monitoring.html']);
   });
 });

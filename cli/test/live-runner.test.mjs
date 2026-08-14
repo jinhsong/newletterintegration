@@ -32,6 +32,10 @@ if (args.length === 1 && args[0] === '--version') {
   process.stdout.write('2.1.214 (Claude Code)\\n');
   process.exit(0);
 }
+if (args.length === 2 && args[0] === 'auth' && args[1] === 'status') {
+  process.stdout.write('{"authMethod":"enterprise-oauth"}\\n');
+  process.exit(0);
+}
 
 const specifications = [
   {
@@ -245,7 +249,7 @@ test('--version은 AI CLI 사전 점검 없이 앱 버전을 출력한다', () =
     windowsHide: true,
   });
   assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
-  assert.match(execution.stdout, /trade-monitor-cli 7\.0\.0/);
+  assert.match(execution.stdout, /trade-monitor-cli 7\.1\.0/);
   assert.equal(execution.stderr, '');
 });
 
@@ -381,10 +385,11 @@ test('run.mjs 라이브 경로는 사전 점검과 18개 카테고리별 6회 �
     );
 
     const invocations = await readInvocations(fake.invocationFile);
-    assert.equal(invocations.length, 19);
+    assert.equal(invocations.length, 20);
     assert.deepEqual(invocations[0].args, ['--version']);
     assert.equal(invocations[0].stdin, '');
-    const researchInvocations = invocations.slice(1);
+    assert.deepEqual(invocations[1].args, ['auth', 'status']);
+    const researchInvocations = invocations.slice(2);
     const expectedResearch = [
       {
         label: '관세',
@@ -483,10 +488,11 @@ test('run.mjs 단일 카테고리 모드는 선택 범위만 한 번 조사해 �
     assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
     assert.match(execution.stdout, /\[1\/1\] 관세 \/ 북미 조사 시작/);
     const invocations = await readInvocations(fake.invocationFile);
-    assert.equal(invocations.length, 2);
+    assert.equal(invocations.length, 3);
     assert.deepEqual(invocations[0].args, ['--version']);
-    assert.match(invocations[1].stdin, /"북미": \[/);
-    assert.doesNotMatch(invocations[1].stdin, /"중남미": \[/);
+    assert.deepEqual(invocations[1].args, ['auth', 'status']);
+    assert.match(invocations[2].stdin, /"북미": \[/);
+    assert.doesNotMatch(invocations[2].stdin, /"중남미": \[/);
 
     const html = await fs.readFile(outputFile, 'utf8');
     assert.match(html, /선택 조사 · 관세 \/ 북미/);
@@ -537,10 +543,11 @@ test('run.mjs 그룹 모드는 선택한 영역의 카테고리만 각각 조사
     assert.match(execution.stdout, /\[1\/3\] 무역구제 \/ 반덤핑 조사 시작/);
     assert.match(execution.stdout, /\[3\/3\] 무역구제 \/ 보조금\/상계관세 조사 시작/);
     const invocations = await readInvocations(fake.invocationFile);
-    assert.equal(invocations.length, 4);
+    assert.equal(invocations.length, 5);
     assert.deepEqual(invocations[0].args, ['--version']);
+    assert.deepEqual(invocations[1].args, ['auth', 'status']);
     const expectedCategories = ['반덤핑', '세이프가드', '보조금/상계관세'];
-    for (const [index, invocation] of invocations.slice(1).entries()) {
+    for (const [index, invocation] of invocations.slice(2).entries()) {
       assert.match(invocation.stdin, /\[조사 영역\] 무역구제/);
       assert.ok(invocation.stdin.includes(`"${expectedCategories[index]}": [`));
       for (const other of expectedCategories.filter((value) => value !== expectedCategories[index])) {
