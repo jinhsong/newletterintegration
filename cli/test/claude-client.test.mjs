@@ -828,13 +828,49 @@ test('공식 rate_limit_event는 엄격히 검증하고 경고와 거부를 구�
   assert.match(warningResult.warnings.join('\n'), /사용량 제한 경고/);
 
   const allowedEvents = successfulSearchEvents();
-  allowedEvents.splice(1, 0, rateEvent('allowed'));
+  allowedEvents.splice(1, 0, rateEvent('allowed', {
+    rate_limit_info: {
+      rateLimitType: 'five_hour',
+      overageStatus: 'rejected',
+      overageResetsAt: 1_800_003_600,
+      overageDisabledReason: 'org_level_disabled',
+      isUsingOverage: false,
+      overageInUse: false,
+      surpassedThreshold: 0.8,
+      canUserPurchaseCredits: false,
+      hasChargeableSavedPaymentMethod: false,
+    },
+  }));
   assert.doesNotThrow(
     () => parseClaudeStream(allowedEvents.map((event) => JSON.stringify(event)).join('\n')),
   );
 
+  const overageEvents = successfulSearchEvents();
+  overageEvents.splice(1, 0, rateEvent('allowed', {
+    rate_limit_info: {
+      rateLimitType: 'overage',
+      overageStatus: 'allowed',
+      overageResetsAt: 1_800_003_600,
+      isUsingOverage: true,
+      overageInUse: true,
+    },
+  }));
+  const overageResult = parseClaudeStream(
+    overageEvents.map((event) => JSON.stringify(event)).join('\n'),
+  );
+  assert.match(overageResult.warnings.join('\n'), /추가 사용량 사용 중/);
+
   const rejectedEvents = successfulSearchEvents();
-  rejectedEvents.splice(1, 0, rateEvent('rejected'));
+  rejectedEvents.splice(1, 0, rateEvent('rejected', {
+    rate_limit_info: {
+      rateLimitType: 'seven_day_overage_included',
+      overageStatus: 'rejected',
+      overageDisabledReason: 'out_of_credits',
+      errorCode: 'credits_required',
+      canUserPurchaseCredits: true,
+      hasChargeableSavedPaymentMethod: true,
+    },
+  }));
   assert.throws(
     () => parseClaudeStream(rejectedEvents.map((event) => JSON.stringify(event)).join('\n')),
     (error) => error.code === 'RATE_LIMIT',
@@ -843,6 +879,12 @@ test('공식 rate_limit_event는 엄격히 검증하고 경고와 거부를 구�
   for (const invalidEvent of [
     rateEvent('unknown'),
     rateEvent('allowed', { rate_limit_info: { utilization: -1 } }),
+    rateEvent('allowed', { rate_limit_info: { rateLimitType: 'monthly' } }),
+    rateEvent('allowed', { rate_limit_info: { overageStatus: 'unknown' } }),
+    rateEvent('allowed', { rate_limit_info: { overageDisabledReason: 'unexpected' } }),
+    rateEvent('allowed', { rate_limit_info: { errorCode: 'unexpected' } }),
+    rateEvent('allowed', { rate_limit_info: { isUsingOverage: 'false' } }),
+    rateEvent('allowed', { rate_limit_info: { overageResetsAt: -1 } }),
     rateEvent('allowed', { backgroundTask: true }),
   ]) {
     const events = successfulSearchEvents();

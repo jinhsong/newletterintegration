@@ -117,7 +117,44 @@ const ALLOWED_RATE_LIMIT_EVENT_FIELDS = new Set([
   'type',
   'uuid',
 ]);
-const ALLOWED_RATE_LIMIT_INFO_FIELDS = new Set(['resetsAt', 'status', 'utilization']);
+const ALLOWED_RATE_LIMIT_INFO_FIELDS = new Set([
+  'canUserPurchaseCredits',
+  'errorCode',
+  'hasChargeableSavedPaymentMethod',
+  'isUsingOverage',
+  'overageDisabledReason',
+  'overageInUse',
+  'overageResetsAt',
+  'overageStatus',
+  'rateLimitType',
+  'resetsAt',
+  'status',
+  'surpassedThreshold',
+  'utilization',
+]);
+const ALLOWED_RATE_LIMIT_TYPES = new Set([
+  'five_hour',
+  'overage',
+  'seven_day',
+  'seven_day_opus',
+  'seven_day_overage_included',
+  'seven_day_sonnet',
+]);
+const ALLOWED_OVERAGE_DISABLED_REASONS = new Set([
+  'fetch_error',
+  'group_zero_credit_limit',
+  'member_level_disabled',
+  'member_zero_credit_limit',
+  'no_limits_configured',
+  'org_level_disabled',
+  'org_level_disabled_until',
+  'org_service_level_disabled',
+  'out_of_credits',
+  'overage_not_provisioned',
+  'seat_tier_level_disabled',
+  'seat_tier_zero_credit_limit',
+  'unknown',
+]);
 const ALLOWED_ASSISTANT_CONTENT_BLOCK_TYPES = new Set([
   'redacted_thinking',
   'text',
@@ -1551,8 +1588,47 @@ function validateRateLimitEvent(event) {
       [...unknownInfoFields, String(info.status || '(상태 없음)')].join(', '),
     );
   }
-  for (const field of ['resetsAt', 'utilization']) {
+  if (info.rateLimitType !== undefined && !ALLOWED_RATE_LIMIT_TYPES.has(info.rateLimitType)) {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude CLI rate_limit_info.rateLimitType 값이 올바르지 않습니다.',
+      String(info.rateLimitType),
+    );
+  }
+  if (info.overageStatus !== undefined && !ALLOWED_RATE_LIMIT_STATUSES.has(info.overageStatus)) {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude CLI rate_limit_info.overageStatus 값이 올바르지 않습니다.',
+      String(info.overageStatus),
+    );
+  }
+  if (info.overageDisabledReason !== undefined
+    && !ALLOWED_OVERAGE_DISABLED_REASONS.has(info.overageDisabledReason)) {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude CLI rate_limit_info.overageDisabledReason 값이 올바르지 않습니다.',
+      String(info.overageDisabledReason),
+    );
+  }
+  if (info.errorCode !== undefined && info.errorCode !== 'credits_required') {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude CLI rate_limit_info.errorCode 값이 올바르지 않습니다.',
+      String(info.errorCode),
+    );
+  }
+  for (const field of ['resetsAt', 'overageResetsAt', 'surpassedThreshold', 'utilization']) {
     if (info[field] !== undefined && (!Number.isFinite(info[field]) || info[field] < 0)) {
+      throw streamError('BAD_OUTPUT', `Claude CLI rate_limit_info.${field} 형식이 올바르지 않습니다.`);
+    }
+  }
+  for (const field of [
+    'canUserPurchaseCredits',
+    'hasChargeableSavedPaymentMethod',
+    'isUsingOverage',
+    'overageInUse',
+  ]) {
+    if (info[field] !== undefined && typeof info[field] !== 'boolean') {
       throw streamError('BAD_OUTPUT', `Claude CLI rate_limit_info.${field} 형식이 올바르지 않습니다.`);
     }
   }
@@ -2053,18 +2129,33 @@ export function parseClaudeStream(output, options = {}) {
       continue;
     }
     if (event.type === 'rate_limit_event') {
-      const { status, resetsAt, utilization } = event.rate_limit_info;
+      const {
+        status,
+        resetsAt,
+        utilization,
+        rateLimitType,
+        isUsingOverage,
+        overageInUse,
+        overageResetsAt,
+      } = event.rate_limit_info;
       if (status === 'rejected') {
         throw streamError(
           'RATE_LIMIT',
           'Claude CLI 사용량 제한으로 조사가 거부되었습니다.',
-          `resetsAt=${resetsAt ?? '(없음)'}, utilization=${utilization ?? '(없음)'}`,
+          `rateLimitType=${rateLimitType ?? '(없음)'}, resetsAt=${resetsAt ?? '(없음)'}, `
+          + `utilization=${utilization ?? '(없음)'}`,
         );
       }
       if (status === 'allowed_warning') {
         warnings.push(
-          `Claude 사용량 제한 경고: resetsAt=${resetsAt ?? '(없음)'}, `
+          `Claude 사용량 제한 경고: rateLimitType=${rateLimitType ?? '(없음)'}, `
+          + `resetsAt=${resetsAt ?? '(없음)'}, `
           + `utilization=${utilization ?? '(없음)'}`,
+        );
+      }
+      if (isUsingOverage === true || overageInUse === true) {
+        warnings.push(
+          `Claude 추가 사용량 사용 중: overageResetsAt=${overageResetsAt ?? '(없음)'}`,
         );
       }
       continue;
