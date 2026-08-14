@@ -36,6 +36,7 @@ const ALLOWED_SYSTEM_EVENT_SUBTYPES = new Set([
   'compact_boundary',
   'init',
   'status',
+  'thinking_tokens',
 ]);
 const ALLOWED_COMPACT_BOUNDARY_FIELDS = new Set([
   'compact_metadata',
@@ -55,6 +56,14 @@ const ALLOWED_STATUS_EVENT_FIELDS = new Set([
   'uuid',
 ]);
 const ALLOWED_STATUS_VALUES = new Set(['compacting', null]);
+const ALLOWED_THINKING_TOKENS_EVENT_FIELDS = new Set([
+  'estimated_tokens',
+  'estimated_tokens_delta',
+  'session_id',
+  'subtype',
+  'type',
+  'uuid',
+]);
 const ALLOWED_RESULT_EVENT_SUBTYPES = new Set([
   'error_during_execution',
   'error_max_budget_usd',
@@ -1604,6 +1613,21 @@ function validateStatusEvent(event) {
   }
 }
 
+function validateThinkingTokensEvent(event) {
+  requireExactEventFields(event, ALLOWED_THINKING_TOKENS_EVENT_FIELDS, 'thinking_tokens 이벤트');
+  if (!Number.isSafeInteger(event.estimated_tokens)
+    || event.estimated_tokens < 0
+    || !Number.isSafeInteger(event.estimated_tokens_delta)
+    || event.estimated_tokens_delta < 0
+    || event.estimated_tokens_delta > event.estimated_tokens) {
+    throw streamError(
+      'BAD_OUTPUT',
+      'Claude CLI thinking_tokens 이벤트의 토큰 값이 올바르지 않습니다.',
+      `누계: ${String(event.estimated_tokens)}\n증가량: ${String(event.estimated_tokens_delta)}`,
+    );
+  }
+}
+
 function validateKnownStreamEvent(event) {
   if (!ALLOWED_STREAM_EVENT_TYPES.has(event.type)) {
     throw streamError(
@@ -1622,6 +1646,7 @@ function validateKnownStreamEvent(event) {
     }
     if (event.subtype === 'compact_boundary') validateCompactBoundaryEvent(event);
     if (event.subtype === 'status') validateStatusEvent(event);
+    if (event.subtype === 'thinking_tokens') validateThinkingTokensEvent(event);
     return;
   }
   if (event.type === 'result') {
@@ -2022,6 +2047,9 @@ export function parseClaudeStream(output, options = {}) {
           `시작: ${init.permissionMode}\n상태 이벤트: ${event.permissionMode}`,
         );
       }
+      continue;
+    }
+    if (event.type === 'system' && event.subtype === 'thinking_tokens') {
       continue;
     }
     if (event.type === 'rate_limit_event') {

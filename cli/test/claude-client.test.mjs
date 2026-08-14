@@ -579,6 +579,69 @@ test('공식 compact_boundary와 compacting status 이벤트는 읽기 전용 �
   assert.equal(parsed.toolEvidence.byName.WebSearch.success, 1);
 });
 
+test('공식 thinking_tokens 이벤트는 정확한 진행량 형식일 때만 허용한다', () => {
+  const events = successfulSearchEvents();
+  events.splice(1, 0,
+    {
+      type: 'system',
+      subtype: 'thinking_tokens',
+      estimated_tokens: 50,
+      estimated_tokens_delta: 50,
+      uuid: 'thinking-1',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'thinking_tokens',
+      estimated_tokens: 150,
+      estimated_tokens_delta: 100,
+      uuid: 'thinking-2',
+      session_id: 'session-1',
+    },
+  );
+
+  const parsed = parseClaudeStream(events.map((event) => JSON.stringify(event)).join('\n'));
+  assert.equal(parsed.response, DOMAIN_JSON);
+  assert.equal(parsed.toolEvidence.byName.WebSearch.success, 1);
+
+  const unsafeEvents = [
+    {
+      type: 'system',
+      subtype: 'thinking_tokens',
+      estimated_tokens: -1,
+      estimated_tokens_delta: 1,
+      uuid: 'thinking-1',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'thinking_tokens',
+      estimated_tokens: 50,
+      estimated_tokens_delta: 100,
+      uuid: 'thinking-1',
+      session_id: 'session-1',
+    },
+    {
+      type: 'system',
+      subtype: 'thinking_tokens',
+      estimated_tokens: 50,
+      estimated_tokens_delta: 50,
+      output_file: 'thinking.txt',
+      uuid: 'thinking-1',
+      session_id: 'session-1',
+    },
+  ];
+
+  for (const unsafeEvent of unsafeEvents) {
+    const unsafeStream = successfulSearchEvents();
+    unsafeStream.splice(1, 0, unsafeEvent);
+    assert.throws(
+      () => parseClaudeStream(unsafeStream.map((event) => JSON.stringify(event)).join('\n')),
+      (error) => ['BAD_OUTPUT', 'SECURITY_POLICY'].includes(error.code),
+    );
+  }
+});
+
 test('compact_boundary와 status 이벤트의 비공식 필드·값·권한 변경은 거부한다', () => {
   const unsafeEvents = [
     {
