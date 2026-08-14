@@ -1936,7 +1936,7 @@ function webSearchDomains(input, key) {
   return domains;
 }
 
-function webSearchRequest(block, officialDomainAllowlist = [], strictSearchPolicy = false) {
+function webSearchRequest(block, officialDomainAllowlist = []) {
   const input = block?.input;
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw streamError('BAD_OUTPUT', 'Claude WebSearch 입력 형식이 올바르지 않습니다.');
@@ -1954,13 +1954,6 @@ function webSearchRequest(block, officialDomainAllowlist = [], strictSearchPolic
       'Claude WebSearch는 allowed_domains와 blocked_domains를 함께 사용할 수 없습니다.',
     );
   }
-  if (strictSearchPolicy && blockedDomains.length > 0) {
-    throw streamError(
-      'BAD_OUTPUT',
-      '엄격 검색 모드에서는 blocked_domains WebSearch를 사용할 수 없습니다.',
-      blockedDomains.join(', '),
-    );
-  }
   const untrustedDomains = allowedDomains.filter(
     (hostname) => !isTrustedOfficialDomain(hostname, officialDomainAllowlist),
   );
@@ -1976,9 +1969,11 @@ function webSearchRequest(block, officialDomainAllowlist = [], strictSearchPolic
     normalizedQuery,
     allowedDomains,
     blockedDomains,
-    mode: allowedDomains.length > 0
-      ? 'official'
-      : (blockedDomains.length > 0 ? 'blocked' : 'broad'),
+    // blocked_domains is an official WebSearch input that only removes result
+    // sources. It cannot grant access to another tool or force a result from a
+    // particular domain, so it remains a broad search. Official evidence still
+    // requires a separate allowed_domains search from the trusted allowlist.
+    mode: allowedDomains.length > 0 ? 'official' : 'broad',
   };
 }
 
@@ -2007,6 +2002,16 @@ function inspectWebSearchResult(event, block, search) {
   const urls = collectStructuredResultUrls(value);
   if (urls.length === 0) {
     return { error: 'WebSearch 실제 검색 결과에 공개 HTTPS URL이 없습니다.', urls, officialUrls: [] };
+  }
+  const unexpectedlyIncludedUrl = urls.find((url) => (
+    isTrustedOfficialDomain(new URL(url).hostname, search.blockedDomains)
+  ));
+  if (unexpectedlyIncludedUrl) {
+    return {
+      error: `WebSearch 제외 도메인의 URL이 결과에 포함되었습니다: ${unexpectedlyIncludedUrl}`,
+      urls: [],
+      officialUrls: [],
+    };
   }
   const officialUrls = search.mode === 'official'
     ? urls.filter((url) => isTrustedOfficialDomain(new URL(url).hostname, search.allowedDomains))
@@ -2273,11 +2278,7 @@ export function parseClaudeStream(output, options = {}) {
         }
         searches.set(id, {
           status: 'pending',
-          ...webSearchRequest(
-            block,
-            officialDomainAllowlist,
-            options.requireOfficialAndBroadSearch === true,
-          ),
+          ...webSearchRequest(block, officialDomainAllowlist),
         });
       }
       continue;
@@ -2332,6 +2333,11 @@ export function parseClaudeStream(output, options = {}) {
           search.status = 'success';
           search.resultUrls = inspected.urls;
           search.officialResultUrls = inspected.officialUrls;
+          if (search.blockedDomains.length > 0) {
+            warnings.push(
+              `WebSearch 결과 제외 도메인 적용: ${search.blockedDomains.join(', ')}`,
+            );
+          }
           for (const url of inspected.urls) {
             if (!urlSet.has(url) && groundingUrls.length < MAX_GROUNDING_URLS) {
               urlSet.add(url);
@@ -2439,6 +2445,9 @@ export function parseClaudeStream(output, options = {}) {
           query: value.query,
           mode: value.mode,
           allowedDomains: value.allowedDomains,
+          ...(value.blockedDomains.length > 0
+            ? { blockedDomains: value.blockedDomains }
+            : {}),
         })),
       },
     },

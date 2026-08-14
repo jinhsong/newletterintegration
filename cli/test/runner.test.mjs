@@ -303,6 +303,7 @@ test('카테고리 프롬프트는 깊이·대상 규모에 맞춰 검색 횟수
       assert.match(prompt, new RegExp(`총 최소 ${policy.minimumSearchesPerCategory}회`));
       assert.match(prompt, new RegExp(`공식기관 원문 검색은 서로 다른 query로 최소 ${policy.minimumOfficialSearches}회`));
       assert.match(prompt, new RegExp(`일반 동향 검색은 서로 다른 query로 최소 ${policy.minimumBroadSearches}회`));
+      assert.match(prompt, /일반 동향 검색은.*allowed_domains와 blocked_domains를 모두 넣지 않는다/);
       assert.match(prompt, new RegExp(`최대 ${policy.maximumItemsPerCategory}건`));
       assert.match(prompt, /반드시 검색 query로 모두 확인할 하위 대상/);
       assert.match(prompt, /실제 공식 원문 URL/);
@@ -670,29 +671,28 @@ test('Claude 응답은 성공한 WebSearch와 정상 경고만 통과한다', ()
     (error) => error.code === 'SEARCH_INCOMPLETE' && /캐나다/.test(error.details),
   );
 
-  assert.throws(
-    () => validateResearchEnvelope(
-      searchedEnvelope('{}', {
-        queries: [
-          { query: 'official one', allowedDomains: ['agency.gov'] },
-          { query: 'official two', allowedDomains: ['agency.gov'] },
-          { query: 'official three', allowedDomains: ['agency.gov'] },
-          { query: 'broad one', allowedDomains: [], blockedDomains: ['example.com'] },
-          { query: 'broad two', allowedDomains: [] },
-          { query: 'broad three', allowedDomains: [] },
-        ],
-      }),
-      '카테고리 조사',
-      6,
-      {
-        minimumOfficialSearches: 3,
-        minimumBroadSearches: 3,
-        requireOfficialAndBroadSearch: true,
-        officialDomainAllowlist: ['agency.gov'],
-      },
-    ),
-    (error) => error.code === 'SEARCH_INCOMPLETE' && /blocked_domains/.test(error.message),
+  const filteredBroadAudit = validateResearchEnvelope(
+    searchedEnvelope('{}', {
+      queries: [
+        { query: 'official one', allowedDomains: ['agency.gov'] },
+        { query: 'official two', allowedDomains: ['agency.gov'] },
+        { query: 'official three', allowedDomains: ['agency.gov'] },
+        { query: 'broad one', allowedDomains: [], blockedDomains: ['reuters.com'] },
+        { query: 'broad two', allowedDomains: [] },
+        { query: 'broad three', allowedDomains: [] },
+      ],
+    }),
+    '카테고리 조사',
+    6,
+    {
+      minimumOfficialSearches: 3,
+      minimumBroadSearches: 3,
+      requireOfficialAndBroadSearch: true,
+      officialDomainAllowlist: ['agency.gov'],
+    },
   );
+  assert.equal(filteredBroadAudit.officialSearches, 3);
+  assert.equal(filteredBroadAudit.broadSearches, 3);
 
   assert.throws(
     () => validateResearchEnvelope(

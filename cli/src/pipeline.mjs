@@ -626,13 +626,17 @@ function normalizedEvidenceQueries(search, officialDomainAllowlist = []) {
     if (blockedDomains === null || blockedDomains.length !== (entry.blockedDomains?.length || 0)) {
       return null;
     }
+    if (blockedDomains.some((domain) => !isTrustedOfficialDomain(domain, [domain]))) return null;
     const trustedOfficial = allowedDomains.length > 0
       && allowedDomains.every(
         (hostname) => isTrustedOfficialDomain(hostname, officialDomainAllowlist),
       );
+    // blocked_domains narrows a general search but does not turn it into an
+    // official-domain search. Keep it as broad evidence while preserving the
+    // excluded-domain metadata for audit and user-visible warnings.
     const mode = trustedOfficial
       ? 'official'
-      : (allowedDomains.length > 0 ? 'untrusted' : (blockedDomains.length > 0 ? 'restricted' : 'broad'));
+      : (allowedDomains.length > 0 ? 'untrusted' : 'broad');
     return {
       query,
       normalized,
@@ -743,6 +747,16 @@ function normalizedGroundingSearches(value) {
     )) {
       throw new ClaudeCliError('BAD_OUTPUT', 'AI CLI의 공식검색 출처 증거가 허용 도메인과 일치하지 않습니다.');
     }
+    const blockedDomains = Array.isArray(entry.blockedDomains)
+      ? entry.blockedDomains.map((domain) => text(domain, 253)).filter(Boolean)
+      : [];
+    if (
+      blockedDomains.length !== (entry.blockedDomains?.length || 0)
+      || blockedDomains.some((domain) => !isTrustedOfficialDomain(domain, [domain]))
+      || urls.some((url) => isTrustedOfficialDomain(new URL(url).hostname, blockedDomains))
+    ) {
+      throw new ClaudeCliError('BAD_OUTPUT', 'AI CLI의 검색 제외 도메인 증거가 결과 URL과 일치하지 않습니다.');
+    }
     return {
       toolUseId,
       query,
@@ -750,9 +764,7 @@ function normalizedGroundingSearches(value) {
       fingerprint: searchQueryFingerprint(query),
       mode,
       allowedDomains,
-      blockedDomains: Array.isArray(entry.blockedDomains)
-        ? entry.blockedDomains.map((domain) => text(domain, 253)).filter(Boolean)
-        : [],
+      blockedDomains,
       urls,
       officialUrls,
     };
@@ -847,19 +859,11 @@ export function validateResearchEnvelope(
   const officialSearches = queries.filter((entry) => entry.mode === 'official').length;
   const broadSearches = queries.filter((entry) => entry.mode === 'broad').length;
   const untrustedSearches = queries.filter((entry) => entry.mode === 'untrusted').length;
-  const restrictedSearches = queries.filter((entry) => entry.mode === 'restricted').length;
   if (options.requireOfficialAndBroadSearch === true && untrustedSearches > 0) {
     throw new ClaudeCliError(
       'SEARCH_INCOMPLETE',
       `${label}의 공식기관 검색에 신뢰 목록 밖 도메인이 포함되었습니다.`,
       `신뢰 목록 밖 도메인 제한 검색 ${untrustedSearches}회`,
-    );
-  }
-  if (options.requireOfficialAndBroadSearch === true && restrictedSearches > 0) {
-    throw new ClaudeCliError(
-      'SEARCH_INCOMPLETE',
-      `${label}의 일반 동향 검색에 blocked_domains가 사용되었습니다.`,
-      `제한 검색 ${restrictedSearches}회는 일반 동향 검색 성공 횟수에 포함하지 않습니다.`,
     );
   }
   const minimumDistinctQueries = Math.max(
@@ -1336,7 +1340,7 @@ function correctiveAppendixFor(error) {
     BAD_OUTPUT: '모든 필수 문자열 필드와 HTTPS 원문 URL을 채우고, 웹 검색 결과에서 직접 확인하지 못한 항목은 제외한다.',
     TURN_LIMIT: '필수 검색을 먼저 완료하고 검색 도중 장황한 분석을 출력하지 않는다. 마지막 turn을 반드시 JSON 작성에 남긴다.',
     SEARCH_NOT_RUN: '답변을 작성하기 전에 반드시 지정된 횟수의 웹 검색을 실제 실행한다.',
-    SEARCH_INCOMPLETE: '공식기관 제한 검색과 제한 없는 일반 검색의 최소 횟수, 서로 다른 query, 모든 하위 대상 표기를 빠짐없이 충족한다.',
+    SEARCH_INCOMPLETE: '공식기관 제한 검색과 제한 없는 일반 검색의 최소 횟수, 서로 다른 query, 모든 하위 대상 표기를 빠짐없이 충족한다. Claude의 일반 검색에는 allowed_domains와 blocked_domains를 모두 넣지 않는다.',
     SEARCH_FAILED: '실패한 웹 검색은 다른 query로 즉시 보완하고 성공한 검색만 최소 횟수에 포함한다.',
     SEARCH_WARNING: '차단·거부·실패 경고가 남지 않도록 검색 조건을 고쳐 다시 실행한다.',
   };

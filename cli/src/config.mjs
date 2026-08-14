@@ -692,7 +692,7 @@ export function buildCategoryPrompt(domain, unit, context, options = {}) {
     ? `- 공식기관 원문 검색은 서로 다른 query로 최소 ${minimumOfficialSearches}회 실행한다. 각 공식 검색은 허용 도메인의 실제 원문 URL을 하나 이상 찾아야 한다. WebSearch의 allowed_domains에는 다음 신뢰 목록의 hostname 또는 그 하위 도메인만 1개 이상 넣는다: ${officialDomainScope}`
     : `- 공식기관 원문 검색은 서로 다른 query로 최소 ${minimumOfficialSearches}회 실행한다. ${searchToolName}의 query마다 다음 신뢰 목록 중 하나 이상의 hostname을 site:hostname 형식으로 명시하고, 목록 밖 site: 도메인은 쓰지 않는다: ${officialDomainScope}`;
   const broadSearchInstruction = provider === 'claude'
-    ? `- 일반 동향 검색은 서로 다른 query로 최소 ${minimumBroadSearches}회 실행하며 allowed_domains를 넣지 않는다. 일반 검색 1: 주요 국제·현지 언론, 일반 검색 2: 현지어 기사·통상 전문매체·산업협회, 일반 검색 3: 한국 기업·공급망·제품 영향을 각각 넓게 탐색한다.`
+    ? `- 일반 동향 검색은 서로 다른 query로 최소 ${minimumBroadSearches}회 실행하며 allowed_domains와 blocked_domains를 모두 넣지 않는다. 일반 검색 1: 주요 국제·현지 언론, 일반 검색 2: 현지어 기사·통상 전문매체·산업협회, 일반 검색 3: 한국 기업·공급망·제품 영향을 각각 넓게 탐색한다.`
     : `- 일반 동향 검색은 서로 다른 query로 최소 ${minimumBroadSearches}회 실행하며 site: 연산자를 넣지 않는다. 일반 검색 1: 주요 국제·현지 언론, 일반 검색 2: 현지어 기사·통상 전문매체·산업협회, 일반 검색 3: 한국 기업·공급망·제품 영향을 각각 넓게 탐색한다.`;
   const providerEvidenceInstructions = provider === 'claude' ? [] : [
     '- 최종 JSON 최상위에 _searchEvidence 배열을 반드시 포함한다.',

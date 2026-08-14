@@ -517,12 +517,24 @@ test('실제 결과 URL이 없거나 공식 allowed_domains와 불일치하면 �
   );
 });
 
-test('blocked_domains 검색은 broad로 세지 않고 엄격 검색에서는 즉시 거부한다', () => {
+test('blocked_domains 일반 검색은 엄격 모드에서도 broad로 세고 제외 도메인을 경고한다', () => {
   const events = [
     initEvent(),
+    assistantToolUse('official-search', 'WebSearch', {
+      query: 'official evidence query',
+      allowed_domains: ['agency.gov'],
+    }),
+    userToolResult('official-search', {
+      query: 'official evidence query',
+      structuredResult: {
+        query: 'official evidence query',
+        results: [{ title: '공식 결과', url: 'https://agency.gov/official' }],
+        searchCount: 1,
+      },
+    }),
     assistantToolUse('blocked-search', 'WebSearch', {
       query: 'filtered research query',
-      blocked_domains: ['blocked.example.com'],
+      blocked_domains: ['reuters.com', 'cnbc.com'],
     }),
     userToolResult('blocked-search', {
       query: 'filtered research query',
@@ -535,15 +547,41 @@ test('blocked_domains 검색은 broad로 세지 않고 엄격 검색에서는 �
     successResult(),
   ];
   const stream = events.map((event) => JSON.stringify(event)).join('\n');
-  const parsed = parseClaudeStream(stream);
-  assert.equal(parsed.toolEvidence.byName.WebSearch.broad, 0);
-  assert.equal(parsed.toolEvidence.byName.WebSearch.queries[0].mode, 'blocked');
+  const parsed = parseClaudeStream(stream, {
+    minimumWebSearchSuccesses: 2,
+    minimumOfficialSearches: 1,
+    minimumBroadSearches: 1,
+    requireOfficialAndBroadSearch: true,
+    officialDomainAllowlist: ['agency.gov'],
+  });
+  assert.equal(parsed.toolEvidence.totalSuccess, 2);
+  assert.equal(parsed.toolEvidence.byName.WebSearch.official, 1);
+  assert.equal(parsed.toolEvidence.byName.WebSearch.broad, 1);
+  assert.deepEqual(parsed.toolEvidence.byName.WebSearch.queries[1].blockedDomains, [
+    'reuters.com',
+    'cnbc.com',
+  ]);
+  assert.match(parsed.warnings.join('\n'), /결과 제외 도메인 적용: reuters\.com, cnbc\.com/);
+  assert.equal(parsed.groundingSearches[1].mode, 'broad');
+
+  const inconsistentEvents = structuredClone(events);
+  const inconsistentResult = inconsistentEvents.find((event) => (
+    event.type === 'user'
+    && event.message?.content?.some((block) => block.tool_use_id === 'blocked-search')
+  ));
+  inconsistentResult.tool_use_result.results[0].url = 'https://news.reuters.com/article';
   assert.throws(
-    () => parseClaudeStream(stream, {
-      requireOfficialAndBroadSearch: true,
-      officialDomainAllowlist: ['agency.gov'],
-    }),
-    (error) => error.code === 'BAD_OUTPUT' && /blocked_domains/.test(error.message),
+    () => parseClaudeStream(
+      inconsistentEvents.map((event) => JSON.stringify(event)).join('\n'),
+      {
+        minimumWebSearchSuccesses: 2,
+        minimumOfficialSearches: 1,
+        minimumBroadSearches: 1,
+        requireOfficialAndBroadSearch: true,
+        officialDomainAllowlist: ['agency.gov'],
+      },
+    ),
+    (error) => error.code === 'SEARCH_FAILED' && /제외 도메인/.test(error.details),
   );
 });
 
