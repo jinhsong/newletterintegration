@@ -2,6 +2,14 @@
 //  구글 시트: 초기화 · 저장(도메인별) · 중복 제거 · 수신자 · 로그
 // ============================================================
 
+/** Web app 실행에는 active spreadsheet가 없으므로 설정된 ID를 우선 사용. */
+function getMonitoringSpreadsheet() {
+  var id = PropertiesService.getScriptProperties().getProperty('MONITORING_SPREADSHEET_ID');
+  var ss = id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) throw new Error('MONITORING_SPREADSHEET_ID 설정이 필요합니다.');
+  return ss;
+}
+
 /**
  * 시트가 없으면 스타일이 적용된 헤더와 함께 생성, 있으면 헤더 마이그레이션만 확인.
  * initializeSheets/saveAllToSheets/logExecution 3곳에서 반복되던 생성 로직을 통합.
@@ -22,7 +30,7 @@ function getOrCreateSheet(ss, name, header, headerColor) {
 
 /** 시트 초기화 (최초 1회) — 도메인별 동향DB + 발송인 명단 + 발송로그 */
 function initializeSheets() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = getMonitoringSpreadsheet();
 
   DOMAINS.forEach(function(domain) {
     getOrCreateSheet(ss, domain.dbSheet, domain.dbHeader, '#1a2a4a');
@@ -68,7 +76,7 @@ function ensureDbHeader(sheet, header, headerColor) {
 
 /** 전 도메인 항목을 각 도메인 DB 시트에 저장 */
 function saveAllToSheets(data, now) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = getMonitoringSpreadsheet();
   var dateStr = Utilities.formatDate(now, 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss');
 
   DOMAINS.forEach(function(domain) {
@@ -100,7 +108,7 @@ function saveAllToSheets(data, now) {
 function loadRecentTitles(domain, days, beforeDate) {
   var titles = [];
   try {
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(domain.dbSheet);
+    var sheet = getMonitoringSpreadsheet().getSheetByName(domain.dbSheet);
     if (!sheet || sheet.getLastRow() < 2) return titles;
     var lastRow = sheet.getLastRow();
     var startRow = Math.max(2, lastRow - DEDUPE_HISTORY_MAX_ROWS + 1);
@@ -201,7 +209,7 @@ function getRecipients() {
   var out = [];
   var seen = {};
   try {
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RECIPIENTS);
+    var sheet = getMonitoringSpreadsheet().getSheetByName(SHEET_RECIPIENTS);
     if (!sheet || sheet.getLastRow() < 2) return out;
     var numCols = Math.min(sheet.getLastColumn(), 6);
     var rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, numCols).getValues();
@@ -234,7 +242,7 @@ function getAuthorizedEmails() {
 /** 발송 이력 기록 (도메인별 건수 열은 DOMAINS 순서를 그대로 따름 — logHeaders() 참조) */
 function logExecution(type, sentCount, stats, note) {
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var ss = getMonitoringSpreadsheet();
     var sheet = getOrCreateSheet(ss, SHEET_LOG, logHeaders(), '#37474f');
     var row = [Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm:ss'), type, sentCount]
       .concat(DOMAINS.map(function(d) { return stats.byDomain[d.key].total; }))
