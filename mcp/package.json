@@ -1,0 +1,17 @@
+{
+  "name": "trade-monitor-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.js ../tests/*.test.cjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.0",
+    "express": "^5.1.0",
+    "jose": "^6.1.0",
+    "zod": "^3.25.76"
+  }
+}

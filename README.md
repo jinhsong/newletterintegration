@@ -66,3 +66,17 @@ Google Apps Script 모니터링 시스템을, **하나의 파이프라인으로 
 - `checkEmailRequests()` — 요청 폴링 핸들러
 - `initializeSheets()` / `setupTriggers()` / `verifyModel()` — 초기 설정
 - `setObsidianFolderId(urlOrId)` / `showObsidianFolderId()` — 옵시디안 폴더 지정
+
+## ChatGPT Work / MCP 연동
+
+Work에서 마지막 브리핑 조회, 새 수집 접수, 작업 결과 조회를 할 수 있도록 확장했습니다.
+메일 발송은 별도 도구이며 기본 비활성입니다.
+
+- `10_WorkApi.gs`: 인증된 JSON API, 1분 작업 트리거, Work 전용 결과 저장, 중복 요청 방지
+- `07_Sheets.gs`: 웹 앱 실행에 필요한 스프레드시트 ID 접근 지원
+- `mcp/`: Node.js MCP 서버(stdio / OAuth로 보호되는 Streamable HTTP)
+- `tests/`, `mcp/test/`: Apps Script 서비스 모의 테스트 및 MCP 프로토콜 테스트
+- **[설치·연결·운영 안내](docs/WORK_SETUP.md)**
+
+기존 프로젝트에 `10_WorkApi.gs`를 추가하고 `07_Sheets.gs`를 갱신한 뒤 안내에 따라
+설치합니다. 코드 반영만으로 Google 배포나 Work 연결이 활성화되지는 않습니다.
