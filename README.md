@@ -31,7 +31,7 @@ API 키 발급이나 `--console` 로그인은 이 도구의 준비 절차에 포
 이번 브랜치를 받습니다.
 
 ```powershell
-git clone --branch codex/sfu5of-claude-local-html https://github.com/jinhsong/newletterintegration.git newletterintegration-company
+git clone https://github.com/jinhsong/newletterintegration.git newletterintegration-company
 cd .\newletterintegration-company
 ```
 
