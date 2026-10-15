@@ -1,0 +1,15 @@
+{
+  "name": "trade-monitor-cli",
+  "version": "7.2.0",
+  "private": true,
+  "type": "module",
+  "description": "sfu5of 기준 회사 Claude CLI·PC HTML 통상 모니터링",
+  "scripts": {
+    "monitor": "node company.mjs --open",
+    "test": "node --test-reporter=dot test/claude-client.test.mjs && node --test-reporter=dot test/provider-clients.test.mjs && node --test-reporter=dot test/html.test.mjs && node --test-reporter=dot test/live-runner.test.mjs && node --test-reporter=dot test/runner.test.mjs && node --test-reporter=dot test/runtime-support.test.mjs && node --test-reporter=dot test/company.test.mjs",
+    "check": "node --check company.mjs && node --check run.mjs && node --check src/gemini-client.mjs && node --check src/codex-client.mjs && node --check src/interactive-options.mjs && npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
