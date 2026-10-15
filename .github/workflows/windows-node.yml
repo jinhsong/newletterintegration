@@ -1,0 +1,90 @@
+name: Windows Node 검증
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} / Windows
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+
+    steps:
+      - name: 저장소 받기
+        uses: actions/checkout@v4
+
+      - name: Node.js ${{ matrix.node }} 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 구문 확인
+        shell: pwsh
+        run: |
+          node --check .\cli\run.mjs
+          node --check .\cli\company.mjs
+          node --check .\cli\src\gemini-client.mjs
+          node --check .\cli\src\codex-client.mjs
+          node --check .\cli\src\interactive-options.mjs
+
+      # Run each test file directly. The outer `node --test` worker/IPC layer can
+      # hang or corrupt serialized events around Windows child-process tests.
+      - name: Claude CLI 경계 테스트
+        shell: pwsh
+        timeout-minutes: 3
+        run: node --test-reporter=dot .\cli\test\claude-client.test.mjs
+
+      - name: Gemini·ChatGPT CLI 및 대화형 입력 테스트
+        shell: pwsh
+        timeout-minutes: 3
+        run: node --test-reporter=dot .\cli\test\provider-clients.test.mjs
+
+      - name: HTML 렌더링 테스트
+        shell: pwsh
+        timeout-minutes: 3
+        run: node --test-reporter=dot .\cli\test\html.test.mjs
+
+      - name: Windows 실행기 통합 테스트
+        shell: pwsh
+        timeout-minutes: 3
+        run: node --test-reporter=dot .\cli\test\live-runner.test.mjs
+
+      - name: 모니터링 파이프라인 테스트
+        shell: pwsh
+        timeout-minutes: 3
+        run: node --test-reporter=dot .\cli\test\runner.test.mjs
+
+      - name: 잠금과 저장 복구 테스트
+        shell: pwsh
+        timeout-minutes: 3
+        run: node --test-reporter=dot .\cli\test\runtime-support.test.mjs
+
+      - name: 회사 Claude·기존 17개 분류 테스트
+        shell: pwsh
+        timeout-minutes: 3
+        run: node --test-reporter=dot .\cli\test\company.test.mjs
+
+      - name: 목 데이터 HTML 실행 확인
+        shell: pwsh
+        run: |
+          $mockOutput = Join-Path $env:RUNNER_TEMP "mock-monitoring-node-${{ matrix.node }}.html"
+          .\run-monitoring.cmd --mock .\cli\test\fixtures\company-responses.json --out $mockOutput --no-open
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows 실행 래퍼가 종료 코드 $LASTEXITCODE 을 반환했습니다."
+          }
+          if (-not (Test-Path -LiteralPath $mockOutput -PathType Leaf)) {
+            throw "목 HTML 파일이 생성되지 않았습니다: $mockOutput"
+          }
+          $html = Get-Content -Raw -Encoding UTF8 -LiteralPath $mockOutput
+          if ($html -notmatch 'MOCK · 테스트 전용' -or $html -notmatch '<!DOCTYPE html>') {
+            throw "생성된 파일이 테스트 전용 HTML로 표시되지 않았습니다."
+          }
